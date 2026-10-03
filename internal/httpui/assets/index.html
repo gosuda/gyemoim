@@ -120,10 +120,29 @@
             <div class="field"><label for="model-name">Model name</label><input id="model-name" name="name" type="text" maxlength="128" autocomplete="off" required placeholder="e.g. coding"></div>
             <div class="field"><label for="model-provider">Provider</label><select id="model-provider" name="providerId" required><option value="">Choose a provider</option></select></div>
             <div class="field"><label for="model-upstream">Upstream model</label><div class="model-catalog-controls"><input id="model-upstream" name="upstreamModel" type="text" maxlength="256" autocomplete="off" list="provider-model-catalog" required placeholder="Enter or choose a model ID"><button class="button quiet small" id="model-catalog-load" type="button">Load models</button></div><datalist id="provider-model-catalog"></datalist><span class="field-hint">Choose an account model or enter its ID. Model details are not inferred.</span><p class="form-message" id="model-catalog-message" aria-live="polite"></p></div>
+            <details class="metadata-editor full-width" id="model-metadata-editor">
+              <summary>Optional Pi model metadata</summary>
+              <p class="field-hint">Enter only model details you can verify from an exact source. Partial metadata is saved, but Pi setup will explain what is still missing.</p>
+              <div class="metadata-grid">
+                <div class="field"><label for="model-context-window">Context window (tokens)</label><input id="model-context-window" type="number" min="1" step="1" inputmode="numeric" placeholder="Exact token count"></div>
+                <div class="field"><label for="model-max-tokens">Maximum output tokens</label><input id="model-max-tokens" type="number" min="1" step="1" inputmode="numeric" placeholder="Exact token count"></div>
+                <div class="field"><label for="model-reasoning">Reasoning model</label><select id="model-reasoning"><option value="">Not specified</option><option value="true">Yes</option><option value="false">No</option></select></div>
+                <fieldset class="metadata-choice-group"><legend>Input modalities</legend><label><input id="model-input-text" type="checkbox"> text</label><label><input id="model-input-image" type="checkbox"> image</label></fieldset>
+                <fieldset class="metadata-choice-group effort-group"><legend>Supported reasoning efforts</legend>
+                  <label><input name="model-effort" value="none" type="checkbox"> none</label>
+                  <label><input name="model-effort" value="minimal" type="checkbox"> minimal</label>
+                  <label><input name="model-effort" value="low" type="checkbox"> low</label>
+                  <label><input name="model-effort" value="medium" type="checkbox"> medium</label>
+                  <label><input name="model-effort" value="high" type="checkbox"> high</label>
+                  <label><input name="model-effort" value="xhigh" type="checkbox"> xhigh</label>
+                  <label><input name="model-effort" value="max" type="checkbox"> max</label>
+                </fieldset>
+              </div>
+            </details>
             <div class="form-actions"><button class="button primary" id="model-submit" type="submit">Add Model</button><button class="button quiet" id="model-cancel" type="button" hidden>Cancel edit</button></div>
             <p class="form-message full-width" id="model-form-message" aria-live="polite"></p>
           </form>
-          <p class="metadata-note" id="model-metadata-note" hidden>Advanced metadata is retained when you save this Model.</p>
+          <p class="metadata-note" id="model-metadata-note" hidden>Other saved metadata is preserved when you edit these Pi fields.</p>
         </section>
         <section class="panel list-panel models-list-panel" aria-labelledby="model-list-heading">
           <div class="panel-heading"><div><h3 id="model-list-heading">Configured Models</h3><p class="muted">Each Model uses one fixed provider and upstream target.</p></div><button class="button quiet small" type="button" data-refresh="models">Refresh</button></div>

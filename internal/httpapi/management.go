@@ -29,12 +29,13 @@ type managementAPI struct {
 	gateway  *gateway.Service
 	fallback http.Handler
 	oauth    *siwc.Manager
+	port     int
 }
 
 // NewManagement creates the management API handler. Paths outside the JSON API
 // routes fall through to the embedded UI, which also owns /api/status.
-func NewManagement(store *config.Store, fallback http.Handler, oauthManager *siwc.Manager) http.Handler {
-	return &managementAPI{store: store, gateway: gateway.New(store), fallback: fallback, oauth: oauthManager}
+func NewManagement(store *config.Store, fallback http.Handler, oauthManager *siwc.Manager, port int) http.Handler {
+	return &managementAPI{store: store, gateway: gateway.New(store), fallback: fallback, oauth: oauthManager, port: port}
 }
 
 func (api *managementAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -64,6 +65,8 @@ func (api *managementAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		api.revokeServiceAccountKey(w, r, parts[1], parts[3])
 	case len(parts) == 3 && parts[0] == "service-accounts" && parts[2] == "grants":
 		api.serviceAccountGrants(w, r, parts[1])
+	case len(parts) == 3 && parts[0] == "service-accounts" && parts[2] == "pi-config":
+		api.piAccountConfig(w, r, parts[1])
 	case len(parts) == 1 && parts[0] == "models":
 		api.models(w, r)
 	case len(parts) == 2 && parts[0] == "models":
@@ -537,12 +540,9 @@ func decodeModelInput(w http.ResponseWriter, r *http.Request) (modelInput, bool)
 		writeManagementError(w, http.StatusBadRequest, "providerId and upstreamModel are required", "invalid_request")
 		return modelInput{}, false
 	}
-	if len(input.Metadata) != 0 {
-		var metadata map[string]json.RawMessage
-		if err := json.Unmarshal(input.Metadata, &metadata); err != nil || metadata == nil {
-			writeManagementError(w, http.StatusBadRequest, "metadata must be a JSON object", "invalid_request")
-			return modelInput{}, false
-		}
+	if message := validatePiMetadata(input.Metadata); message != "" {
+		writeManagementError(w, http.StatusBadRequest, message, "invalid_request")
+		return modelInput{}, false
 	}
 	return input, true
 }

@@ -497,6 +497,78 @@
       grantsSection.append(grantForm);
     }
     panel.append(grantsSection);
+    panel.append(renderPiSetupSection(account));
+  }
+
+  function renderPiSetupSection(account) {
+    const section = element("section", "detail-section");
+    const heading = element("div", "detail-heading");
+    const headingCopy = element("div");
+    headingCopy.append(element("h5", "", "Pi agent setup"));
+    headingCopy.append(element("p", "muted", "Export the current grants for pi agent 1.0.0."));
+    const content = element("div", "pi-setup-block");
+    const loadButton = button("Check Pi setup", "quiet small", async () => {
+      loadButton.disabled = true;
+      content.replaceChildren(element("p", "muted", "Checking current account grants and Model metadata…"));
+      try {
+        const result = await api(`/api/service-accounts/${encodeURIComponent(account.id)}/pi-config`);
+        renderPiSetupResult(account, content, result);
+      } catch (error) {
+        content.replaceChildren(element("p", "inline-error", `Could not prepare Pi setup: ${error.message}`));
+      } finally {
+        loadButton.disabled = false;
+      }
+    });
+    heading.append(headingCopy, loadButton);
+    content.append(element("p", "muted", "Check setup to see which currently granted Models have complete Pi metadata."));
+    section.append(heading, content);
+    return section;
+  }
+
+  function renderPiSetupResult(account, content, result) {
+    content.replaceChildren();
+    if (!result.models.length) {
+      content.append(element("p", "empty-inline", "This account currently has no Model grants."));
+    } else {
+      content.append(element("p", "muted", `${result.models.length} currently granted Model${result.models.length === 1 ? "" : "s"}; incomplete grants are shown below. Check again after changing grants or metadata.`));
+      for (const model of result.models) {
+        const row = element("div", "pi-model-readiness");
+        row.append(element("strong", model.ready ? "pi-model-ready" : "pi-model-incomplete", `${model.name} · ${model.ready ? "ready" : "incomplete"}`));
+        if (!model.ready) row.append(element("p", "muted", model.reasons.join(" · ")));
+        content.append(row);
+      }
+    }
+
+    if (!result.configuration) {
+      content.append(element("p", "inline-error", result.configurationUnavailableReason || "No Pi configuration is available yet."));
+      return;
+    }
+
+    const environmentName = result.apiKeyEnvironmentVariable;
+    content.append(element("p", "muted", "Pi will read its API key from this environment variable. Issue a Gyemoim key above if needed, copy it when it is shown once, and set the variable in the environment used to launch pi:"));
+    content.append(element("code", "pi-env-command", `export ${environmentName}='paste-the-one-time-issued-Gyemoim-key-here'`));
+    content.append(element("p", "muted", "Download or copy this fragment, then merge its provider entry into the providers object in ~/.pi/agent/models.json. Preserve existing providers and other settings. Gyemoim does not write that file automatically. Check setup again after changing grants or metadata."));
+    const fragment = `${JSON.stringify(result.configuration, null, 2)}\n`;
+    const actions = element("div", "card-actions");
+    const copyMessage = element("span", "muted", "");
+    actions.append(button("Copy config fragment", "quiet small", async () => {
+      try {
+        await navigator.clipboard.writeText(fragment);
+        copyMessage.textContent = "Config fragment copied.";
+      } catch {
+        copyMessage.textContent = "Clipboard access is unavailable. Select and copy the fragment below.";
+      }
+    }));
+    actions.append(button("Download config fragment", "primary small", () => {
+      const blob = new Blob([fragment], { type: "application/json" });
+      const objectURL = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = objectURL;
+      link.download = `pi-models-${account.id}.json`;
+      link.click();
+      window.setTimeout(() => URL.revokeObjectURL(objectURL), 0);
+    }));
+    content.append(actions, copyMessage, element("pre", "pi-config-fragment", fragment));
   }
 
   function showKeyOnce(panel, plaintext) {
@@ -654,11 +726,53 @@
     return card;
   }
 
+  function fillModelMetadataEditor(metadata) {
+    const source = metadata && typeof metadata === "object" && !Array.isArray(metadata) ? metadata : {};
+    byId("model-context-window").value = source.contextWindow ?? "";
+    byId("model-max-tokens").value = source.maxTokens ?? "";
+    byId("model-reasoning").value = typeof source.reasoning === "boolean" ? String(source.reasoning) : "";
+    const modalities = Array.isArray(source.input) ? source.input : [];
+    byId("model-input-text").checked = modalities.includes("text");
+    byId("model-input-image").checked = modalities.includes("image");
+    const efforts = Array.isArray(source.supportedReasoningEfforts) ? source.supportedReasoningEfforts : [];
+    document.querySelectorAll('input[name="model-effort"]').forEach((input) => {
+      input.checked = efforts.includes(input.value);
+    });
+    const hasKnownMetadata = ["contextWindow", "maxTokens", "reasoning", "input", "supportedReasoningEfforts"].some((key) => Object.hasOwn(source, key));
+    byId("model-metadata-editor").open = hasKnownMetadata;
+  }
+
+  function readModelMetadata(editing) {
+    const knownFields = ["contextWindow", "maxTokens", "input", "reasoning", "supportedReasoningEfforts"];
+    const metadata = editing?.metadata && typeof editing.metadata === "object" && !Array.isArray(editing.metadata)
+      ? { ...editing.metadata }
+      : {};
+    for (const field of knownFields) delete metadata[field];
+
+    for (const [key, id] of [["contextWindow", "model-context-window"], ["maxTokens", "model-max-tokens"]]) {
+      const raw = byId(id).value.trim();
+      if (!raw) continue;
+      const value = Number(raw);
+      if (!Number.isSafeInteger(value) || value <= 0) throw new Error(`${key} must be a positive whole number.`);
+      metadata[key] = value;
+    }
+    const input = [];
+    if (byId("model-input-text").checked) input.push("text");
+    if (byId("model-input-image").checked) input.push("image");
+    if (input.length) metadata.input = input;
+    const reasoning = byId("model-reasoning").value;
+    if (reasoning) metadata.reasoning = reasoning === "true";
+    const efforts = [...document.querySelectorAll('input[name="model-effort"]:checked')].map((input) => input.value);
+    if (efforts.length) metadata.supportedReasoningEfforts = efforts;
+    return Object.keys(metadata).length ? metadata : undefined;
+  }
+
   function beginModelEdit(model) {
     state.editingModel = model;
     byId("model-name").value = model.name;
     byId("model-provider").value = model.providerId || "";
     byId("model-upstream").value = model.upstreamModel || "";
+    fillModelMetadataEditor(model.metadata);
     resetProviderModelCatalog();
     byId("model-form-heading").textContent = `Edit ${model.name}`;
     byId("model-submit").textContent = "Save changes";
@@ -672,6 +786,7 @@
   function cancelModelEdit() {
     state.editingModel = null;
     byId("model-form").reset();
+    byId("model-metadata-editor").open = false;
     byId("model-form-heading").textContent = "Add a Model";
     byId("model-submit").textContent = "Add Model";
     byId("model-cancel").hidden = true;
@@ -691,8 +806,13 @@
       providerId: byId("model-provider").value,
       upstreamModel: byId("model-upstream").value,
     };
-    // The API replaces all Model fields on update. Keep metadata intact until its editor is added.
-    if (editing?.metadata !== undefined) payload.metadata = editing.metadata;
+    try {
+      const metadata = readModelMetadata(editing);
+      if (metadata !== undefined) payload.metadata = metadata;
+    } catch (error) {
+      showMessage(message, error.message, "error");
+      return;
+    }
     submit.disabled = true;
     showMessage(message);
     try {

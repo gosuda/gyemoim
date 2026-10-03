@@ -1,6 +1,6 @@
 # Gyemoim Implementation Plan
 
-This plan tracks implementation in small, reviewable tasks. T01 through T11 are complete. T12 through T17 are pending.
+This plan tracks implementation in small, reviewable tasks. T01 through T12 are complete. T13 through T17 are pending and will resume in a new session; see [next-session.md](next-session.md).
 
 ## Tasks
 
@@ -17,7 +17,7 @@ This plan tracks implementation in small, reviewable tasks. T01 through T11 are 
 | T09 | OpenAI Responses provider contract and capability validation | Complete |
 | T10 | Streaming gateway, cancellation, request IDs, and timing | Complete |
 | T11 | Non-streaming responses, errors, and resource limits | Complete |
-| T12 | pi agent 1.0.0 model metadata and connection configuration | Pending |
+| T12 | pi agent 1.0.0 model metadata and connection configuration | Complete |
 | T13 | History query and usage aggregation | Pending |
 | T14 | Request investigation UI and timing details | Pending |
 | T15 | External zstd compression and storage visibility | Pending |
@@ -135,3 +135,14 @@ This plan tracks implementation in small, reviewable tasks. T01 through T11 are 
 - Added safe status-specific upstream error mapping and validated Retry-After forwarding. Provider authorization errors are distinct from local-key errors. Both delivery modes reject mismatched terminal events and record cancellation when downstream delivery fails.
 - The implementation agent stopped after source changes because of a usage limit. Parent completed small review fixes and documentation; no automated tests were added or run.
 - CGO-disabled builds passed for Linux/macOS amd64/arm64. Manual local API inspection confirmed both delivery preferences reach Provider authentication and history remains ready after restart. Live authenticated nonstreaming and upstream error mapping remain unverified.
+
+
+### T12
+
+- Added optional Model metadata fields for exact context window, maximum output tokens, input modalities, reasoning status, and supported reasoning efforts. Basic Models remain valid without metadata. Supplied advanced fields are validated with clear 400 errors; unknown metadata is preserved through UI edits.
+- Added per-ServiceAccount `GET /api/service-accounts/{id}/pi-config`, which re-reads the current account and grants, lists every granted Model with readiness reasons, and only emits a configuration when the account is enabled and at least one granted reasoning Model has complete metadata. The generated provider uses a stable account-derived provider ID, the active loopback listener URL, `openai-responses`, an environment-variable reference, and only ready current grants.
+- Added account UI controls to inspect readiness, copy or download the `models.json` fragment, and follow manual environment-variable and merge instructions. The app does not write `~/.pi/agent/models.json` or retrieve stored plaintext keys. Added the exact workflow and Pi 1.0.0 schema notes in [pi.md](pi.md), including the live Pi verification limitation.
+- No automated tests were added or run. `go build ./...` and `node --check internal/httpui/assets/site.js` passed.
+
+- Parent reviewed every change and corrected provider-object shape, Model alias IDs, and explicit null validation. CGO-disabled Linux/macOS amd64/arm64 builds and JavaScript syntax checks passed. Manual API checks passed for readiness, mapped efforts, compatibility flags, disabled accounts and removed grants. Browser checks passed for setup controls and metadata edit/preservation. No automated tests were added or run; authenticated live pi inference remains unverified.
+- Additional agent creation and research-agent resumption were rejected with `agent thread limit reached`. The user chose to resume T13–T17 in a new session with the same Luna XHigh workflow. [next-session.md](next-session.md) preserves the task boundaries, decisions, and review constraints.

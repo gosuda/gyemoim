@@ -112,7 +112,7 @@ func run(args []string) error {
 	mux := http.NewServeMux()
 	// Browser-origin protections cover the UI and management JSON API. Bearer-authenticated
 	// harness routes share only the loopback Host guard applied by the server.
-	mux.Handle("/api/", guard.Management(httpapi.NewManagement(store, uiHandler, oauthManager)))
+	mux.Handle("/api/", guard.Management(httpapi.NewManagement(store, uiHandler, oauthManager, *port)))
 	mux.Handle("GET /auth/callback", guard.Callback(http.HandlerFunc(oauthManager.ServeCallback)))
 	mux.Handle("/v1/", httpapi.NewHarness(gateway.New(store), historyRecorder, oauthManager, responsesAdapter))
 	mux.Handle("/", guard.Management(uiHandler))
