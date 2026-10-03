@@ -1,6 +1,6 @@
 # Gyemoim: Local LLM Gateway
 
-Status: Initial design agreed during planning. Implementation has not started.
+Status: Initial design with confirmed product decisions. Implementation has not started.
 
 ## Purpose
 
@@ -21,8 +21,14 @@ The service has four primary goals:
 - Listen on `127.0.0.1:9092` by default; support `--port` to change the port.
 - Implement OpenAI OAuth first, using Sign in with ChatGPT for eligible Responses API requests.
 - Expose the OpenAI Responses API format to harnesses.
+- Make pi agent the first supported harness. Implement the provider-supported Responses API contract rather than a pi-specific subset; Codex support is not a first-version requirement.
 - Issue a separate local API key for each harness. Provider authentication remains centralized.
+- Aggregate statistics by the gateway-issued harness identity and the provider account used for each request.
 - Record prompts, responses, tool definitions, and tool results by default, excluding authentication credentials.
+- Preserve all request content without per-harness recording exclusions or automatic body masking.
+- Block new inference requests when request recording is unavailable; do not offer an unlogged bypass.
+- Allow immediate access to the local WebUI without an administrator login or initial approval flow.
+- Apply account disconnection and harness key revocation to new requests without explicitly interrupting requests already in progress.
 - Store configuration and credentials in SQLite; store request history in NDJSON files.
 - Rotate logs and compress closed files by spawning the external `zstd` executable.
 - Retain request history indefinitely by default. Provide storage visibility and manual deletion through the WebUI.
@@ -52,13 +58,13 @@ Provider-specific authentication, request constraints, and model catalog convers
 
 | Page | Feature | Behavior |
 | --- | --- | --- |
-| Overview | Usage dashboard | Filter by time, harness, account, and model; show request counts and input, output, cached, and reasoning tokens. |
+| Overview | Usage dashboard | Attribute requests to gateway-issued harness identities and the provider accounts actually used; filter by time and model; show request counts and input, output, cached, and reasoning tokens. |
 | Overview | Performance and error summary | Show first-response latency, total duration, failure and cancellation rates, and slow requests. |
 | Providers | OpenAI OAuth connections | Sign in, add accounts, inspect connection status, reauthenticate, and disconnect. |
 | Providers | Token lifecycle | Refresh automatically, serialize refreshes per session, and atomically persist replacement credentials. |
 | Providers | Models and permissions | Show account-specific models and ChatGPT plan authorization; link to provider usage management. |
 | Harnesses | Harness registration | Assign a name, issue or revoke a local key, and select a provider account. |
-| Harnesses | Connection instructions | Provide Base URL and local key setup examples, starting with Codex over HTTP Responses. |
+| Harnesses | Connection instructions | Provide Base URL and local key setup examples for pi agent over HTTP Responses. |
 | Requests | Request browser | Filter by time, harness, account, model, and status; display requests in progress. |
 | Requests | Request details | Inspect the incoming request, effective upstream request, response events, tool calls, errors, and usage. |
 | Requests | Timing timeline | Show authentication preparation, connection, transmission, first event, first output, stream termination, and downstream delivery. |
@@ -79,16 +85,15 @@ The gateway identifies each harness using its local bearer key and selects the p
 
 Local keys are stored as hashes in SQLite. Keys can be issued and revoked from the WebUI.
 
+pi agent is the first integration target. Preserve Responses API behavior across supported clients rather than introducing pi-specific request semantics. OpenAI OAuth capability restrictions still apply and must produce clear errors. The pi version, configuration, and integration acceptance cases will be established during implementation.
+
+When admitting a request, retain its harness identity and selected provider account for attribution and routing. Subsequent routing changes, key revocation, or account disconnection affect new requests. The gateway does not explicitly cancel admitted requests in response to these administrative actions.
+
 The model endpoint converts the account-specific provider catalog into the standard OpenAI model-list response expected by clients.
 
 Every inference request receives a gateway request ID, returned through `X-Request-ID`. Provider request IDs are recorded separately.
 
-Harnesses may optionally supply:
-
-- `X-Gyemoim-Session-ID` to associate requests with a session.
-- `X-Gyemoim-Project` to associate requests with a project.
-
-Without these values, attribution and aggregation remain available at the harness level. The gateway does not treat a harness identity as proof that requests belong to one conversation.
+First-version statistics are grouped by gateway-issued harness identity and provider account. Session and project attribution are deferred to later extensions. The gateway does not treat a harness identity as proof that requests belong to one conversation.
 
 ## OpenAI OAuth and Request Handling
 
@@ -106,7 +111,7 @@ Credential renewal and disconnection behavior follow [Accounts and sessions](htt
 
 Inference uses the public OpenAI Responses endpoint. Upstream HTTP requests use `stream:true` and `store:false`. For a nonstreaming client request, the gateway collects the completed upstream SSE response and returns JSON. For a streaming request, it forwards SSE to the client.
 
-The provider layer validates capabilities and records request normalization. Unsupported fields, tools, or conversation-state requests return explicit errors. HTTP requests must include the necessary conversation history rather than depending on persistent upstream response state.
+The provider layer validates capabilities and records request normalization. Apart from the explicitly documented streaming and storage adaptations, unsupported fields, tools, or conversation-state requests return clear errors rather than being silently removed or changed. The first version does not provide a selectable compatibility mode. HTTP requests must include the necessary conversation history rather than depending on persistent upstream response state.
 
 Propagate client cancellation upstream. Distinguish successful completion, failure, incomplete output, and interrupted streams. The first version does not automatically retry inference requests.
 
@@ -124,7 +129,7 @@ Preserve the incoming request and the effective upstream request so that gateway
 
 Record the stages observable at the gateway, including authentication preparation, connection establishment, request transmission, first upstream event, first output, stream completion, and downstream delivery.
 
-These measurements help locate delays but do not independently prove a provider or harness bug. Time spent executing local tools or preparing the next harness request requires harness-side records or additional instrumentation. Session and project identifiers make correlation easier when supplied.
+These measurements help locate delays but do not independently prove a provider or harness bug. Time spent executing local tools or preparing the next harness request requires harness-side records or additional instrumentation. First-version attribution is limited to the gateway-issued harness identity and provider account; deeper session correlation is a later extension.
 
 ### Cache Analysis
 
@@ -144,7 +149,7 @@ The first version provides history browsing, basic aggregation, request comparis
 
 Store provider accounts, credentials, issued client IDs, the host ID, harness registrations, local key hashes, routing assignments, and storage settings in SQLite.
 
-Create the application data directory automatically. Apply owner-only directory and file permissions. Protect WebUI mutations with Origin and CSRF validation.
+Create the application data directory automatically. Apply owner-only directory and file permissions. The loopback WebUI opens directly without an administrator login, password, or initial approval step. Protect WebUI mutations with Origin and CSRF validation; these protections must not introduce an administrator sign-in flow.
 
 Request bodies and usage history are stored in log files rather than SQLite. In-memory aggregates are disposable and can be rebuilt from the logs.
 
@@ -152,9 +157,11 @@ Request bodies and usage history are stored in log files rather than SQLite. In-
 
 Record request-start, upstream-transmission, response-event, and request-end records correlated by gateway request ID. Include schema versions and timestamps.
 
-Record prompts, responses, tool definitions, and tool results. Exclude authorization headers, local keys, OAuth credentials, and authentication URLs containing token hints.
+Record all prompts, responses, tool definitions, and tool results without per-harness exclusions or automatic content masking. Exclude gateway-managed authentication fields, including authorization headers, local keys, OAuth credentials, and authentication URLs containing token hints. Arbitrary content supplied inside prompts or tool results is preserved, so credential exclusion is not a guarantee that bodies contain no user-supplied secrets.
 
 Keep partial request history when a stream fails or is interrupted. A completed HTTP connection alone does not establish successful inference.
+
+If request recording becomes unavailable, including because the disk is full, reject new inference requests with an explicit `503` recording-unavailable error before calling the provider. There is no mode that bypasses recording. Keep the WebUI available to inspect and resolve the storage problem. Requests already in progress are not explicitly interrupted by this admission policy; any recording loss affecting them must be reported.
 
 ### Rotation and Compression
 
@@ -181,12 +188,18 @@ Keep partial request history when a stream fails or is interrupted. A completed 
 
 - On a fresh Linux or macOS installation, the executable starts and serves the WebUI without configuration beyond an optional port.
 - Two harnesses using different local keys can share one provider connection while their requests and usage remain independently attributable.
+- pi agent can connect using the documented Responses configuration, and supported Responses behavior is preserved without pi-specific API semantics.
+- Unsupported request capabilities produce clear errors instead of silent compatibility transformations.
+- Statistics preserve the gateway-issued harness identity and provider account used when each request was admitted.
 - Restart, concurrent refresh, missing authorization scopes, and reauthentication do not mix credential sets or account registrations.
 - Tool calls, normal completion, stream errors, incomplete responses, cancellation, and disconnection are reflected consistently in client behavior and logs.
 - Request comparison exposes changes to instructions, tools, and messages and preserves unknown usage or timing information.
 - Restart, rotation, and compression failure leave existing history readable.
 - Missing `zstd` does not prevent startup or NDJSON recording.
-- Authentication credentials do not appear in request logs or exports.
+- When recording is unavailable, new inference requests are rejected before provider invocation and the management UI remains accessible.
+- The local WebUI is immediately accessible without an administrator login or initial approval.
+- Key revocation and account disconnection prevent new requests without gateway-initiated cancellation of admitted requests.
+- Gateway-managed authentication fields do not appear in request logs or exports; arbitrary prompt and tool content remains intact.
 
 ## Later Extensions
 
@@ -195,6 +208,6 @@ Extend in this order:
 1. OpenAI API key authentication.
 2. Claude and z.ai API key connections.
 3. Chat Completions and Claude Messages protocol adapters.
-4. Harness-side trace correlation and deeper pattern analysis.
+4. Session/project attribution, harness-side trace correlation, and deeper pattern analysis.
 
 Add OAuth for another provider only after confirming its officially supported integration flow and inference permissions.
