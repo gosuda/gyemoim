@@ -142,13 +142,28 @@
     for (const provider of state.providers) list.append(renderProvider(provider));
   }
 
+  function providerStatusLabel(status) {
+    if (status === "connected") return "Connected";
+    if (status === "plan_usage_disabled") return "Direct access unavailable";
+    if (status === "require_reauthentication") return "Reconnect required";
+    return "Disconnected";
+  }
+
+  function providerStatusDescription(status) {
+    if (status === "connected") return "This OpenAI account is connected and ready for direct inference.";
+    if (status === "plan_usage_disabled") return "The account is linked, but direct inference access was not granted. Reconnect after enabling access for this account.";
+    if (status === "require_reauthentication") return "The sign-in did not provide offline access and a refresh token. Reconnect this account before using it.";
+    return "Connect an OpenAI account with Sign in with ChatGPT.";
+  }
+
   function renderProvider(provider) {
     const card = element("article", "resource-card");
     const header = element("div", "resource-header");
     const titleBlock = element("div", "resource-title");
     titleBlock.append(element("h4", "", provider.name));
     const badges = element("div", "badge-row");
-    badges.append(element("span", "tag", provider.type), element("span", `tag ${provider.status === "connected" ? "tag-success" : "tag-muted"}`, provider.status));
+    const statusLabel = providerStatusLabel(provider.status);
+    badges.append(element("span", "tag", provider.type), element("span", `tag ${provider.status === "connected" ? "tag-success" : "tag-muted"}`, statusLabel));
     titleBlock.append(badges);
     const controls = element("div", "card-actions");
     const edit = button("Rename", "quiet small", () => {
@@ -159,10 +174,23 @@
     header.append(titleBlock, controls);
     card.append(header);
 
-    const info = element("p", "resource-copy", "OpenAI account sign-in is unavailable in this build.");
-    card.append(info, button("Connect OpenAI account · coming later", "quiet small pending-button"));
-    card.lastChild.disabled = true;
-    card.lastChild.setAttribute("aria-label", "Connect OpenAI account, OAuth support is coming later");
+    const info = element("p", "resource-copy", providerStatusDescription(provider.status));
+    const connect = button(provider.status === "disconnected" ? "Connect OpenAI account" : "Reconnect", "primary small", async () => {
+      connect.disabled = true;
+      showMessage(actionMessage);
+      try {
+        const result = await api(`/api/providers/${encodeURIComponent(provider.id)}/oauth/start`, {
+          method: "POST", body: JSON.stringify({}),
+        });
+        window.location.assign(result.authorizationUrl);
+      } catch (error) {
+        showMessage(actionMessage, error.message, "error");
+        connect.disabled = false;
+      }
+    });
+    const actionMessage = element("p", "form-message");
+    actionMessage.setAttribute("aria-live", "polite");
+    card.append(info, connect, actionMessage);
 
     const renameForm = element("form", "inline-form");
     renameForm.hidden = true;
@@ -607,7 +635,7 @@
     try {
       await api("/api/providers", { method: "POST", body: JSON.stringify({ name: form.elements.name.value, type: "openai" }) });
       form.reset();
-      showMessage(message, "Provider added. OAuth connection is not available yet.", "success");
+      showMessage(message, "Provider added. Sign in when ready.", "success");
       await loadProviders();
     } catch (error) {
       showMessage(message, error.message, "error");
@@ -640,5 +668,22 @@
   document.querySelectorAll("[data-page]").forEach((item) => item.addEventListener("click", () => navigate(item.dataset.page)));
   document.querySelectorAll("[data-refresh]").forEach((item) => item.addEventListener("click", () => refreshPage(item.dataset.refresh)));
 
-  navigate("overview");
+  const oauthResult = new URLSearchParams(window.location.search).get("oauth_result");
+  if (oauthResult) {
+    const messages = {
+      connected: ["OpenAI sign-in completed. Direct inference access is ready.", "success"],
+      plan_usage_disabled: ["The account is linked, but direct inference access was not granted.", "error"],
+      require_reauthentication: ["The account is linked, but offline access or its refresh token is missing. Reconnect before using it.", "error"],
+      authorization_denied: ["OpenAI sign-in was cancelled.", "error"],
+      failed: ["OpenAI sign-in could not be completed. Reconnect and try again.", "error"],
+    };
+    const [message, kind] = Object.hasOwn(messages, oauthResult) ? messages[oauthResult] : messages.failed;
+    const notice = byId("provider-oauth-message");
+    showMessage(notice, message, kind);
+    notice.hidden = false;
+    window.history.replaceState({}, "", window.location.pathname);
+    navigate("providers");
+  } else {
+    navigate("overview");
+  }
 })();

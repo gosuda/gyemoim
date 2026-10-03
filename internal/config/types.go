@@ -38,16 +38,16 @@ type ProviderRegistration struct {
 // responses cannot accidentally serialize credentials. Every field is excluded from
 // JSON serialization as an additional guard against accidental marshaling.
 type ProviderCredentials struct {
-	ProviderID        string    `json:"-"`
-	IssuedClientID    string    `json:"-"`
-	VerifiedSubject   string    `json:"-"`
-	Email             string    `json:"-"`
-	AccessToken       string    `json:"-"`
-	RefreshToken      string    `json:"-"`
-	IDToken           string    `json:"-"`
-	ExpiresAt         time.Time `json:"-"`
-	EarliestRefreshAt time.Time `json:"-"`
-	Scopes            []string  `json:"-"`
+	ProviderID        string          `json:"-"`
+	IssuedClientID    string          `json:"-"`
+	VerifiedSubject   string          `json:"-"`
+	Email             string          `json:"-"`
+	AccessToken       string          `json:"-"`
+	RefreshToken      string          `json:"-"`
+	IDToken           string          `json:"-"`
+	ExpiresAt         time.Time       `json:"-"`
+	EarliestRefreshAt json.RawMessage `json:"-"`
+	Scopes            []string        `json:"-"`
 }
 
 // ServiceAccount is a local identity used by harnesses.

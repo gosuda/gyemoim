@@ -10,10 +10,12 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/gosuda/gyemoim/internal/config"
 	"github.com/gosuda/gyemoim/internal/gateway"
+	"github.com/gosuda/gyemoim/internal/siwc"
 )
 
 const (
@@ -25,12 +27,13 @@ type managementAPI struct {
 	store    *config.Store
 	gateway  *gateway.Service
 	fallback http.Handler
+	oauth    *siwc.Manager
 }
 
 // NewManagement creates the management API handler. Paths outside the JSON API
 // routes fall through to the embedded UI, which also owns /api/status.
-func NewManagement(store *config.Store, fallback http.Handler) http.Handler {
-	return &managementAPI{store: store, gateway: gateway.New(store), fallback: fallback}
+func NewManagement(store *config.Store, fallback http.Handler, oauthManager *siwc.Manager) http.Handler {
+	return &managementAPI{store: store, gateway: gateway.New(store), fallback: fallback, oauth: oauthManager}
 }
 
 func (api *managementAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -44,6 +47,8 @@ func (api *managementAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		api.providers(w, r)
 	case len(parts) == 2 && parts[0] == "providers":
 		api.provider(w, r, parts[1])
+	case len(parts) == 4 && parts[0] == "providers" && parts[2] == "oauth" && parts[3] == "start":
+		api.startProviderOAuth(w, r, parts[1])
 	case len(parts) == 1 && parts[0] == "service-accounts":
 		api.serviceAccounts(w, r)
 	case len(parts) == 2 && parts[0] == "service-accounts":
@@ -104,6 +109,34 @@ func (api *managementAPI) providers(w http.ResponseWriter, r *http.Request) {
 	default:
 		methodNotAllowed(w, http.MethodGet, http.MethodPost)
 	}
+}
+
+func (api *managementAPI) startProviderOAuth(w http.ResponseWriter, r *http.Request, id string) {
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w, http.MethodPost)
+		return
+	}
+	if !decodeOptionalEmptyJSON(w, r) {
+		return
+	}
+	if api.oauth == nil {
+		writeManagementError(w, http.StatusServiceUnavailable, "OAuth sign-in is unavailable", "service_unavailable")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+	authorizationURL, err := api.oauth.Start(ctx, id)
+	if errors.Is(err, config.ErrNotFound) {
+		writeManagementFailure(w, err)
+		return
+	}
+	if err != nil {
+		writeManagementError(w, http.StatusBadGateway, "Could not start OpenAI sign-in. Try again shortly.", "oauth_unavailable")
+		return
+	}
+	writeJSON(w, http.StatusOK, struct {
+		AuthorizationURL string `json:"authorizationUrl"`
+	}{AuthorizationURL: authorizationURL})
 }
 
 func (api *managementAPI) provider(w http.ResponseWriter, r *http.Request, id string) {

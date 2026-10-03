@@ -1,6 +1,6 @@
 # Gyemoim Implementation Plan
 
-This plan tracks implementation in small, reviewable tasks. T01 through T05 are complete. T06 is implemented and pending review; T07 through T17 are pending.
+This plan tracks implementation in small, reviewable tasks. T01 through T07 are complete. T08 through T17 are pending.
 
 ## Tasks
 
@@ -11,8 +11,8 @@ This plan tracks implementation in small, reviewable tasks. T01 through T05 are 
 | T03 | ServiceAccounts, local keys, Model grants and configuration, single-target routing strategy, and model-list API | Complete |
 | T04 | Management UI for Providers, ServiceAccounts, Models, and status | Complete |
 | T05 | Versioned NDJSON request recorder | Complete |
-| T06 | Log rotation and crash-safe recovery | Pending review |
-| T07 | OpenAI OAuth login and credential registration | Pending |
+| T06 | Log rotation and crash-safe recovery | Complete |
+| T07 | OpenAI OAuth login and credential registration | Complete |
 | T08 | Token refresh and provider model catalog | Pending |
 | T09 | OpenAI Responses provider contract and capability validation | Pending |
 | T10 | Streaming gateway, cancellation, request IDs, and timing | Pending |
@@ -86,4 +86,14 @@ This plan tracks implementation in small, reviewable tasks. T01 through T05 are 
 
 - Added 64 MiB / one-hour active-file rotation at record boundaries and startup rotation of recovered nonempty active files. Closed segments use sortable UTC timestamps plus unique random suffixes; publication syncs files and the history directory around rename/create operations.
 - Startup validates every closed segment and active record with a 512 MiB bounded line reader, truncates and syncs only an incomplete active tail, and exposes recovered-tail bytes in safe status. Malformed complete records and closed tails degrade the recorder without rewriting them.
-- Added `ReadRecords` for bounded callback-based decoding and `ClosedSegments` for sorted safe metadata snapshots. No lifecycle map reconstruction, synthetic end records, compression, deletion, or automated tests are included. Parent manual checks passed for partial-tail recovery, complete malformed-line preservation, and startup availability. CGO-disabled Linux/macOS amd64/arm64 builds passed. Parent final review remains pending.
+- Added `ReadRecords` for bounded callback-based decoding and `ClosedSegments` for sorted safe metadata snapshots. No lifecycle map reconstruction, synthetic end records, compression, deletion, or automated tests are included. Parent manual checks passed for partial-tail recovery, complete malformed-line preservation, and startup availability. CGO-disabled Linux/macOS amd64/arm64 builds passed. Parent accepted T06 (`eceb3e6`).
+
+
+### T07
+
+- Added lazy Sign in with ChatGPT discovery and a bounded, expiring, single-use state map with per-Provider latest-flow behavior. Initial registration and returning sign-in use their respective client IDs and hints; authorization uses nonce and PKCE S256.
+- Added callback token exchange, OIDC signature/issuer/audience/expiry/issue-time checks, nonce and subject continuity validation, verified-email retention, authoritative granted-scope status, and atomic credential/status persistence. OAuth secrets remain outside Provider API responses.
+- Added CSRF-protected same-origin OAuth start, an origin-exempt callback behind the global exact Host guard, and full-tab Provider UI sign-in with fixed callback-result notices. Documented the exact flow and unverified live-account checks in [oauth.md](oauth.md).
+- No live account was available. A live sign-in and confirmation of the provider-issued callback fields and real token response remain unverified. T08 refresh, disconnection, and catalog behavior are not included. No automated tests were added or run.
+
+- Parent reviewed OAuth manager, persistence, guards, and UI changes. CGO-disabled Linux/macOS amd64/arm64 builds and JavaScript syntax passed. Live-discovery authorization configuration, denied callback redirect, and invalid-state/error-reflection checks passed. Authenticated sign-in remains unverified.

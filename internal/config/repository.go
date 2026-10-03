@@ -159,11 +159,40 @@ func (s *Store) ListProviders(ctx context.Context) ([]Provider, error) {
 	return providers, nil
 }
 
+// SaveProviderRegistration stores an issued client ID before the first token exchange.
+// Existing verified identity fields are preserved when a registration is reused.
+func (s *Store) SaveProviderRegistration(ctx context.Context, registration ProviderRegistration) error {
+	if registration.ProviderID == "" || strings.TrimSpace(registration.IssuedClientID) == "" {
+		return errors.New("provider ID and issued OAuth client ID are required")
+	}
+	_, timestamp := nowText()
+	_, err := s.db.ExecContext(ctx, `INSERT INTO provider_registrations(provider_id, issued_client_id, verified_subject, email, updated_at)
+		VALUES (?, ?, ?, ?, ?)
+		ON CONFLICT(provider_id) DO UPDATE SET issued_client_id = excluded.issued_client_id, updated_at = excluded.updated_at`,
+		registration.ProviderID, registration.IssuedClientID, registration.VerifiedSubject, registration.Email, timestamp)
+	if err != nil {
+		return fmt.Errorf("save provider registration: %w", err)
+	}
+	return nil
+}
+
 // ReplaceProviderCredentials atomically replaces a Provider's full token set and
 // registration identity. Tokens are never written through Provider or returned by list methods.
 func (s *Store) ReplaceProviderCredentials(ctx context.Context, credentials ProviderCredentials) error {
+	return s.ReplaceProviderCredentialsWithStatus(ctx, credentials, "connected")
+}
+
+// ReplaceProviderCredentialsWithStatus atomically saves one complete OAuth token set,
+// its verified registration identity, and the state exposed to the management UI.
+func (s *Store) ReplaceProviderCredentialsWithStatus(ctx context.Context, credentials ProviderCredentials, status string) error {
+	if status != "connected" && status != "plan_usage_disabled" && status != "require_reauthentication" {
+		return errors.New("invalid provider OAuth status")
+	}
 	if credentials.ProviderID == "" || credentials.IssuedClientID == "" {
 		return errors.New("provider ID and issued OAuth client ID are required")
+	}
+	if len(credentials.EarliestRefreshAt) != 0 && !json.Valid(credentials.EarliestRefreshAt) {
+		return errors.New("provider refresh metadata must be valid JSON")
 	}
 	scopes := credentials.Scopes
 	if scopes == nil {
@@ -193,11 +222,11 @@ func (s *Store) ReplaceProviderCredentials(ctx context.Context, credentials Prov
 		refresh_token = excluded.refresh_token, id_token = excluded.id_token, expires_at = excluded.expires_at,
 		earliest_refresh_at = excluded.earliest_refresh_at, scopes_json = excluded.scopes_json, updated_at = excluded.updated_at`,
 		credentials.ProviderID, credentials.AccessToken, credentials.RefreshToken, credentials.IDToken,
-		nullableTime(credentials.ExpiresAt), nullableTime(credentials.EarliestRefreshAt), string(scopesJSON), timestamp)
+		nullableTime(credentials.ExpiresAt), nullableRawJSON(credentials.EarliestRefreshAt), string(scopesJSON), timestamp)
 	if err != nil {
 		return fmt.Errorf("save provider credential set: %w", err)
 	}
-	result, err := tx.ExecContext(ctx, `UPDATE providers SET status = 'connected', updated_at = ? WHERE id = ?`, timestamp, credentials.ProviderID)
+	result, err := tx.ExecContext(ctx, `UPDATE providers SET status = ?, updated_at = ? WHERE id = ?`, status, timestamp, credentials.ProviderID)
 	if err != nil {
 		return fmt.Errorf("update provider connection status: %w", err)
 	}
@@ -249,8 +278,8 @@ func (s *Store) GetProviderCredentials(ctx context.Context, providerID string) (
 	if credentials.ExpiresAt, err = readNullableTime(expiresAt); err != nil {
 		return ProviderCredentials{}, fmt.Errorf("read provider credential expiry: %w", err)
 	}
-	if credentials.EarliestRefreshAt, err = readNullableTime(earliestRefreshAt); err != nil {
-		return ProviderCredentials{}, fmt.Errorf("read provider refresh time: %w", err)
+	if earliestRefreshAt.Valid {
+		credentials.EarliestRefreshAt = json.RawMessage(earliestRefreshAt.String)
 	}
 	if err := json.Unmarshal([]byte(scopesJSON), &credentials.Scopes); err != nil {
 		return ProviderCredentials{}, fmt.Errorf("decode provider OAuth scopes: %w", err)

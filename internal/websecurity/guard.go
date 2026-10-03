@@ -45,6 +45,16 @@ func (g *Guard) Host(next http.Handler) http.Handler {
 	})
 }
 
+// Callback adds response security headers without applying browser Origin or CSRF
+// checks, which would reject the provider's top-level OAuth redirect. The global
+// Host guard still applies to this route.
+func (g *Guard) Callback(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		setSecurityHeaders(w)
+		next.ServeHTTP(w, r)
+	})
+}
+
 // Management applies browser-origin protections to sensitive reads and every mutation.
 // Future OAuth callback and bearer-authenticated /v1 routes should be routed outside it.
 func (g *Guard) Management(next http.Handler) http.Handler {
@@ -52,7 +62,7 @@ func (g *Guard) Management(next http.Handler) http.Handler {
 		setSecurityHeaders(w)
 
 		if isSafeMethod(r.Method) {
-			if !g.validOriginIfPresent(r) || isCrossSite(r) {
+			if !g.validOriginIfPresent(r) || (isCrossSite(r) && !isOAuthResultLanding(r)) {
 				http.Error(w, "cross-origin request rejected", http.StatusForbidden)
 				return
 			}
@@ -109,4 +119,22 @@ func setSecurityHeaders(w http.ResponseWriter) {
 	header.Set("X-Content-Type-Options", "nosniff")
 	header.Set("X-Frame-Options", "DENY")
 	header.Set("Cache-Control", "no-store")
+}
+
+// isOAuthResultLanding allows only the fixed, read-only result redirect from the
+// provider callback to survive Fetch Metadata's cross-site navigation marker.
+func isOAuthResultLanding(r *http.Request) bool {
+	if r.Method != http.MethodGet || r.URL.Path != "/" {
+		return false
+	}
+	values := r.URL.Query()
+	if len(values) != 1 || len(values["oauth_result"]) != 1 {
+		return false
+	}
+	switch values.Get("oauth_result") {
+	case "connected", "plan_usage_disabled", "require_reauthentication", "authorization_denied", "failed":
+		return true
+	default:
+		return false
+	}
 }

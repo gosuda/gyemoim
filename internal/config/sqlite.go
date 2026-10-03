@@ -203,6 +203,13 @@ func nullableTime(value time.Time) any {
 	return value.UTC().Format("2006-01-02T15:04:05.000000000Z")
 }
 
+func nullableRawJSON(value json.RawMessage) any {
+	if len(value) == 0 {
+		return nil
+	}
+	return string(value)
+}
+
 func nullableString(value string) any {
 	if value == "" {
 		return nil
