@@ -24,7 +24,9 @@ The service has four primary goals:
 - Make pi agent the first supported harness. Implement the provider-supported Responses API contract rather than a pi-specific subset; Codex support is not a first-version requirement.
 - Manage three user-facing concepts in the WebUI: Provider, ServiceAccount, and Model.
 - Issue local API keys to ServiceAccounts used by harnesses. Provider authentication remains centralized.
-- Let users assign Model names and configure their upstream targets and selection strategies.
+- Let users assign Model names and connect each Model to one Provider and one upstream model. Implement only single-target selection in the first version, behind a Go strategy interface.
+- Permit only explicitly assigned Models for each ServiceAccount. Newly created Models require an explicit grant; there is no all-Models permission.
+- Provide basic history investigation and per-request provider-reported cache usage. Defer request comparison and cache-miss explanation features.
 - Aggregate statistics by ServiceAccount, requested Model, and the actual Provider and upstream model used for each attempt.
 - Record prompts, responses, tool definitions, and tool results by default, excluding authentication credentials.
 - Preserve all request content without per-harness recording exclusions or automatic body masking.
@@ -33,7 +35,7 @@ The service has four primary goals:
 - Apply Provider disconnection and ServiceAccount key revocation to new requests without explicitly interrupting requests already in progress.
 - Store configuration and credentials in SQLite; store request history in NDJSON files.
 - Rotate logs and compress closed files by spawning the external `zstd` executable.
-- Retain request history indefinitely by default. Provide storage visibility and manual deletion through the WebUI.
+- Retain request history indefinitely. Provide storage visibility and deletion of all request records in a selected date range; do not offer ServiceAccount- or Model-specific deletion in the first version.
 
 ## Architecture
 
@@ -43,7 +45,7 @@ The service has four primary goals:
 | --- | --- | --- |
 | Provider | An authenticated upstream connection instance. Two OpenAI accounts are two Providers with the same provider type. | Name, provider type, upstream address, and OAuth or API key credentials. |
 | ServiceAccount | A gateway-issued account used by a harness. It can access multiple Models and therefore multiple Providers. | Name, local keys, and permitted Models. |
-| Model | A user-named routing configuration, independent of an upstream model ID. | Name, Provider/upstream-model targets, and selection strategy with its settings. |
+| Model | A user-named routing configuration, independent of an upstream model ID. | Name and one Provider/upstream-model target in the first version; selection strategy settings can be added later. |
 
 For example, Providers `openai-personal` and `openai-work` can both have type `openai`. A ServiceAccount `pi-work` can access Models `coding` and `quick`. A request with `model: "coding"` selects that configured Model, whose routing strategy chooses a Provider and upstream model ID.
 
@@ -59,7 +61,7 @@ flowchart LR
     G --> R[Request Recorder]
     R --> N[NDJSON Files]
     N --> Z[External zstd Process]
-    N --> A[Query, Aggregation, and Comparison]
+    N --> A[Query and Aggregation]
     Z --> A
     A --> U
 ```
@@ -77,16 +79,14 @@ Provider-specific authentication, request constraints, and model catalog convers
 | Providers | OpenAI OAuth connections | Sign in, add accounts, inspect connection status, reauthenticate, and disconnect. |
 | Providers | Token lifecycle | Refresh automatically, serialize refreshes per session, and atomically persist replacement credentials. |
 | Providers | Upstream catalog and permissions | Show connection-specific upstream models and ChatGPT plan authorization; link to provider usage management. |
-| ServiceAccounts | Account management | Assign a name, issue or revoke local keys, and permit access to Models. |
+| ServiceAccounts | Account management | Assign a name, issue or revoke local keys, and explicitly permit access to individual Models. New Models are not automatically permitted. |
 | ServiceAccounts | Connection instructions | Provide Base URL, local key, and configured Model name examples for pi agent over HTTP Responses. |
-| Models | Model management | Define user-facing names, upstream targets, and selection strategies with their settings. |
+| Models | Model management | Define user-facing names and one Provider/upstream-model target per Model. |
 | Requests | Request browser | Filter by ServiceAccount, requested Model, actual Provider/upstream model, time, and status; display requests in progress. |
 | Requests | Request details | Inspect the incoming request, effective upstream request, response events, tool calls, errors, and usage. |
 | Requests | Timing timeline | Show authentication preparation, connection, transmission, first event, first output, stream termination, and downstream delivery. |
-| Requests | Request comparison | Compare instructions, tools, messages, and model settings; expose context growth and repeated requests. |
-| Requests | Cache analysis | Show reported cached tokens, reuse ratios, changes to the input prefix, and differences in cache-related settings. |
-| Requests | Export | Download selected request records as NDJSON and usage summaries as CSV. |
-| Storage | Retention and compression | Show raw and compressed sizes, pending or failed compression, retention settings, and manual deletion by date range. |
+| Requests | Cache usage | Show input tokens, cached input tokens, cache usage ratio, and output tokens per request; preserve unavailable cache information as unknown. |
+| Storage | Retention and compression | Show raw and compressed sizes, pending or failed compression, and deletion of all request records in a selected date range. |
 | Storage | Service status | Show data paths, SQLite and log write status, and whether `zstd` is available. |
 
 ## Harness Interface and Routing
@@ -97,6 +97,8 @@ The first version exposes:
 - `GET /v1/models`
 
 The gateway authenticates a ServiceAccount using its local bearer key, resolves the request's `model` to a configured Model, and checks that the ServiceAccount is permitted to use it. The Model's selection strategy chooses a Provider and upstream model ID. The gateway replaces the client Model name and local credential with the selected upstream model ID and Provider credential. Provider access and refresh tokens are never supplied to harnesses.
+
+ServiceAccounts can use only explicitly granted Models. Creating a Model does not grant access to existing accounts, and there is no wildcard or all-Models permission in the first version.
 
 ServiceAccount keys are stored as hashes in SQLite. Keys can be issued and revoked from the WebUI.
 
@@ -111,6 +113,8 @@ Every inference request receives a gateway request ID, returned through `X-Reque
 Statistics are grouped by ServiceAccount, requested Model, and actual Provider/upstream model. Session and project attribution are deferred to later extensions. A ServiceAccount identity is not proof that requests belong to one conversation.
 
 ### Extensible Model Selection
+
+The first version implements only a single-target strategy: each Model selects one configured Provider and upstream model, with no fallback or automatic retry. The WebUI does not expose a strategy picker or multiple targets until another strategy is implemented.
 
 Model selection is abstracted through Go interfaces. Fallback is one possible strategy; the configuration model and execution path must also accommodate other strategies, such as weighted selection or selection based on observed latency. Those strategies are extension examples rather than a requirement to implement them all in the first version.
 
@@ -128,7 +132,7 @@ type Selection interface {
 
 `RoutingRequest` contains the request and a snapshot of the Model configuration. `Target` identifies a Provider and its upstream model ID. `AttemptOutcome` describes a previous attempt's result. The initial selection has no previous outcome. Exhaustion is an explicit stop result. Shared strategy implementations must keep per-request attempt state isolated.
 
-Model configuration identifies the strategy and stores its strategy-specific settings. The WebUI exposes the settings supported by registered strategy implementations. The strategy chooses targets; the gateway executor owns authentication, transport, validation, recording, cancellation, and response delivery.
+Model configuration identifies the strategy and stores its strategy-specific settings. Future WebUI extensions can expose the settings supported by additional strategy implementations. The strategy chooses targets; the gateway executor owns authentication, transport, validation, recording, cancellation, and response delivery.
 
 Selection does not imply compatibility between targets. Every selected target must support the request's capabilities. Unsupported request capabilities produce clear errors, and strategy execution must preserve this policy rather than silently rewriting the request.
 
@@ -172,17 +176,15 @@ Record the stages observable at the gateway, including authentication preparatio
 
 These measurements help locate delays but do not independently prove a provider or harness bug. Time spent executing local tools or preparing the next harness request requires harness-side records or additional instrumentation. Attribution uses ServiceAccount, Model, and each attempt's actual Provider/upstream model; deeper session correlation is a later extension.
 
-### Cache Analysis
+### Cache Usage
 
-Show actual cached-token usage alongside differences between related requests. Compare the input prefix, instructions, tool definitions and ordering, model, and relevant settings.
+The first version displays each request's provider-reported input tokens, cached input tokens, output tokens, and cache usage ratio (`cached input tokens / input tokens`). Cached tokens are already included in input tokens. Display missing cache usage as unknown, not zero. Display the ratio as unavailable when either count is unknown or input tokens are zero.
 
-Report observed changes as candidate explanations for missed reuse. Do not claim certainty about provider-internal routing, hidden context, or cache expiration when those facts are unavailable.
-
-Use the official [Prompt caching](https://developers.openai.com/api/docs/guides/prompt-caching) documentation as the basis for comparison behavior. Cache details vary by model and provider.
+Request comparison, input-prefix differences, and explanations for cache misses are deferred. Preserve incoming and effective request content and structured usage records so those features can be added later. Future explanations must distinguish observed changes from uncertain provider-internal routing, hidden context, or cache expiration.
 
 ### Pattern Analysis Data
 
-The first version provides history browsing, basic aggregation, request comparison, and exports. This creates a dataset for later analysis of repeated requests, growing context, large tool outputs, and usage patterns. Automated LLM-based interpretation is a later extension.
+The first version provides history browsing, request details, basic usage aggregation, timing, and per-request cache usage. Request comparison, exports, and automated analysis are later extensions. This creates a dataset for later analysis of repeated requests, growing context, large tool outputs, and usage patterns.
 
 ## Storage and Local Access
 
@@ -214,15 +216,16 @@ If request recording becomes unavailable, including because the disk is full, re
 - Keep the source file when compression fails.
 - If `zstd` is unavailable, continue recording NDJSON and display compression as pending or unavailable.
 - Read compressed history through an external `zstd -dc` process.
-- Preserve records indefinitely by default; support storage inspection and manual deletion by date range.
+- Preserve records indefinitely; support storage inspection and manual deletion by date range.
+- Delete all request records in the selected date range across ServiceAccounts and Models. Account- or Model-filtered deletion and configurable retention policies are deferred.
 
 ## Implementation Sequence
 
 1. Runtime, embedded WebUI, automatic data-directory creation, and SQLite setup.
 2. OpenAI OAuth registration, credential persistence, refresh, and account management.
-3. ServiceAccount registration, local keys, Model permissions and configuration, strategy interfaces, model listing, and Responses forwarding.
+3. ServiceAccount registration, local keys, Model permissions and configuration, a single-target strategy behind the selection interfaces, model listing, and Responses forwarding.
 4. Request event recording, streaming status, cancellation, and timing instrumentation.
-5. History browsing, usage aggregation, request comparison, cache analysis, and export.
+5. History browsing, request details, usage aggregation, timing views, and per-request cache usage.
 6. File rotation, external compression, compressed-history reading, and storage management.
 
 ## Acceptance Criteria
@@ -234,10 +237,13 @@ If request recording becomes unavailable, including because the disk is full, re
 - pi agent can connect using the documented Responses configuration, and supported Responses behavior is preserved without pi-specific API semantics.
 - Unsupported request capabilities produce clear errors instead of silent compatibility transformations.
 - Statistics preserve the ServiceAccount, requested Model, and actual Provider/upstream model for every attempt.
-- Strategy implementations preserve request-local state, record additional attempts, and cannot change targets after the client response is committed.
+- Each Model has exactly one target in the first version; forwarding makes no automatic fallback or retry attempts. The strategy interface remains available for future selection implementations.
+- Newly created Models remain inaccessible to a ServiceAccount until explicitly granted.
 - Restart, concurrent refresh, missing authorization scopes, and reauthentication do not mix credential sets or account registrations.
 - Tool calls, normal completion, stream errors, incomplete responses, cancellation, and disconnection are reflected consistently in client behavior and logs.
-- Request comparison exposes changes to instructions, tools, and messages and preserves unknown usage or timing information.
+- Request details show provider-reported input, cached input, and output tokens and the cache usage ratio; missing information remains unknown.
+- History can be filtered and inspected, with basic usage totals per ServiceAccount.
+- Date-range deletion removes records across all ServiceAccounts and Models in that range.
 - Restart, rotation, and compression failure leave existing history readable.
 - Missing `zstd` does not prevent startup or NDJSON recording.
 - When recording is unavailable, new inference requests are rejected before provider invocation and the management UI remains accessible.
@@ -252,6 +258,11 @@ Extend in this order:
 1. OpenAI API key authentication.
 2. Claude and z.ai API key connections.
 3. Chat Completions and Claude Messages protocol adapters.
-4. Session/project attribution, harness-side trace correlation, and deeper pattern analysis.
+4. Additional Model selection strategies, including fallback, when needed.
+5. Request comparison, cache-miss investigation, and record/usage exports.
+6. Session/project attribution, harness-side trace correlation, and deeper pattern analysis.
+7. Filtered deletion and configurable retention policies, when needed.
+
+Keep extension preparation limited to provider adapters, the Model selection interface, and versioned log schemas. Do not build unused strategies, plugin frameworks, or a general-purpose permission engine in the first version.
 
 Add OAuth for another provider only after confirming its officially supported integration flow and inference permissions.
