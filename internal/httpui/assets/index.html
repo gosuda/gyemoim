@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="csrf-token" content="{{.CSRFToken}}">
+  <meta name="theme-color" content="#f3f5f7">
+  <title>Gyemoim · Local LLM Gateway</title>
+  <link rel="stylesheet" href="/assets/site.css">
+  <script src="/assets/site.js" defer></script>
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <a class="brand" href="/" aria-label="Gyemoim overview">
+        <span class="brand-mark" aria-hidden="true">G</span>
+        <span><strong>Gyemoim</strong><small>Local LLM gateway</small></span>
+      </a>
+      <p class="nav-label">Workspace</p>
+      <nav aria-label="Main navigation">
+        <button class="nav-item active" type="button" data-page="overview"><span class="nav-icon">◫</span>Overview</button>
+        <button class="nav-item" type="button" disabled aria-disabled="true" title="Unavailable" data-page="providers"><span class="nav-icon">◇</span>Providers</button>
+        <button class="nav-item" type="button" disabled aria-disabled="true" title="Unavailable" data-page="service-accounts"><span class="nav-icon">◎</span>ServiceAccounts</button>
+        <button class="nav-item" type="button" disabled aria-disabled="true" title="Unavailable" data-page="models"><span class="nav-icon">▦</span>Models</button>
+        <button class="nav-item" type="button" disabled aria-disabled="true" title="Unavailable" data-page="requests"><span class="nav-icon">≋</span>Requests</button>
+        <button class="nav-item" type="button" disabled aria-disabled="true" title="Unavailable" data-page="storage"><span class="nav-icon">▤</span>Storage</button>
+      </nav>
+      <div class="sidebar-bottom">
+        <span class="status-dot" aria-hidden="true"></span>
+        <span>Running locally</span>
+      </div>
+    </aside>
+
+    <main class="main-content">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">GYEMOIM / <span id="breadcrumb">OVERVIEW</span></p>
+          <h1 id="page-title">Overview</h1>
+        </div>
+        <div class="local-badge"><span class="status-dot" aria-hidden="true"></span>Local instance</div>
+      </header>
+
+      <section class="page-view" data-view="overview">
+        <div class="welcome-row">
+          <div>
+            <h2>Gateway status</h2>
+            <p class="muted">Runtime information for this local instance.</p>
+          </div>
+          <span class="ready-badge"><span class="status-dot" aria-hidden="true"></span><span id="status-label">Checking status</span></span>
+        </div>
+        <div class="status-card">
+          <div class="card-heading">
+            <div class="card-icon">⌘</div>
+            <div><h3>Runtime</h3><p class="muted">The management interface is available on this device.</p></div>
+          </div>
+          <dl class="runtime-grid" id="runtime-details" aria-live="polite">
+            <div><dt>State</dt><dd>Loading…</dd></div>
+            <div><dt>Listener</dt><dd>Loading…</dd></div>
+            <div><dt>Data directory</dt><dd>Loading…</dd></div>
+            <div><dt>Started</dt><dd>Loading…</dd></div>
+            <div><dt>Runtime</dt><dd>Loading…</dd></div>
+            <div><dt>Platform</dt><dd>Loading…</dd></div>
+          </dl>
+        </div>
+      </section>
+    </main>
+  </div>
+</body>
+</html>

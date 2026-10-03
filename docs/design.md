@@ -1,6 +1,6 @@
 # Gyemoim: Local LLM Gateway
 
-Status: Initial design with confirmed product decisions. Implementation has not started.
+Status: Implementation in progress; product decisions are confirmed.
 
 ## Purpose
 
@@ -221,12 +221,17 @@ If request recording becomes unavailable, including because the disk is full, re
 
 ## Implementation Sequence
 
-1. Runtime, embedded WebUI, automatic data-directory creation, and SQLite setup.
-2. OpenAI OAuth registration, credential persistence, refresh, and account management.
-3. ServiceAccount registration, local keys, Model permissions and configuration, a single-target strategy behind the selection interfaces, model listing, and Responses forwarding.
-4. Request event recording, streaming status, cancellation, and timing instrumentation.
-5. History browsing, request details, usage aggregation, timing views, and per-request cache usage.
-6. File rotation, external compression, compressed-history reading, and storage management.
+Implementation is split into T01 through T17 and tracked in [implementation-plan.md](implementation-plan.md). The current implementation decisions below refine this initial design.
+
+### Confirmed Implementation Decisions
+
+- T02 uses SQLite through `modernc.org/sqlite` v1.59.0.
+- Keep request history in NDJSON files outside SQLite. Rotate at 64 MiB or one hour, and check for compression work once per minute.
+- Invoke the external `zstd` executable; do not bundle a zstd library.
+- Limit request input and upstream SSE data to 64 MiB, and limit concurrent inference to eight requests.
+- The initial pi integration targets pi agent 1.0.0 and exposes reasoning models through `models.json`.
+- Optional advanced Model metadata consists of `contextWindow`, `maxTokens`, `input`, `reasoning`, and `supportedReasoningEfforts`. Populate fields only from exact metadata, do not guess values, and generate `models.json` only when the metadata is complete.
+- The gateway implements the provider-supported Responses API contract for reasoning and non-reasoning models. pi's initial metadata limitation does not narrow the gateway contract.
 
 ## Acceptance Criteria
 

@@ -1,0 +1,149 @@
+package main
+
+import (
+	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"errors"
+	"flag"
+	"fmt"
+	"net"
+	"net/http"
+	"os"
+	"os/signal"
+	"strconv"
+	"syscall"
+	"time"
+
+	"github.com/gosuda/gyemoim/internal/datadir"
+	"github.com/gosuda/gyemoim/internal/httpui"
+	"github.com/gosuda/gyemoim/internal/processlock"
+	"github.com/gosuda/gyemoim/internal/websecurity"
+)
+
+const shutdownTimeout = 30 * time.Second
+
+func main() {
+	if err := run(os.Args[1:]); err != nil {
+		fmt.Fprintln(os.Stderr, "gyemoim:", err)
+		os.Exit(1)
+	}
+}
+
+func run(args []string) error {
+	flags := flag.NewFlagSet("gyemoim", flag.ContinueOnError)
+	flags.SetOutput(os.Stderr)
+	port := flags.Int("port", 9092, "TCP port for the loopback WebUI (1-65535)")
+	flags.Usage = func() {
+		fmt.Fprintln(flags.Output(), "Usage: gyemoim [--port PORT]")
+		flags.PrintDefaults()
+	}
+	if err := flags.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
+		return err
+	}
+	if flags.NArg() != 0 {
+		return fmt.Errorf("unexpected argument %q", flags.Arg(0))
+	}
+	if *port < 1 || *port > 65535 {
+		return fmt.Errorf("port must be between 1 and 65535, got %d", *port)
+	}
+
+	dataDirectory, err := datadir.Path()
+	if err != nil {
+		return err
+	}
+	if err := datadir.Prepare(dataDirectory); err != nil {
+		return err
+	}
+	lock, err := processlock.Acquire(dataDirectory)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err := lock.Release(); err != nil {
+			fmt.Fprintln(os.Stderr, "gyemoim:", err)
+		}
+	}()
+
+	csrfToken, err := randomToken()
+	if err != nil {
+		return fmt.Errorf("create management request token: %w", err)
+	}
+	startedAt := time.Now().UTC()
+	uiHandler, err := httpui.New(dataDirectory, *port, startedAt, csrfToken)
+	if err != nil {
+		return err
+	}
+
+	guard := websecurity.New(*port, csrfToken)
+	mux := http.NewServeMux()
+	// The management guard is deliberately scoped to the UI/API routes. Future OAuth
+	// callbacks and bearer-authenticated /v1 routes must be registered outside it.
+	mux.Handle("/api/", guard.Management(uiHandler))
+	mux.Handle("/", guard.Management(uiHandler))
+
+	serverBase, cancelServerBase := context.WithCancel(context.Background())
+	server := &http.Server{
+		Addr:              net.JoinHostPort("127.0.0.1", strconv.Itoa(*port)),
+		Handler:           guard.Host(mux),
+		ReadHeaderTimeout: 5 * time.Second,
+		IdleTimeout:       2 * time.Minute,
+		MaxHeaderBytes:    1 << 20,
+		BaseContext: func(net.Listener) context.Context {
+			return serverBase
+		},
+	}
+	listener, err := net.Listen("tcp4", server.Addr)
+	if err != nil {
+		cancelServerBase()
+		return fmt.Errorf("cannot start at http://127.0.0.1:%d/ (data directory %q): %w", *port, dataDirectory, err)
+	}
+	actualPort := listener.Addr().(*net.TCPAddr).Port
+	fmt.Fprintf(os.Stderr, "Gyemoim listening at http://127.0.0.1:%d/\nData directory: %s\n", actualPort, dataDirectory)
+
+	signals, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stopSignals()
+	serveResult := make(chan error, 1)
+	go func() {
+		serveResult <- server.Serve(listener)
+	}()
+
+	select {
+	case err := <-serveResult:
+		cancelServerBase()
+		if errors.Is(err, http.ErrServerClosed) {
+			return nil
+		}
+		return fmt.Errorf("HTTP server stopped: %w", err)
+	case <-signals.Done():
+		fmt.Fprintln(os.Stderr, "Gyemoim received a shutdown signal; stopping gracefully.")
+		shutdownContext, cancelShutdown := context.WithTimeout(context.Background(), shutdownTimeout)
+		shutdownErr := server.Shutdown(shutdownContext)
+		cancelShutdown()
+		if shutdownErr != nil {
+			fmt.Fprintln(os.Stderr, "Graceful shutdown exceeded 30 seconds; cancelling active requests.")
+			cancelServerBase()
+			if closeErr := server.Close(); closeErr != nil {
+				fmt.Fprintln(os.Stderr, "gyemoim: close active connections:", closeErr)
+			}
+		} else {
+			cancelServerBase()
+		}
+		serveErr := <-serveResult
+		if !errors.Is(serveErr, http.ErrServerClosed) {
+			return fmt.Errorf("HTTP server stopped during shutdown: %w", serveErr)
+		}
+		return nil
+	}
+}
+
+func randomToken() (string, error) {
+	var value [32]byte
+	if _, err := rand.Read(value[:]); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(value[:]), nil
+}
