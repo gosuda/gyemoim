@@ -117,8 +117,18 @@ even if its event cannot be delivered.
 
 HTTP error bodies and successful non-SSE response bodies are retained as exact bounded
 bytes in schema 2 `upstream_response` records. Their bodies are not echoed in gateway
-HTTP errors. Upstream HTTP errors currently map to a safe 502; T11 may add status-specific
-mapping. `stream:false` returns a clear 400 until T11 implements non-streaming responses.
+HTTP errors. Upstream 429 remains 429 with a validated `Retry-After` when available. Provider
+401/403 becomes 502 with a Provider authorization error, without a local-key challenge.
+Upstream 400/404/422 retains its status with a safe request-rejection message; 503/504
+becomes 503 and other error statuses become 502. Raw upstream error bodies are retained
+in history and excluded from local error messages.
+
+For `stream:false` or an omitted `stream`, the gateway consumes and records frames one
+at a time and returns the nested final Response JSON. Completed and incomplete responses
+return 200 with their original status and usage. Failed/error terminals and malformed
+terminal events return a safe 502. EOF without a terminal returns 502 and records an
+incomplete outcome. The gateway does not accumulate an event array. Final JSON delivery
+uses the same 30-second write deadline, and a failed delivery records cancellation.
 
 If a history write fails after admission, the admitted inference continues and later
 history writes may be lost; the recorder's counters report that loss. A recorder already

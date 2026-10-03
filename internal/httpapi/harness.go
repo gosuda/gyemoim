@@ -209,13 +209,6 @@ func (api *harnessAPI) serveResponses(w http.ResponseWriter, r *http.Request) {
 		writeHarnessError(w, http.StatusBadRequest, "request could not be prepared for the provider", "invalid_request_error", "invalid_request")
 		return
 	}
-	if !prepared.ClientStream {
-		message := "non-streaming Responses are not supported yet; set stream to true"
-		finish("failed", 0, message, nil, history.Timings{}, history.EndDetails{})
-		writeHarnessError(w, http.StatusBadRequest, message, "invalid_request_error", "stream_required")
-		return
-	}
-
 	managedToken, err := api.tokens.AccessToken(r.Context(), route.Provider.ID)
 	authPreparationNS := handle.ElapsedNS()
 	timings := history.Timings{AuthenticationPreparationNS: &authPreparationNS}
@@ -252,35 +245,68 @@ func (api *harnessAPI) serveResponses(w http.ResponseWriter, r *http.Request) {
 		upstreamStatus = upstream.StatusCode
 		upstreamRequestID = upstream.UpstreamRequestID
 		endDetails.UpstreamRequestID = upstreamRequestID
+		if upstreamRequestID != "" {
+			w.Header().Set("X-Upstream-Request-ID", upstreamRequestID)
+		}
 		if upstream.StatusCode < 200 || upstream.StatusCode >= 300 || upstream.UnexpectedContentType {
-			// The body is kept in its own bounded record as exact bytes. It is not
-			// echoed to the harness because it may contain arbitrary provider content.
+			// Preserve exact bounded upstream bytes in history; never return the raw
+			// body to a caller because it may include provider details or secrets.
 			_ = handle.HTTPResponse(upstream.StatusCode, upstreamRequestID, upstream.ErrorBody, upstream.ErrorBodyTruncated, upstream.ErrorBodyReadFailed)
 		}
 	}
+	controller := http.NewResponseController(w)
 	if sendErr != nil {
-		if r.Context().Err() != nil || errors.Is(sendErr, context.Canceled) {
+		if errors.Is(r.Context().Err(), context.Canceled) || errors.Is(sendErr, context.Canceled) {
 			finish("cancelled", upstreamStatus, "request was cancelled while contacting the provider", nil, timings, endDetails)
 			return
 		}
-		message := "the provider could not be reached"
-		if errors.Is(sendErr, provider.ErrNoEventStream) {
-			message = "the provider response was not an event stream"
+		status, message, errorType, code := safeUpstreamSendError(sendErr)
+		var downstreamDeliveryNS *int64
+		outcome, endError := "failed", message
+		if writeBoundedHarnessError(controller, w, status, message, errorType, code) == nil {
+			delivery := handle.ElapsedNS()
+			downstreamDeliveryNS = &delivery
+		} else {
+			outcome, endError = "cancelled", "downstream response could not be delivered"
 		}
-		finish("failed", upstreamStatus, message, nil, timings, endDetails)
-		writeHarnessError(w, http.StatusBadGateway, message, "server_error", "upstream_error")
+		timings = providerTimings(authPreparationNS, trace.Snapshot(), downstreamDeliveryNS)
+		finish(outcome, upstreamStatus, endError, nil, timings, endDetails)
 		return
 	}
 	if upstream == nil {
 		message := "the provider returned no response"
-		finish("failed", 0, message, nil, timings, endDetails)
-		writeHarnessError(w, http.StatusBadGateway, message, "server_error", "upstream_error")
+		var downstreamDeliveryNS *int64
+		outcome, endError := "failed", message
+		if writeBoundedHarnessError(controller, w, http.StatusBadGateway, message, "server_error", "upstream_error") == nil {
+			delivery := handle.ElapsedNS()
+			downstreamDeliveryNS = &delivery
+		} else {
+			outcome, endError = "cancelled", "downstream response could not be delivered"
+		}
+		timings = providerTimings(authPreparationNS, trace.Snapshot(), downstreamDeliveryNS)
+		finish(outcome, 0, endError, nil, timings, endDetails)
 		return
 	}
 	if upstream.StatusCode < 200 || upstream.StatusCode >= 300 || upstream.UnexpectedContentType {
-		message := "the provider returned an error response"
-		finish("failed", upstream.StatusCode, message, nil, timings, endDetails)
-		writeHarnessError(w, http.StatusBadGateway, message, "server_error", "upstream_error")
+		status, message, errorType, code := safeUpstreamHTTPError(upstream.StatusCode, upstream.UnexpectedContentType)
+		if upstream.StatusCode == http.StatusTooManyRequests && upstream.RetryAfter != "" {
+			w.Header().Set("Retry-After", upstream.RetryAfter)
+		}
+		var downstreamDeliveryNS *int64
+		outcome, endError := "failed", message
+		if writeBoundedHarnessError(controller, w, status, message, errorType, code) == nil {
+			delivery := handle.ElapsedNS()
+			downstreamDeliveryNS = &delivery
+		} else {
+			outcome, endError = "cancelled", "downstream response could not be delivered"
+		}
+		timings = providerTimings(authPreparationNS, trace.Snapshot(), downstreamDeliveryNS)
+		finish(outcome, upstream.StatusCode, endError, nil, timings, endDetails)
+		return
+	}
+
+	if !prepared.ClientStream {
+		api.serveNonStreamingResponse(w, r, handle, upstream, trace, authPreparationNS, endDetails, finish)
 		return
 	}
 
@@ -289,11 +315,8 @@ func (api *harnessAPI) serveResponses(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache, no-store")
 	w.Header().Set("X-Accel-Buffering", "no")
-	if upstreamRequestID != "" {
-		w.Header().Set("X-Upstream-Request-ID", upstreamRequestID)
-	}
 	w.WriteHeader(http.StatusOK)
-	controller := http.NewResponseController(w)
+	controller = http.NewResponseController(w)
 	terminalOutcome := ""
 	safeEndError := ""
 	var downstreamDeliveryNS *int64
@@ -302,7 +325,7 @@ func (api *harnessAPI) serveResponses(w http.ResponseWriter, r *http.Request) {
 		if eventErr != nil {
 			traceSnapshot = trace.Snapshot()
 			timings = providerTimings(authPreparationNS, traceSnapshot, downstreamDeliveryNS)
-			if r.Context().Err() != nil || errors.Is(eventErr, context.Canceled) {
+			if errors.Is(r.Context().Err(), context.Canceled) || errors.Is(eventErr, context.Canceled) {
 				finish("cancelled", upstream.StatusCode, "downstream client cancelled the request", upstreamUsage, timings, endDetails)
 				return
 			}
@@ -318,7 +341,7 @@ func (api *harnessAPI) serveResponses(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			safeEndError = safeStreamReadError(eventErr)
-			if !writeStreamError(controller, w, "the provider event stream could not be read", handle, &downstreamDeliveryNS) {
+			if !writeStreamError(controller, w, safeEndError, handle, &downstreamDeliveryNS) {
 				timings = providerTimings(authPreparationNS, trace.Snapshot(), downstreamDeliveryNS)
 				finish("cancelled", upstream.StatusCode, "downstream client disconnected before the response was delivered", upstreamUsage, timings, endDetails)
 				return
@@ -330,6 +353,16 @@ func (api *harnessAPI) serveResponses(w http.ResponseWriter, r *http.Request) {
 		if err := handle.Event(event.Raw, event.Name); err != nil {
 			// A history failure after admission is counted by the recorder; it must
 			// not interrupt another admitted inference or this live client stream.
+		}
+		if terminalProtocolMismatch(event) {
+			message := "the provider stream contained a mismatched terminal response"
+			outcome := "failed"
+			if !writeStreamError(controller, w, message, handle, &downstreamDeliveryNS) {
+				outcome, message = "cancelled", "downstream response could not be delivered"
+			}
+			timings = providerTimings(authPreparationNS, trace.Snapshot(), downstreamDeliveryNS)
+			finish(outcome, upstream.StatusCode, message, upstreamUsage, timings, endDetails)
+			return
 		}
 		if event.Terminal {
 			terminalOutcome = event.Outcome
@@ -357,6 +390,175 @@ func (api *harnessAPI) serveResponses(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+}
+
+func (api *harnessAPI) serveNonStreamingResponse(
+	w http.ResponseWriter,
+	r *http.Request,
+	handle *history.Request,
+	upstream *provider.UpstreamResponse,
+	trace *provider.Trace,
+	authPreparationNS int64,
+	endDetails history.EndDetails,
+	finish func(string, int, string, *history.Usage, history.Timings, history.EndDetails),
+) {
+	controller := http.NewResponseController(w)
+	var usage *history.Usage
+
+	writeErrorAndFinish := func(outcome string, status int, message, errorType, code string) {
+		var deliveryNS *int64
+		endError := message
+		if writeBoundedHarnessError(controller, w, status, message, errorType, code) == nil {
+			delivery := handle.ElapsedNS()
+			deliveryNS = &delivery
+		} else {
+			outcome, endError = "cancelled", "downstream response could not be delivered"
+		}
+		timings := providerTimings(authPreparationNS, trace.Snapshot(), deliveryNS)
+		finish(outcome, upstream.StatusCode, endError, usage, timings, endDetails)
+	}
+
+	for {
+		event, eventErr := upstream.NextEvent()
+		if eventErr != nil {
+			if errors.Is(r.Context().Err(), context.Canceled) || errors.Is(eventErr, context.Canceled) {
+				timings := providerTimings(authPreparationNS, trace.Snapshot(), nil)
+				finish("cancelled", upstream.StatusCode, "downstream client cancelled the request", usage, timings, endDetails)
+				return
+			}
+			if errors.Is(eventErr, io.EOF) {
+				writeErrorAndFinish("incomplete", http.StatusBadGateway,
+					"the provider stream ended before a terminal response", "server_error", "upstream_protocol_error")
+				return
+			}
+			status, message, errorType, code := safeUpstreamStreamError(eventErr)
+			writeErrorAndFinish("failed", status, message, errorType, code)
+			return
+		}
+
+		// Record each raw frame before interpreting it. The loop keeps no event
+		// history in memory, so long non-streaming responses remain bounded.
+		_ = handle.Event(event.Raw, event.Name)
+		if event.Terminal && event.Usage != nil {
+			usage = usageToHistory(event.Usage)
+		}
+		if terminalProtocolMismatch(event) {
+			writeErrorAndFinish("failed", http.StatusBadGateway,
+				"the provider stream contained a mismatched terminal response", "server_error", "upstream_protocol_error")
+			return
+		}
+		if !event.Complete || !event.Terminal {
+			continue
+		}
+		if event.Outcome == "failed" {
+			writeErrorAndFinish("failed", http.StatusBadGateway,
+				"the provider reported a failed response", "server_error", "provider_response_failed")
+			return
+		}
+		if (event.Outcome != "completed" && event.Outcome != "incomplete") || len(event.ResponseJSON) == 0 {
+			writeErrorAndFinish("failed", http.StatusBadGateway,
+				"the provider stream contained an invalid terminal response", "server_error", "upstream_protocol_error")
+			return
+		}
+
+		// ResponseJSON is the only retained terminal payload. Its enclosing frame
+		// is already bounded by the provider reader's per-frame limit.
+		controller = http.NewResponseController(w)
+		if err := writeBoundedResponse(controller, w, http.StatusOK, "application/json; charset=utf-8", event.ResponseJSON); err != nil {
+			timings := providerTimings(authPreparationNS, trace.Snapshot(), nil)
+			finish("cancelled", upstream.StatusCode, "downstream client disconnected before the response was delivered", usage, timings, endDetails)
+			return
+		}
+		delivery := handle.ElapsedNS()
+		timings := providerTimings(authPreparationNS, trace.Snapshot(), &delivery)
+		finish(event.Outcome, upstream.StatusCode, terminalSafeError(event), usage, timings, endDetails)
+		return
+	}
+}
+
+func terminalProtocolMismatch(event provider.SSEEvent) bool {
+	if event.JSONTypeMismatch {
+		return true
+	}
+	if !event.Complete {
+		return false
+	}
+	switch event.Type {
+	case "response.completed", "response.failed", "response.incomplete":
+		return !event.Terminal
+	default:
+		return false
+	}
+}
+
+func safeUpstreamHTTPError(status int, unexpectedContentType bool) (int, string, string, string) {
+	if unexpectedContentType {
+		return http.StatusBadGateway, "the provider returned a successful response that was not an event stream", "server_error", "upstream_protocol_error"
+	}
+	switch status {
+	case http.StatusTooManyRequests:
+		return http.StatusTooManyRequests, "the configured provider is rate limited", "rate_limit_error", "rate_limit_exceeded"
+	case http.StatusUnauthorized, http.StatusForbidden:
+		return http.StatusBadGateway, "the configured provider rejected its authorization", "server_error", "provider_authorization_error"
+	case http.StatusBadRequest, http.StatusNotFound, http.StatusUnprocessableEntity:
+		return status, "the configured provider rejected the request", "invalid_request_error", "provider_request_rejected"
+	case http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		return http.StatusServiceUnavailable, "the configured provider is temporarily unavailable", "server_error", "provider_unavailable"
+	default:
+		return http.StatusBadGateway, "the configured provider returned an error response", "server_error", "upstream_error"
+	}
+}
+
+func safeUpstreamSendError(err error) (int, string, string, string) {
+	switch {
+	case errors.Is(err, provider.ErrNoEventStream):
+		return http.StatusBadGateway, "the provider returned a successful response that was not an event stream", "server_error", "upstream_protocol_error"
+	case errors.Is(err, context.DeadlineExceeded):
+		return http.StatusServiceUnavailable, "the provider request timed out", "server_error", "upstream_timeout"
+	case errors.Is(err, provider.ErrUpstreamUnavailable):
+		return http.StatusServiceUnavailable, "the provider is temporarily unavailable", "server_error", "provider_unavailable"
+	default:
+		return http.StatusBadGateway, "the provider could not be reached", "server_error", "upstream_error"
+	}
+}
+
+func safeUpstreamStreamError(err error) (int, string, string, string) {
+	switch {
+	case errors.Is(err, provider.ErrEventTooLarge):
+		return http.StatusBadGateway, "a provider stream frame exceeded the 64 MiB limit", "server_error", "upstream_frame_too_large"
+	case errors.Is(err, provider.ErrInvalidUTF8):
+		return http.StatusBadGateway, "the provider stream contained invalid UTF-8", "server_error", "upstream_protocol_error"
+	case errors.Is(err, context.DeadlineExceeded):
+		return http.StatusServiceUnavailable, "the provider stream read timed out", "server_error", "upstream_timeout"
+	default:
+		return http.StatusBadGateway, "the provider stream could not be read", "server_error", "upstream_read_error"
+	}
+}
+
+func writeBoundedHarnessError(controller *http.ResponseController, w http.ResponseWriter, status int, message, errorType, code string) error {
+	body, err := json.Marshal(openAIError{Error: openAIErrorDetail{Message: message, Type: errorType, Code: code}})
+	if err != nil {
+		return err
+	}
+	body = append(body, '\n')
+	return writeBoundedResponse(controller, w, status, "application/json; charset=utf-8", body)
+}
+
+func writeBoundedResponse(controller *http.ResponseController, w http.ResponseWriter, status int, contentType string, body []byte) error {
+	if err := controller.SetWriteDeadline(time.Now().Add(downstreamWriteTimeout)); err != nil {
+		return err
+	}
+	defer controller.SetWriteDeadline(time.Time{})
+	w.Header().Set("Content-Type", contentType)
+	w.WriteHeader(status)
+	n, err := w.Write(body)
+	if err != nil {
+		return err
+	}
+	if n != len(body) {
+		return io.ErrShortWrite
+	}
+	return controller.Flush()
 }
 
 func (api *harnessAPI) writeGatewayError(w http.ResponseWriter, err error) {
@@ -392,13 +594,15 @@ func safeProviderAuthError(err error) (string, string) {
 func safeStreamReadError(err error) string {
 	switch {
 	case errors.Is(err, provider.ErrEventTooLarge):
-		return "the provider event exceeded the supported size limit"
+		return "a provider stream frame exceeded the 64 MiB limit"
 	case errors.Is(err, provider.ErrInvalidUTF8):
-		return "the provider event stream was not valid UTF-8"
+		return "the provider stream contained invalid UTF-8"
 	case errors.Is(err, context.Canceled):
-		return "the provider event stream was cancelled"
+		return "the provider stream was cancelled"
+	case errors.Is(err, context.DeadlineExceeded):
+		return "the provider stream read timed out"
 	default:
-		return "the provider event stream ended with a read error"
+		return "the provider stream could not be read"
 	}
 }
 

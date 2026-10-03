@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"net/http/httptrace"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -409,7 +410,9 @@ func retryAfter(value string) string {
 	if value == "" {
 		return ""
 	}
-	if _, err := time.ParseDuration(value + "s"); err == nil {
+	// Retry-After accepts non-negative integer seconds or an HTTP date. Do not
+	// forward signed, fractional, or duration-like values from an upstream.
+	if _, err := strconv.ParseUint(value, 10, 64); err == nil {
 		return value
 	}
 	if _, err := http.ParseTime(value); err == nil {

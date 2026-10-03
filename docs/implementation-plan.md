@@ -1,6 +1,6 @@
 # Gyemoim Implementation Plan
 
-This plan tracks implementation in small, reviewable tasks. T01 through T10 are complete. T11 through T17 are pending.
+This plan tracks implementation in small, reviewable tasks. T01 through T11 are complete. T12 through T17 are pending.
 
 ## Tasks
 
@@ -16,7 +16,7 @@ This plan tracks implementation in small, reviewable tasks. T01 through T10 are 
 | T08 | Token refresh and provider model catalog | Complete |
 | T09 | OpenAI Responses provider contract and capability validation | Complete |
 | T10 | Streaming gateway, cancellation, request IDs, and timing | Complete |
-| T11 | Non-streaming responses, errors, and resource limits | Pending |
+| T11 | Non-streaming responses, errors, and resource limits | Complete |
 | T12 | pi agent 1.0.0 model metadata and connection configuration | Pending |
 | T13 | History query and usage aggregation | Pending |
 | T14 | Request investigation UI and timing details | Pending |
@@ -127,3 +127,11 @@ This plan tracks implementation in small, reviewable tasks. T01 through T10 are 
 - Until T11, `stream:false` returns a clear 400 unsupported response. Upstream HTTP errors currently map to a safe 502; T11 can add provider-status-specific error mapping. No retries or fallback attempts are made. No automated tests were added or run.
 
 - Parent reviewed all changes and corrected selection-interface use, typed authentication errors, incomplete EOF handling, partial-frame forwarding, and error-path timing. CGO-disabled Linux/macOS amd64/arm64 builds passed. Manual local API checks passed for capability rejection, nonstream rejection, disconnected Provider errors, request IDs, and schema 2 attribution. Live authenticated streaming remains unverified.
+
+
+### T11
+
+- Added bounded non-streaming Responses collection and terminal JSON delivery, retaining complete/incomplete response semantics and terminal usage. Preserved raw frames and errors in history.
+- Added safe status-specific upstream error mapping and validated Retry-After forwarding. Provider authorization errors are distinct from local-key errors. Both delivery modes reject mismatched terminal events and record cancellation when downstream delivery fails.
+- The implementation agent stopped after source changes because of a usage limit. Parent completed small review fixes and documentation; no automated tests were added or run.
+- CGO-disabled builds passed for Linux/macOS amd64/arm64. Manual local API inspection confirmed both delivery preferences reach Provider authentication and history remains ready after restart. Live authenticated nonstreaming and upstream error mapping remain unverified.
