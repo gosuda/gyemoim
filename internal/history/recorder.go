@@ -1,8 +1,8 @@
-// Package history writes versioned request history to owner-only NDJSON files.
-// Rotation and crash recovery are intentionally left to the next storage task.
+// Package history writes versioned request history to owner-only, rotating NDJSON files.
 package history
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -18,11 +19,17 @@ import (
 )
 
 const (
-	schemaVersion  = 1
-	maxEventBytes  = 64 << 20
-	maxRequestID   = 128
-	maxSafeError   = 8 << 10
-	activeFileName = "active.ndjson"
+	schemaVersion         = 1
+	maxEventBytes         = 64 << 20
+	maxRequestID          = 128
+	maxSafeError          = 8 << 10
+	maxActiveBytes        = 64 << 20
+	activeRotationAge     = time.Hour
+	rotationCheckInterval = time.Minute
+	activeFileName        = "active.ndjson"
+	closedFilePrefix      = "segment-"
+	closedFileSuffix      = ".ndjson"
+	closedTimestampLayout = "20060102T150405.000000000Z"
 )
 
 var (
@@ -99,24 +106,40 @@ type Timings struct {
 type RecorderStatus struct {
 	State                  string `json:"state"`
 	PotentiallyLostRecords uint64 `json:"potentiallyLostRecords"`
+	RecoveredBytes         uint64 `json:"recoveredBytes"`
 	ActiveRequests         int    `json:"activeRequests"`
 	BytesWritten           int64  `json:"bytesWritten"`
 }
 
-// Recorder serializes every record and durability fence under one mutex so records
-// from concurrent requests cannot interleave. A storage error permanently degrades
-// this process's recorder; recovery and active-file rotation belong to T06.
+// ClosedSegment is the safe metadata snapshot for one immutable, uncompressed
+// history segment. Name is a single filename, never a filesystem path.
+type ClosedSegment struct {
+	Name       string    `json:"name"`
+	Size       int64     `json:"size"`
+	ModifiedAt time.Time `json:"modifiedAt"`
+}
+
+// Recorder serializes every record, durability fence, and active-file rotation under
+// one mutex so records from concurrent requests cannot interleave. A storage error
+// permanently degrades this process's recorder.
 type Recorder struct {
 	mu                     sync.Mutex
 	file                   *os.File
+	historyDir             string
+	segmentStartedAt       time.Time
 	active                 map[string]*Request
 	state                  string
 	failure                error
 	closed                 bool
 	potentiallyLostRecords uint64
+	recoveredBytes         uint64
 	bytesWritten           int64
 	unsyncedRecords        uint64
 	closeErr               error
+	rotationStop           chan struct{}
+	rotationDone           chan struct{}
+	rotationStarted        bool
+	rotationStopOnce       sync.Once
 }
 
 // Request is a handle for one admitted inference request. It is safe for concurrent
@@ -131,9 +154,10 @@ type Request struct {
 	eventSequence  uint64
 }
 
-// Open prepares dataDir/history/active.ndjson. On filesystem failure it returns a
-// degraded recorder and a diagnostic error; callers should keep the UI running and
-// pass the recorder to the UI and gateway admission path. No existing file is replaced.
+// Open prepares dataDir/history/active.ndjson. On filesystem or recovery failure it
+// returns a degraded recorder and a diagnostic error; callers should keep the UI
+// running and pass the recorder to the UI and gateway admission path. Existing data
+// is validated before append, and only an incomplete active-file tail is truncated.
 func Open(dataDir string) (*Recorder, error) {
 	r := &Recorder{
 		active: make(map[string]*Request),
@@ -151,6 +175,13 @@ func Open(dataDir string) (*Recorder, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return r, r.degrade(fmt.Errorf("create history directory: %w", err))
 	}
+	dirInfo, err := os.Lstat(dir)
+	if err != nil {
+		return r, r.degrade(fmt.Errorf("inspect history directory: %w", err))
+	}
+	if !dirInfo.IsDir() {
+		return r, r.degrade(errors.New("history path is not a directory"))
+	}
 	if err := os.Chmod(dir, 0o700); err != nil {
 		return r, r.degrade(fmt.Errorf("set history directory permissions: %w", err))
 	}
@@ -159,41 +190,137 @@ func Open(dataDir string) (*Recorder, error) {
 			return r, r.degrade(fmt.Errorf("sync parent of history directory: %w", err))
 		}
 	}
-	path := filepath.Join(dir, activeFileName)
-	_, statErr := os.Stat(path)
-	createdNewFile := errors.Is(statErr, os.ErrNotExist)
-	if statErr != nil && !createdNewFile {
-		return r, r.degrade(fmt.Errorf("inspect history file: %w", statErr))
-	}
-	if err := validateAppendFile(path); err != nil {
-		return r, r.degrade(fmt.Errorf("existing history file is not a clean NDJSON file: %w", err))
-	}
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	r.historyDir = dir
+
+	segments, err := listClosedSegments(dir)
 	if err != nil {
-		return r, r.degrade(fmt.Errorf("open history file: %w", err))
+		return r, r.degrade(fmt.Errorf("list closed history segments: %w", err))
 	}
-	if err := file.Chmod(0o600); err != nil {
-		_ = file.Close()
-		return r, r.degrade(fmt.Errorf("set history file permissions: %w", err))
-	}
-	info, err := file.Stat()
-	if err != nil {
-		_ = file.Close()
-		return r, r.degrade(fmt.Errorf("inspect history file: %w", err))
-	}
-	if !info.Mode().IsRegular() {
-		_ = file.Close()
-		return r, r.degrade(errors.New("history path is not a regular file"))
-	}
-	if createdNewFile {
-		if err := syncDirectory(dir); err != nil {
-			_ = file.Close()
-			return r, r.degrade(fmt.Errorf("sync history directory: %w", err))
+	for _, segment := range segments {
+		path := filepath.Join(dir, segment.Name)
+		if err := validateHistoryFile(path, false, nil); err != nil {
+			return r, r.degrade(fmt.Errorf("closed history segment %q is invalid: %w", segment.Name, err))
 		}
 	}
+
+	activePath := filepath.Join(dir, activeFileName)
+	activeInfo, activeStatErr := os.Lstat(activePath)
+	activeExists := activeStatErr == nil
+	if activeStatErr != nil && !errors.Is(activeStatErr, os.ErrNotExist) {
+		return r, r.degrade(fmt.Errorf("inspect active history file: %w", activeStatErr))
+	}
+	var scan scanResult
+	if activeExists {
+		if !activeInfo.Mode().IsRegular() {
+			return r, r.degrade(errors.New("active history path is not a regular file"))
+		}
+		activeFile, err := os.OpenFile(activePath, os.O_RDWR, 0)
+		if err != nil {
+			return r, r.degrade(fmt.Errorf("open active history file for recovery: %w", err))
+		}
+		activeInfo, err = activeFile.Stat()
+		if err != nil {
+			_ = activeFile.Close()
+			return r, r.degrade(fmt.Errorf("inspect active history file: %w", err))
+		}
+		if !activeInfo.Mode().IsRegular() {
+			_ = activeFile.Close()
+			return r, r.degrade(errors.New("active history path is not a regular file"))
+		}
+		scan, err = scanHistoryFile(activeFile, true)
+		if err != nil {
+			_ = activeFile.Close()
+			return r, r.degrade(fmt.Errorf("active history file is invalid: %w", err))
+		}
+		if scan.TailBytes > 0 {
+			truncateTo := activeInfo.Size() - scan.TailBytes
+			if truncateTo < 0 {
+				_ = activeFile.Close()
+				return r, r.degrade(errors.New("active history recovery offset is invalid"))
+			}
+			if err := activeFile.Truncate(truncateTo); err != nil {
+				_ = activeFile.Close()
+				return r, r.degrade(fmt.Errorf("truncate incomplete active history tail: %w", err))
+			}
+			if err := activeFile.Sync(); err != nil {
+				_ = activeFile.Close()
+				return r, r.degrade(fmt.Errorf("sync recovered active history file: %w", err))
+			}
+			r.recoveredBytes = uint64(scan.TailBytes)
+			activeInfo, err = activeFile.Stat()
+			if err != nil {
+				_ = activeFile.Close()
+				return r, r.degrade(fmt.Errorf("inspect recovered active history file: %w", err))
+			}
+		}
+		if err := activeFile.Close(); err != nil {
+			return r, r.degrade(fmt.Errorf("close active history file after recovery: %w", err))
+		}
+	} else {
+		activeInfo = nil
+	}
+
+	var file *os.File
+	if activeExists {
+		file, err = os.OpenFile(activePath, os.O_WRONLY|os.O_APPEND, 0)
+		if err != nil {
+			return r, r.degrade(fmt.Errorf("open active history file: %w", err))
+		}
+		if err := file.Chmod(0o600); err != nil {
+			_ = file.Close()
+			return r, r.degrade(fmt.Errorf("set active history file permissions: %w", err))
+		}
+		activeInfo, err = file.Stat()
+		if err != nil {
+			_ = file.Close()
+			return r, r.degrade(fmt.Errorf("inspect active history file: %w", err))
+		}
+	} else {
+		file, err = os.OpenFile(activePath, os.O_CREATE|os.O_EXCL|os.O_WRONLY|os.O_APPEND, 0o600)
+		if err != nil {
+			return r, r.degrade(fmt.Errorf("create active history file: %w", err))
+		}
+		if err := file.Chmod(0o600); err != nil {
+			_ = file.Close()
+			return r, r.degrade(fmt.Errorf("set active history file permissions: %w", err))
+		}
+		if err := syncDirectory(dir); err != nil {
+			_ = file.Close()
+			return r, r.degrade(fmt.Errorf("sync history directory after active file creation: %w", err))
+		}
+		activeInfo, err = file.Stat()
+		if err != nil {
+			_ = file.Close()
+			return r, r.degrade(fmt.Errorf("inspect active history file: %w", err))
+		}
+	}
+	if !activeInfo.Mode().IsRegular() {
+		_ = file.Close()
+		return r, r.degrade(errors.New("active history path is not a regular file"))
+	}
 	r.file = file
-	r.bytesWritten = info.Size()
+	r.bytesWritten = activeInfo.Size()
+	r.segmentStartedAt = activeInfo.ModTime()
+	if activeInfo.Size() == 0 {
+		r.segmentStartedAt = time.Now()
+	}
+	if scan.Records > 0 {
+		r.segmentStartedAt = scan.FirstStartedAt
+	}
+	if r.segmentStartedAt.IsZero() {
+		r.segmentStartedAt = time.Now()
+	}
 	r.state = "ready"
+
+	if r.bytesWritten > 0 {
+		r.mu.Lock()
+		err := r.rotateLocked(time.Now())
+		r.mu.Unlock()
+		if err != nil {
+			return r, fmt.Errorf("rotate recovered active history file: %w", err)
+		}
+	}
+	r.startRotation()
 	return r, nil
 }
 
@@ -203,38 +330,212 @@ func (r *Recorder) degrade(err error) error {
 	return err
 }
 
-// validateAppendFile ensures an existing active file is regular and ends at a newline.
-// T06 will validate and recover record contents and incomplete crash tails.
-func validateAppendFile(path string) error {
-	file, err := os.Open(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-	info, err := file.Stat()
+func validateHistoryFile(path string, allowIncompleteTail bool, visit func(Record) error) error {
+	info, err := os.Lstat(path)
 	if err != nil {
 		return err
 	}
 	if !info.Mode().IsRegular() {
 		return errors.New("path is not a regular file")
 	}
-	if info.Size() == 0 {
-		return nil
-	}
-	if _, err := file.Seek(-1, io.SeekEnd); err != nil {
+	file, err := os.Open(path)
+	if err != nil {
 		return err
 	}
-	var last [1]byte
-	if _, err := io.ReadFull(file, last[:]); err != nil {
+	defer file.Close()
+	_, err = walkRecords(context.Background(), file, allowIncompleteTail, visitOrIgnore(visit))
+	return err
+}
+
+func visitOrIgnore(visit func(Record) error) func(Record) error {
+	if visit == nil {
+		return func(Record) error { return nil }
+	}
+	return visit
+}
+
+func scanHistoryFile(file *os.File, allowIncompleteTail bool) (scanResult, error) {
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return scanResult{}, err
+	}
+	return walkRecords(context.Background(), file, allowIncompleteTail, func(Record) error { return nil })
+}
+
+func listClosedSegments(dir string) ([]ClosedSegment, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	segments := make([]ClosedSegment, 0)
+	for _, entry := range entries {
+		name := entry.Name()
+		if !strings.HasPrefix(name, closedFilePrefix) || !strings.HasSuffix(name, closedFileSuffix) {
+			continue
+		}
+		if !validClosedFileName(name) {
+			return nil, fmt.Errorf("unrecognized closed history filename %q", name)
+		}
+		info, err := os.Lstat(filepath.Join(dir, name))
+		if err != nil {
+			return nil, err
+		}
+		if !info.Mode().IsRegular() {
+			return nil, fmt.Errorf("closed history segment %q is not a regular file", name)
+		}
+		segments = append(segments, ClosedSegment{
+			Name:       name,
+			Size:       info.Size(),
+			ModifiedAt: info.ModTime().UTC(),
+		})
+	}
+	sort.Slice(segments, func(i, j int) bool { return segments[i].Name < segments[j].Name })
+	return segments, nil
+}
+
+func validClosedFileName(name string) bool {
+	if !strings.HasPrefix(name, closedFilePrefix) || !strings.HasSuffix(name, closedFileSuffix) {
+		return false
+	}
+	stem := strings.TrimSuffix(strings.TrimPrefix(name, closedFilePrefix), closedFileSuffix)
+	separator := strings.LastIndexByte(stem, '-')
+	if separator < 0 {
+		return false
+	}
+	if _, err := time.Parse(closedTimestampLayout, stem[:separator]); err != nil {
+		return false
+	}
+	suffix, err := hex.DecodeString(stem[separator+1:])
+	return err == nil && len(suffix) == 16
+}
+
+func closedFileName(startedAt time.Time) (string, error) {
+	var suffix [16]byte
+	if _, err := rand.Read(suffix[:]); err != nil {
+		return "", err
+	}
+	return closedFilePrefix + startedAt.UTC().Format(closedTimestampLayout) + "-" + hex.EncodeToString(suffix[:]) + closedFileSuffix, nil
+}
+
+func (r *Recorder) rotationDue(now time.Time) bool {
+	return r.bytesWritten >= maxActiveBytes || (!r.segmentStartedAt.IsZero() && now.Sub(r.segmentStartedAt) >= activeRotationAge)
+}
+
+func (r *Recorder) startRotation() {
+	r.rotationStop = make(chan struct{})
+	r.rotationDone = make(chan struct{})
+	r.rotationStarted = true
+	go func() {
+		defer close(r.rotationDone)
+		ticker := time.NewTicker(rotationCheckInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				r.mu.Lock()
+				if !r.closed && r.failure == nil && r.file != nil && r.bytesWritten > 0 && r.rotationDue(time.Now()) {
+					_ = r.rotateLocked(time.Now())
+				}
+				r.mu.Unlock()
+			case <-r.rotationStop:
+				return
+			}
+		}
+	}()
+}
+
+func (r *Recorder) stopRotation() {
+	if !r.rotationStarted {
+		return
+	}
+	r.rotationStopOnce.Do(func() { close(r.rotationStop) })
+	<-r.rotationDone
+}
+
+func (r *Recorder) rotateLocked(now time.Time) error {
+	if r.closed || r.file == nil || r.failure != nil {
+		return ErrRecordingUnavailable
+	}
+	if err := r.file.Sync(); err != nil {
+		r.markSyncFailureLocked(err)
+		return fmt.Errorf("sync active history before rotation: %w", err)
+	}
+	r.unsyncedRecords = 0
+	if err := r.file.Close(); err != nil {
+		r.file = nil
+		r.failure = err
+		r.state = "degraded"
+		return fmt.Errorf("close active history before rotation: %w", err)
+	}
+	r.file = nil
+
+	var closedPath string
+	for attempt := 0; attempt < 4; attempt++ {
+		name, err := closedFileName(r.segmentStartedAt)
+		if err != nil {
+			r.failure = err
+			r.state = "degraded"
+			return fmt.Errorf("create closed history filename: %w", err)
+		}
+		candidate := filepath.Join(r.historyDir, name)
+		if _, err := os.Lstat(candidate); errors.Is(err, os.ErrNotExist) {
+			closedPath = candidate
+			break
+		} else if err != nil {
+			r.failure = err
+			r.state = "degraded"
+			return fmt.Errorf("inspect closed history filename: %w", err)
+		}
+	}
+	if closedPath == "" {
+		err := errors.New("could not allocate a unique closed history filename")
+		r.failure = err
+		r.state = "degraded"
 		return err
 	}
-	if last[0] != '\n' {
-		return errors.New("file does not end with a newline")
+	activePath := filepath.Join(r.historyDir, activeFileName)
+	if err := os.Rename(activePath, closedPath); err != nil {
+		r.failure = err
+		r.state = "degraded"
+		return fmt.Errorf("publish closed history segment: %w", err)
 	}
+	if err := syncDirectory(r.historyDir); err != nil {
+		r.failure = err
+		r.state = "degraded"
+		return fmt.Errorf("sync history directory after segment publication: %w", err)
+	}
+	newFile, err := os.OpenFile(activePath, os.O_CREATE|os.O_EXCL|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		r.failure = err
+		r.state = "degraded"
+		return fmt.Errorf("create fresh active history file: %w", err)
+	}
+	if err := newFile.Chmod(0o600); err != nil {
+		_ = newFile.Close()
+		r.failure = err
+		r.state = "degraded"
+		return fmt.Errorf("set fresh active history permissions: %w", err)
+	}
+	if err := syncDirectory(r.historyDir); err != nil {
+		_ = newFile.Close()
+		r.failure = err
+		r.state = "degraded"
+		return fmt.Errorf("sync history directory after active file creation: %w", err)
+	}
+	r.file = newFile
+	r.bytesWritten = 0
+	r.segmentStartedAt = now
 	return nil
+}
+
+// ClosedSegments returns a sorted metadata snapshot of closed raw NDJSON segments.
+// Segment names are stable and unique; the active file is deliberately omitted.
+func (r *Recorder) ClosedSegments() ([]ClosedSegment, error) {
+	if r == nil || r.historyDir == "" {
+		return nil, ErrRecordingUnavailable
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return listClosedSegments(r.historyDir)
 }
 
 func syncDirectory(path string) error {
@@ -488,6 +789,12 @@ func (r *Recorder) writeLocked(record any, durable bool) error {
 	if err != nil {
 		return fmt.Errorf("encode request history record: %w", err)
 	}
+	if r.bytesWritten > 0 && r.rotationDue(time.Now()) {
+		if err := r.rotateLocked(time.Now()); err != nil {
+			r.potentiallyLostRecords++
+			return ErrRecordingUnavailable
+		}
+	}
 	encoded = append(encoded, '\n')
 	remaining := encoded
 	for len(remaining) > 0 {
@@ -547,6 +854,7 @@ func (r *Recorder) Status() RecorderStatus {
 	return RecorderStatus{
 		State:                  state,
 		PotentiallyLostRecords: r.potentiallyLostRecords,
+		RecoveredBytes:         r.recoveredBytes,
 		ActiveRequests:         len(r.active),
 		BytesWritten:           r.bytesWritten,
 	}
@@ -558,6 +866,7 @@ func (r *Recorder) Close() error {
 	if r == nil {
 		return nil
 	}
+	r.stopRotation()
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.closed {

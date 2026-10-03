@@ -226,7 +226,7 @@ Implementation is split into T01 through T17 and tracked in [implementation-plan
 ### Confirmed Implementation Decisions
 
 - T02 uses SQLite through `modernc.org/sqlite` v1.59.0.
-- Keep request history in NDJSON files outside SQLite. Rotate at 64 MiB or one hour, and check for compression work once per minute.
+- Keep request history in NDJSON files outside SQLite. Rotate at 64 MiB or one hour at record boundaries; check idle active files once per minute. Closed segments are immutable raw NDJSON until a later maintenance task handles them.
 - Invoke the external `zstd` executable; do not bundle a zstd library.
 - Limit request input and upstream SSE data to 64 MiB, and limit concurrent inference to eight requests.
 - The initial pi integration targets pi agent 1.0.0 and exposes reasoning models through `models.json`.

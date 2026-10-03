@@ -1,6 +1,6 @@
 # Gyemoim Implementation Plan
 
-This plan tracks implementation in small, reviewable tasks. T01 through T05 are complete. T06 through T17 are pending.
+This plan tracks implementation in small, reviewable tasks. T01 through T05 are complete. T06 is implemented and pending review; T07 through T17 are pending.
 
 ## Tasks
 
@@ -11,7 +11,7 @@ This plan tracks implementation in small, reviewable tasks. T01 through T05 are 
 | T03 | ServiceAccounts, local keys, Model grants and configuration, single-target routing strategy, and model-list API | Complete |
 | T04 | Management UI for Providers, ServiceAccounts, Models, and status | Complete |
 | T05 | Versioned NDJSON request recorder | Complete |
-| T06 | Log rotation and crash-safe recovery | Pending |
+| T06 | Log rotation and crash-safe recovery | Pending review |
 | T07 | OpenAI OAuth login and credential registration | Pending |
 | T08 | Token refresh and provider model catalog | Pending |
 | T09 | OpenAI Responses provider contract and capability validation | Pending |
@@ -28,7 +28,7 @@ This plan tracks implementation in small, reviewable tasks. T01 through T05 are 
 
 - T02 uses SQLite through `modernc.org/sqlite` v1.59.0.
 - Keep routing behind a Go strategy interface while T03 implements only one configured target per Model.
-- Keep request history in NDJSON files outside SQLite. T05 introduces the recorder; T06 handles 64 MiB or one-hour rotation and crash-safe recovery.
+- Keep request history in NDJSON files outside SQLite. T05 introduces the recorder; T06 handles 64 MiB or one-hour rotation and crash-safe recovery. T15 checks for compression work once per minute.
 - T15 invokes the external `zstd` executable, with no bundled zstd library, and checks for compression work once per minute.
 - T11 caps request input and upstream SSE data at 64 MiB and limits concurrent inference to eight requests.
 - T12 targets pi agent 1.0.0. Its initial integration supports reasoning models only through `models.json`.
@@ -81,3 +81,9 @@ This plan tracks implementation in small, reviewable tasks. T01 through T05 are 
 - Implemented the version 1 NDJSON recorder, append-only active file, admission/transmission/end durability fences, response-event framing, request usage/timing metadata, sticky storage degradation, and safe status counters.
 - Connected recorder startup and close to the HTTP lifecycle; startup remains available when history storage cannot open, while new recorder admissions fail. The runtime status page reports history health and counters.
 - Added the exact schema and lifecycle notes in [history-format.md](history-format.md). Parent reviewed recorder lifecycle, durability fences, loss accounting, and integration. CGO-disabled Linux/macOS amd64/arm64 builds passed; manual healthy/degraded startup and owner-only history permissions passed. No automated tests were added or run.
+
+### T06
+
+- Added 64 MiB / one-hour active-file rotation at record boundaries and startup rotation of recovered nonempty active files. Closed segments use sortable UTC timestamps plus unique random suffixes; publication syncs files and the history directory around rename/create operations.
+- Startup validates every closed segment and active record with a 512 MiB bounded line reader, truncates and syncs only an incomplete active tail, and exposes recovered-tail bytes in safe status. Malformed complete records and closed tails degrade the recorder without rewriting them.
+- Added `ReadRecords` for bounded callback-based decoding and `ClosedSegments` for sorted safe metadata snapshots. No lifecycle map reconstruction, synthetic end records, compression, deletion, or automated tests are included. Parent manual checks passed for partial-tail recovery, complete malformed-line preservation, and startup availability. CGO-disabled Linux/macOS amd64/arm64 builds passed. Parent final review remains pending.

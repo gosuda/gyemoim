@@ -2,8 +2,36 @@
 
 Gyemoim stores request history outside SQLite as newline-delimited JSON in
 `<data-directory>/history/active.ndjson`. Each line is one compact JSON object
-followed by `\n`. The history directory is mode `0700`; the active file is mode
-`0600`. A later task adds rotation and crash-tail recovery.
+followed by `\n`. The history directory is mode `0700`; active and closed files are
+mode `0600`.
+
+The active file rotates at record boundaries when it reaches 64 MiB or one hour old.
+A record that crosses 64 MiB stays whole, so one JSON line may overshoot the target.
+A one-minute ticker rotates an idle file after the age limit. Every nonempty active
+file found at startup is validated, then published as a closed segment before a fresh
+active file is created. This keeps closed files immutable for later history readers
+and compression.
+
+Closed raw files are named
+`segment-<UTC-start-time>-<random-suffix>.ndjson`, for example
+`segment-20261003T120000.123456789Z-<32 lowercase hex digits>.ndjson`. The timestamp
+identifies segment creation time (or the first recovered record's `started_at`
+when publishing an active file after restart); the random 128-bit suffix prevents filename collisions.
+Names sort lexically by segment start time. Publication syncs the active file, closes
+it, renames it, syncs the history directory, creates a new owner-only active file, and
+syncs the directory again. The directory is also synced when first created.
+
+Startup scans each closed segment and the active file one bounded line at a time.
+Records are limited to 512 MiB to allow JSON escaping of the largest 64 MiB UTF-8 SSE
+frame (up to roughly 384 MiB before record overhead). A complete line with malformed
+JSON, an unsupported schema version/type, or invalid schema fields degrades history
+and prevents append; the source file is preserved. A final active-file fragment with
+no newline is treated as an incomplete crash tail: only that fragment is truncated,
+and the file is synced. Incomplete tails in closed segments are errors and are never
+truncated. `recoveredBytes` reports the number of active-tail bytes removed this run.
+The reader validates individual records without rebuilding request lifecycle state;
+a request lacking `request_end` remains an interrupted request for later readers to
+infer. No synthetic end records are written at startup.
 
 ## Fields shared by every record
 
@@ -74,15 +102,17 @@ A repeated `End` is harmless. Closing the recorder ends remaining handles as
 sync failure permanently degrades this process's recorder. Existing requests continue
 upstream; their later history writes fail and increment the safe loss counter. Future
 `Begin` calls return `ErrRecordingUnavailable`, allowing the gateway to reject new
-requests before provider invocation. `Status` exposes only state, potentially-lost-record count,
-active-request count, and bytes written.
+requests before provider invocation. `Status` exposes only state, potentially-lost-record count, recovered-tail byte
+count, active-request count, and bytes in the current active file.
 
 The schema has no HTTP authorization header, local API key, OAuth credential object,
 authentication URL, or generic URL field. Callers pass JSON request bodies only;
 arbitrary user-provided body content is preserved. Callers must keep gateway-managed
 credentials out of body payloads and must sanitize `safe_error` before recording it.
 
-At startup, T05 appends to an existing regular active file only when it ends at a
-newline. A partial tail leaves the recorder degraded instead of truncating existing
-history. Full record validation and recovery are handled by T06. The active file is not
-rotated by T05.
+`ReadRecords` is the shared bounded-memory record decoder for startup validation and
+later history readers. It passes one decoded record to its callback at a time and
+honors context cancellation between records. The exported closed-segment snapshot
+returns sorted filenames and metadata, not absolute paths; active data is excluded.
+Any later maintenance operation that rewrites or deletes closed files must serialize
+with that operation's own snapshot and rotation coordination.

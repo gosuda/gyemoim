@@ -100,7 +100,7 @@
         ["Listener", `127.0.0.1:${status.port}`],
         ["Data directory", status.dataDirectory],
         ["SQLite", status.sqliteState],
-        ["Request history", `${status.historyState} · ${status.historyPotentiallyLostRecords} potentially lost · ${status.historyActiveRequests} active · ${status.historyBytesWritten} bytes`],
+        ["Request history", `${status.historyState} · ${status.historyPotentiallyLostRecords} potentially lost · ${status.historyRecoveredBytes} recovered bytes · ${status.historyActiveRequests} active · ${status.historyBytesWritten} active bytes`],
         ["Started", new Date(status.startedAt).toLocaleString()],
         ["Runtime", status.goVersion],
         ["Platform", `${status.operatingSystem} / ${status.architecture}`],

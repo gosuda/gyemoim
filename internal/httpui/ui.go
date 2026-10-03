@@ -30,6 +30,7 @@ type Status struct {
 	SQLiteState            string    `json:"sqliteState"`
 	HistoryState           string    `json:"historyState"`
 	HistoryPotentiallyLost uint64    `json:"historyPotentiallyLostRecords"`
+	HistoryRecoveredBytes  uint64    `json:"historyRecoveredBytes"`
 	HistoryActive          int       `json:"historyActiveRequests"`
 	HistoryBytesWritten    int64     `json:"historyBytesWritten"`
 }
@@ -99,6 +100,7 @@ func New(dataDirectory string, port int, startedAt time.Time, csrfToken string, 
 			history := historyStatus.Status()
 			currentStatus.HistoryState = history.State
 			currentStatus.HistoryPotentiallyLost = history.PotentiallyLostRecords
+			currentStatus.HistoryRecoveredBytes = history.RecoveredBytes
 			currentStatus.HistoryActive = history.ActiveRequests
 			currentStatus.HistoryBytesWritten = history.BytesWritten
 			if history.State != "ready" {
