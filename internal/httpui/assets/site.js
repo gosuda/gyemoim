@@ -5,6 +5,7 @@
     ["State", (status) => status.state],
     ["Listener", (status) => `127.0.0.1:${status.port}`],
     ["Data directory", (status) => status.dataDirectory],
+    ["SQLite", (status) => status.sqliteState],
     ["Started", (status) => new Date(status.startedAt).toLocaleString()],
     ["Runtime", (status) => status.goVersion],
     ["Platform", (status) => `${status.operatingSystem} / ${status.architecture}`],

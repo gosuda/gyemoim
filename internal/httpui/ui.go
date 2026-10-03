@@ -2,6 +2,7 @@
 package httpui
 
 import (
+	"context"
 	"embed"
 	"encoding/json"
 	"fmt"
@@ -24,10 +25,16 @@ type Status struct {
 	GoVersion       string    `json:"goVersion"`
 	OperatingSystem string    `json:"operatingSystem"`
 	Architecture    string    `json:"architecture"`
+	SQLiteState     string    `json:"sqliteState"`
+}
+
+// DatabaseReadiness is the minimal status dependency needed from the config store.
+type DatabaseReadiness interface {
+	Ping(context.Context) error
 }
 
 // New constructs the embedded UI handler.
-func New(dataDirectory string, port int, startedAt time.Time, csrfToken string) (http.Handler, error) {
+func New(dataDirectory string, port int, startedAt time.Time, csrfToken string, database DatabaseReadiness) (http.Handler, error) {
 	assets, err := fs.Sub(embedded, "assets")
 	if err != nil {
 		return nil, fmt.Errorf("open embedded UI assets: %w", err)
@@ -44,6 +51,7 @@ func New(dataDirectory string, port int, startedAt time.Time, csrfToken string) 
 		GoVersion:       runtime.Version(),
 		OperatingSystem: runtime.GOOS,
 		Architecture:    runtime.GOARCH,
+		SQLiteState:     "ready",
 	}
 	fileServer := http.FileServer(http.FS(assets))
 
@@ -61,8 +69,20 @@ func New(dataDirectory string, port int, startedAt time.Time, csrfToken string) 
 	})
 	mux.Handle("GET /assets/", http.StripPrefix("/assets/", fileServer))
 	mux.HandleFunc("GET /api/status", func(w http.ResponseWriter, r *http.Request) {
+		currentStatus := status
+		if database == nil {
+			currentStatus.SQLiteState = "unavailable"
+			currentStatus.State = "degraded"
+		} else {
+			ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+			if err := database.Ping(ctx); err != nil {
+				currentStatus.SQLiteState = "unavailable"
+				currentStatus.State = "degraded"
+			}
+			cancel()
+		}
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
-		if err := json.NewEncoder(w).Encode(status); err != nil {
+		if err := json.NewEncoder(w).Encode(currentStatus); err != nil {
 			return
 		}
 	})

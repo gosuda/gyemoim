@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/gosuda/gyemoim/internal/config"
 	"github.com/gosuda/gyemoim/internal/datadir"
 	"github.com/gosuda/gyemoim/internal/httpui"
 	"github.com/gosuda/gyemoim/internal/processlock"
@@ -68,12 +69,24 @@ func run(args []string) error {
 		}
 	}()
 
+	databaseContext, cancelDatabaseContext := context.WithTimeout(context.Background(), 30*time.Second)
+	store, err := config.Open(databaseContext, dataDirectory)
+	cancelDatabaseContext()
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err := store.Close(); err != nil {
+			fmt.Fprintln(os.Stderr, "gyemoim: close configuration database:", err)
+		}
+	}()
+
 	csrfToken, err := randomToken()
 	if err != nil {
 		return fmt.Errorf("create management request token: %w", err)
 	}
 	startedAt := time.Now().UTC()
-	uiHandler, err := httpui.New(dataDirectory, *port, startedAt, csrfToken)
+	uiHandler, err := httpui.New(dataDirectory, *port, startedAt, csrfToken, store)
 	if err != nil {
 		return err
 	}
