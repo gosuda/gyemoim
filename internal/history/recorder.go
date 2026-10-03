@@ -19,7 +19,8 @@ import (
 )
 
 const (
-	schemaVersion         = 1
+	schemaVersion         = 2
+	minimumSchemaVersion  = 1
 	maxEventBytes         = 64 << 20
 	maxRequestID          = 128
 	maxSafeError          = 8 << 10
@@ -69,9 +70,9 @@ type Start struct {
 
 // ProviderSnapshot identifies the actual provider target used for one upstream attempt.
 type ProviderSnapshot struct {
-	ID            string
-	Name          string
-	UpstreamModel string
+	ID            string `json:"id"`
+	Name          string `json:"name"`
+	UpstreamModel string `json:"upstream_model"`
 }
 
 // Attempt is the target and effective request body for one upstream transmission.
@@ -94,12 +95,14 @@ type Usage struct {
 // mean that a stage was not observed, rather than that it took zero time.
 type Timings struct {
 	AuthenticationPreparationNS *int64 `json:"authentication_preparation_ns"`
+	ConnectionRequestedNS       *int64 `json:"connection_requested_ns,omitempty"`
 	ConnectionEstablishedNS     *int64 `json:"connection_established_ns"`
 	RequestTransmissionNS       *int64 `json:"request_transmission_ns"`
 	FirstEventNS                *int64 `json:"first_event_ns"`
 	FirstOutputNS               *int64 `json:"first_output_ns"`
 	StreamCompletionNS          *int64 `json:"stream_completion_ns"`
 	DownstreamDeliveryNS        *int64 `json:"downstream_delivery_ns"`
+	ConnectionReused            *bool  `json:"connection_reused,omitempty"`
 }
 
 // RecorderStatus contains only safe operational counters and state.
@@ -149,6 +152,9 @@ type Request struct {
 	id             string
 	startedAt      time.Time
 	monotonicStart time.Time
+	serviceAccount ServiceAccountSnapshot
+	model          ModelSnapshot
+	lastProvider   *ProviderSnapshot
 	ended          bool
 	lastAttempt    int
 	eventSequence  uint64
@@ -576,6 +582,8 @@ func (r *Recorder) Begin(start Start) (*Request, error) {
 		id:             start.RequestID,
 		startedAt:      now.UTC(),
 		monotonicStart: now,
+		serviceAccount: start.ServiceAccount,
+		model:          start.Model,
 	}
 	line := startLine{
 		baseLine: baseLine{
@@ -668,6 +676,8 @@ func (h *Request) Transmit(attempt Attempt) error {
 	err := r.writeLocked(line, true)
 	if err == nil {
 		h.lastAttempt = attempt.Number
+		provider := attempt.Provider
+		h.lastProvider = &provider
 	}
 	return err
 }
@@ -716,10 +726,22 @@ func (h *Request) Event(frame []byte, eventName string) error {
 	return r.writeLocked(line, false)
 }
 
+// EndDetails contains small, safe upstream metadata for one request summary.
+// Error bodies belong in an upstream_response record instead.
+type EndDetails struct {
+	UpstreamRequestID string
+}
+
 // End records a final request outcome and always unregisters the handle. Outcomes
 // are completed, failed, cancelled, or incomplete. safeError must be a short,
 // pre-sanitized explanation and must not contain bodies, credentials, or URLs.
 func (h *Request) End(outcome string, httpStatus int, safeError string, usage *Usage, timings Timings) error {
+	return h.EndWithDetails(outcome, httpStatus, safeError, usage, timings, EndDetails{})
+}
+
+// EndWithDetails adds a safe provider request identifier while keeping the end
+// record self-contained for later attribution scans.
+func (h *Request) EndWithDetails(outcome string, httpStatus int, safeError string, usage *Usage, timings Timings, details EndDetails) error {
 	if h == nil || h.recorder == nil {
 		return ErrRecordingUnavailable
 	}
@@ -729,8 +751,8 @@ func (h *Request) End(outcome string, httpStatus int, safeError string, usage *U
 	if h.ended {
 		return nil
 	}
-	if !validOutcome(outcome) || httpStatus < 0 || httpStatus > 599 || len(safeError) > maxSafeError || !utf8.ValidString(safeError) || !validTimings(timings) || !validUsage(usage) {
-		writeErr := r.writeEndLocked(h, "incomplete", 0, "request ended with invalid final details", nil, Timings{})
+	if !validUpstreamRequestID(details.UpstreamRequestID) || !validOutcome(outcome) || httpStatus < 0 || httpStatus > 599 || len(safeError) > maxSafeError || !utf8.ValidString(safeError) || !validTimings(timings) || !validUsage(usage) {
+		writeErr := r.writeEndLocked(h, "incomplete", 0, "request ended with invalid final details", nil, Timings{}, EndDetails{})
 		h.ended = true
 		delete(r.active, h.id)
 		if writeErr != nil {
@@ -742,13 +764,13 @@ func (h *Request) End(outcome string, httpStatus int, safeError string, usage *U
 		usage = cloneUsage(usage)
 	}
 	timings = cloneTimings(timings)
-	err := r.writeEndLocked(h, outcome, httpStatus, safeError, usage, timings)
+	err := r.writeEndLocked(h, outcome, httpStatus, safeError, usage, timings, details)
 	h.ended = true
 	delete(r.active, h.id)
 	return err
 }
 
-func (r *Recorder) writeEndLocked(h *Request, outcome string, httpStatus int, safeError string, usage *Usage, timings Timings) error {
+func (r *Recorder) writeEndLocked(h *Request, outcome string, httpStatus int, safeError string, usage *Usage, timings Timings, details EndDetails) error {
 	if r.active[h.id] != h {
 		return ErrRecordingUnavailable
 	}
@@ -762,14 +784,55 @@ func (r *Recorder) writeEndLocked(h *Request, outcome string, httpStatus int, sa
 			TimestampUTC:  now.UTC(),
 			ElapsedNS:     h.elapsedNS(now),
 		},
-		Attempt:    h.lastAttempt,
-		Outcome:    outcome,
-		HTTPStatus: httpStatus,
-		SafeError:  safeError,
-		Usage:      usage,
-		Timings:    timings,
+		Attempt:           h.lastAttempt,
+		Outcome:           outcome,
+		HTTPStatus:        httpStatus,
+		SafeError:         safeError,
+		Usage:             usage,
+		Timings:           timings,
+		ServiceAccount:    h.serviceAccount,
+		Model:             h.model,
+		Provider:          h.lastProvider,
+		UpstreamRequestID: details.UpstreamRequestID,
 	}
 	return r.writeLocked(line, true)
+}
+
+// HTTPResponse stores a bounded upstream HTTP error/non-SSE body as exact bytes.
+// It is a non-durable record; the following End is the durability fence.
+func (h *Request) HTTPResponse(status int, upstreamRequestID string, body []byte, truncated, readFailed bool) error {
+	if h == nil || h.recorder == nil {
+		return ErrRecordingUnavailable
+	}
+	if status < 100 || status > 599 || !validUpstreamRequestID(upstreamRequestID) || len(body) > maxEventBytes {
+		return fmt.Errorf("%w: upstream response snapshot is invalid", ErrInvalidRecord)
+	}
+	r := h.recorder
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if h.ended {
+		return ErrRequestEnded
+	}
+	if r.active[h.id] != h {
+		return ErrRecordingUnavailable
+	}
+	if h.lastAttempt == 0 {
+		return fmt.Errorf("%w: upstream response has no recorded transmission", ErrInvalidRecord)
+	}
+	now := time.Now()
+	line := upstreamResponseLine{
+		baseLine: baseLine{
+			SchemaVersion: schemaVersion,
+			Type:          "upstream_response",
+			RequestID:     h.id,
+			StartedAt:     h.startedAt,
+			TimestampUTC:  now.UTC(),
+			ElapsedNS:     h.elapsedNS(now),
+		},
+		Attempt: h.lastAttempt, HTTPStatus: status, UpstreamRequestID: upstreamRequestID,
+		Body: append([]byte(nil), body...), BodyTruncated: truncated, BodyReadFailed: readFailed,
+	}
+	return r.writeLocked(line, false)
 }
 
 func (h *Request) elapsedNS(now time.Time) int64 {
@@ -874,7 +937,7 @@ func (r *Recorder) Close() error {
 	}
 	for id, h := range r.active {
 		if !h.ended {
-			_ = r.writeEndLocked(h, "incomplete", 0, "request ended when recorder closed", nil, Timings{})
+			_ = r.writeEndLocked(h, "incomplete", 0, "request ended when recorder closed", nil, Timings{}, EndDetails{})
 			h.ended = true
 		}
 		delete(r.active, id)
@@ -936,14 +999,28 @@ type eventLine struct {
 	WireText  string `json:"wire_text"`
 }
 
+type upstreamResponseLine struct {
+	baseLine
+	Attempt           int    `json:"attempt"`
+	HTTPStatus        int    `json:"http_status"`
+	UpstreamRequestID string `json:"upstream_request_id"`
+	Body              []byte `json:"body"`
+	BodyTruncated     bool   `json:"body_truncated"`
+	BodyReadFailed    bool   `json:"body_read_failed"`
+}
+
 type endLine struct {
 	baseLine
-	Attempt    int     `json:"attempt"`
-	Outcome    string  `json:"outcome"`
-	HTTPStatus int     `json:"http_status"`
-	SafeError  string  `json:"safe_error"`
-	Usage      *Usage  `json:"usage"`
-	Timings    Timings `json:"timings"`
+	Attempt           int                    `json:"attempt"`
+	Outcome           string                 `json:"outcome"`
+	HTTPStatus        int                    `json:"http_status"`
+	SafeError         string                 `json:"safe_error"`
+	Usage             *Usage                 `json:"usage"`
+	Timings           Timings                `json:"timings"`
+	ServiceAccount    ServiceAccountSnapshot `json:"service_account"`
+	Model             ModelSnapshot          `json:"model"`
+	Provider          *ProviderSnapshot      `json:"provider,omitempty"`
+	UpstreamRequestID string                 `json:"upstream_request_id,omitempty"`
 }
 
 func validRequestID(id string) bool {
@@ -977,6 +1054,18 @@ func newRequestID() (string, error) {
 	encoded[23] = '-'
 	hex.Encode(encoded[24:36], value[10:16])
 	return string(encoded), nil
+}
+
+func validUpstreamRequestID(id string) bool {
+	if len(id) > 256 {
+		return false
+	}
+	for i := 0; i < len(id); i++ {
+		if id[i] < 0x20 || id[i] > 0x7e {
+			return false
+		}
+	}
+	return true
 }
 
 func validOutcome(outcome string) bool {
@@ -1019,6 +1108,7 @@ func cloneUsage(usage *Usage) *Usage {
 func validTimings(timings Timings) bool {
 	for _, value := range []*int64{
 		timings.AuthenticationPreparationNS,
+		timings.ConnectionRequestedNS,
 		timings.ConnectionEstablishedNS,
 		timings.RequestTransmissionNS,
 		timings.FirstEventNS,
@@ -1054,11 +1144,21 @@ func cloneTimings(timings Timings) Timings {
 	}
 	return Timings{
 		AuthenticationPreparationNS: copyOffset(timings.AuthenticationPreparationNS),
+		ConnectionRequestedNS:       copyOffset(timings.ConnectionRequestedNS),
 		ConnectionEstablishedNS:     copyOffset(timings.ConnectionEstablishedNS),
 		RequestTransmissionNS:       copyOffset(timings.RequestTransmissionNS),
 		FirstEventNS:                copyOffset(timings.FirstEventNS),
 		FirstOutputNS:               copyOffset(timings.FirstOutputNS),
 		StreamCompletionNS:          copyOffset(timings.StreamCompletionNS),
 		DownstreamDeliveryNS:        copyOffset(timings.DownstreamDeliveryNS),
+		ConnectionReused:            cloneBool(timings.ConnectionReused),
 	}
+}
+
+func cloneBool(value *bool) *bool {
+	if value == nil {
+		return nil
+	}
+	copy := *value
+	return &copy
 }

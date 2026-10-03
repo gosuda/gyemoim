@@ -1,6 +1,6 @@
 # Gyemoim Implementation Plan
 
-This plan tracks implementation in small, reviewable tasks. T01 through T09 are complete. T10 through T17 are pending.
+This plan tracks implementation in small, reviewable tasks. T01 through T10 are complete. T11 through T17 are pending.
 
 ## Tasks
 
@@ -15,7 +15,7 @@ This plan tracks implementation in small, reviewable tasks. T01 through T09 are 
 | T07 | OpenAI OAuth login and credential registration | Complete |
 | T08 | Token refresh and provider model catalog | Complete |
 | T09 | OpenAI Responses provider contract and capability validation | Complete |
-| T10 | Streaming gateway, cancellation, request IDs, and timing | Pending |
+| T10 | Streaming gateway, cancellation, request IDs, and timing | Complete |
 | T11 | Non-streaming responses, errors, and resource limits | Pending |
 | T12 | pi agent 1.0.0 model metadata and connection configuration | Pending |
 | T13 | History query and usage aggregation | Pending |
@@ -117,3 +117,13 @@ This plan tracks implementation in small, reviewable tasks. T01 through T09 are 
 - No automated tests were added or run. No live authenticated account is available, so wire behavior remains unverified.
 
 - Parent reviewed the complete adapter and corrected capability traversal, transport error handling, terminal event retention, and recorder-aligned timing. CGO-disabled Linux/macOS amd64/arm64 builds passed. Live authenticated inference remains unverified; no automated tests were added or run.
+
+
+### T10
+
+- Added `POST /v1/responses` with local bearer authentication, one immutable Model target, a maximum of eight active inference requests, and a 64 MiB bounded request body. The gateway records an authorized valid JSON request before capability checks or SIWC token preparation, then syncs the effective upstream request before sending it.
+- Streams complete upstream SSE frames synchronously for backpressure, preserving original frame bytes. Each downstream write has a 30-second write deadline; incoming request bodies have a 30-second read deadline. Active SSE streams have no overall timeout. Client cancellation closes the upstream request context.
+- Records terminal outcomes, usage, auth-preparation and provider timing offsets, downstream delivery, connection acquisition/reuse, a separate upstream request ID, and full bounded raw HTTP error bodies. Schema 2 end records contain small self-contained account, Model, and actual Provider attribution snapshots; the reader accepts schema 1 and 2. A recording loss after admission does not stop the live stream, while new admissions fail before provider authentication when storage is already degraded.
+- Until T11, `stream:false` returns a clear 400 unsupported response. Upstream HTTP errors currently map to a safe 502; T11 can add provider-status-specific error mapping. No retries or fallback attempts are made. No automated tests were added or run.
+
+- Parent reviewed all changes and corrected selection-interface use, typed authentication errors, incomplete EOF handling, partial-frame forwarding, and error-path timing. CGO-disabled Linux/macOS amd64/arm64 builds passed. Manual local API checks passed for capability rejection, nonstream rejection, disconnected Provider errors, request IDs, and schema 2 attribution. Live authenticated streaming remains unverified.

@@ -22,6 +22,7 @@ import (
 	"github.com/gosuda/gyemoim/internal/httpapi"
 	"github.com/gosuda/gyemoim/internal/httpui"
 	"github.com/gosuda/gyemoim/internal/processlock"
+	"github.com/gosuda/gyemoim/internal/provider"
 	"github.com/gosuda/gyemoim/internal/siwc"
 	"github.com/gosuda/gyemoim/internal/websecurity"
 )
@@ -107,12 +108,13 @@ func run(args []string) error {
 
 	guard := websecurity.New(*port, csrfToken)
 	oauthManager := siwc.NewManager(store, *port)
+	responsesAdapter := provider.NewOpenAIResponsesAdapter()
 	mux := http.NewServeMux()
 	// Browser-origin protections cover the UI and management JSON API. Bearer-authenticated
 	// harness routes share only the loopback Host guard applied by the server.
 	mux.Handle("/api/", guard.Management(httpapi.NewManagement(store, uiHandler, oauthManager)))
 	mux.Handle("GET /auth/callback", guard.Callback(http.HandlerFunc(oauthManager.ServeCallback)))
-	mux.Handle("/v1/", httpapi.NewHarness(gateway.New(store)))
+	mux.Handle("/v1/", httpapi.NewHarness(gateway.New(store), historyRecorder, oauthManager, responsesAdapter))
 	mux.Handle("/", guard.Management(uiHandler))
 
 	serverBase, cancelServerBase := context.WithCancel(context.Background())

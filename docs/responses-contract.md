@@ -92,6 +92,38 @@ do not count as first output. `NewTraceWithElapsed` accepts the recorder handle'
 `Trace.Snapshot` returns offsets from that clock; the executor maps them into history
 timing fields and adds authentication preparation and downstream delivery timings.
 
+## T10 gateway lifecycle
+
+`POST /v1/responses` authenticates the local bearer key, admits at most eight inferences,
+then reads a request body capped at 64 MiB (with a 30-second body-read deadline). It
+resolves one authorized immutable Model target and durably begins history before adapter
+capability checks or SIWC access-token preparation. It durably records the effective
+upstream request before `Send`. There are no retries or fallback attempts.
+
+The gateway synchronously reads, records, and forwards each complete SSE frame so a slow
+downstream applies backpressure to upstream reading. Raw upstream frame bytes are
+preserved, including the provider response's model name. Every downstream frame write and
+flush has a 30-second deadline; an active SSE stream has no overall deadline. The local
+`X-Request-ID` matches the history ID sent upstream as `X-Client-Request-Id`. A validated
+provider request ID is recorded separately and returned as `X-Upstream-Request-ID`.
+
+A terminal event is accepted only when its event type and nested response status agree
+(for example, `response.completed` with `response.status: completed`). Complete raw events are
+forwarded unchanged. A final unterminated frame is retained in history and withheld from
+the client so it cannot corrupt SSE framing. Clean EOF without a terminal event sends a
+safe SSE error event and ends as `incomplete`; provider stream read errors send the same
+kind of safe SSE error and end as `failed`. A downstream write failure ends as `cancelled`. Terminal usage is kept
+even if its event cannot be delivered.
+
+HTTP error bodies and successful non-SSE response bodies are retained as exact bounded
+bytes in schema 2 `upstream_response` records. Their bodies are not echoed in gateway
+HTTP errors. Upstream HTTP errors currently map to a safe 502; T11 may add status-specific
+mapping. `stream:false` returns a clear 400 until T11 implements non-streaming responses.
+
+If a history write fails after admission, the admitted inference continues and later
+history writes may be lost; the recorder's counters report that loss. A recorder already
+degraded at `Begin` rejects inference with 503 before SIWC token refresh or provider I/O.
+
 ## Verification status
 
 The adapter has been built and source-inspected without a live OpenAI account. The

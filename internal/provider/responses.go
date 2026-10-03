@@ -927,13 +927,25 @@ func parseEvent(frame []byte, complete bool) SSEEvent {
 			var envelope struct {
 				Response json.RawMessage `json:"response"`
 			}
-			if json.Unmarshal(event.DataJSON, &envelope) == nil && jsonObject(envelope.Response) {
+			if json.Unmarshal(event.DataJSON, &envelope) == nil && responseStatusIs(envelope.Response, "completed") {
 				event.Terminal, event.Outcome = true, "completed"
 			}
-		case "response.failed", "error":
+		case "response.failed":
+			var envelope struct {
+				Response json.RawMessage `json:"response"`
+			}
+			if json.Unmarshal(event.DataJSON, &envelope) == nil && responseStatusIs(envelope.Response, "failed") {
+				event.Terminal, event.Outcome = true, "failed"
+			}
+		case "error":
 			event.Terminal, event.Outcome = true, "failed"
 		case "response.incomplete":
-			event.Terminal, event.Outcome = true, "incomplete"
+			var envelope struct {
+				Response json.RawMessage `json:"response"`
+			}
+			if json.Unmarshal(event.DataJSON, &envelope) == nil && responseStatusIs(envelope.Response, "incomplete") {
+				event.Terminal, event.Outcome = true, "incomplete"
+			}
 		}
 		if event.Terminal {
 			var envelope struct {
@@ -955,6 +967,16 @@ func parseEvent(frame []byte, complete bool) SSEEvent {
 func jsonObject(raw json.RawMessage) bool {
 	trimmed := bytes.TrimSpace(raw)
 	return len(trimmed) >= 2 && trimmed[0] == '{' && trimmed[len(trimmed)-1] == '}' && json.Valid(trimmed)
+}
+
+func responseStatusIs(raw json.RawMessage, expected string) bool {
+	if !jsonObject(raw) {
+		return false
+	}
+	var response struct {
+		Status string `json:"status"`
+	}
+	return json.Unmarshal(raw, &response) == nil && response.Status == expected
 }
 
 func (e SSEEvent) hasVisibleOutput() bool {

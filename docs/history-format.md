@@ -1,4 +1,4 @@
-# Request History Format (schema version 1)
+# Request History Format (writer schema version 2)
 
 Gyemoim stores request history outside SQLite as newline-delimited JSON in
 `<data-directory>/history/active.ndjson`. Each line is one compact JSON object
@@ -37,8 +37,8 @@ infer. No synthetic end records are written at startup.
 
 | Field | Type | Meaning |
 | --- | --- | --- |
-| `schema_version` | integer | `1` for this format. |
-| `type` | string | `request_start`, `upstream_transmission`, `response_event`, or `request_end`. |
+| `schema_version` | integer | New records use `2`. The reader accepts legacy schema `1` and schema `2`. |
+| `type` | string | `request_start`, `upstream_transmission`, `upstream_response`, `response_event`, or `request_end`. |
 | `request_id` | string | Gateway request ID correlating all records for one request. |
 | `started_at` | UTC timestamp | Wall-clock timestamp captured at recorder admission and repeated unchanged on every line. |
 | `timestamp_utc` | UTC timestamp | Wall-clock time when this record was written. |
@@ -68,6 +68,20 @@ successful handle.
 
 `Transmit` writes and syncs this record before the caller sends the upstream request.
 
+### `upstream_response` (schema 2)
+
+- `attempt`: attempt whose HTTP response was received.
+- `http_status`: actual upstream HTTP status.
+- `upstream_request_id`: validated provider request ID, if supplied.
+- `body`: exact raw response bytes encoded by JSON as base64. It is bounded to 64 MiB.
+- `body_truncated` and `body_read_failed`: indicate that the adapter could not retain a
+  complete body because of the size cap or a read failure. Both can be true if the body
+  exceeded the cap and reading also failed.
+
+This record preserves non-2xx bodies and successful responses with an unexpected
+content type. It contains no upstream response headers or managed authorization token.
+The following `request_end` record provides the durability fence.
+
 ### `response_event`
 
 - `attempt`: most recently recorded upstream attempt.
@@ -86,9 +100,15 @@ per frame, not per stream. Event records are synced by the next durable fence or
 - `safe_error`: a short pre-sanitized explanation, empty when none applies.
 - `usage`: `null` when unavailable, or an object with `input_tokens`, `output_tokens`,
   `cached_input_tokens`, and `reasoning_output_tokens`.
-- `timings`: offsets `authentication_preparation_ns`, `connection_established_ns`,
-  `request_transmission_ns`, `first_event_ns`, `first_output_ns`,
-  `stream_completion_ns`, and `downstream_delivery_ns`.
+- `service_account`, `model`, and `provider`: small admission and actual-target snapshots
+  written by schema 2 so attribution scans can read end records without joining request
+  starts or transmissions. `provider` is absent only when no attempt was transmitted.
+- `upstream_request_id`: safe provider request ID, separate from the gateway `request_id`.
+- `timings`: offsets `authentication_preparation_ns`, `connection_requested_ns`,
+  `connection_established_ns`, `request_transmission_ns`, `first_event_ns`,
+  `first_output_ns`, `stream_completion_ns`, `downstream_delivery_ns`, and the optional
+  `connection_reused` boolean. `connection_requested_ns` and `connection_reused` are
+  written by schema 2. `downstream_delivery_ns` is the last successfully flushed frame.
 
 A missing usage count or timing is JSON `null`; a reported count of zero is `0`.
 Cached input and reasoning output are subsets of their respective totals. `End` writes
@@ -106,7 +126,8 @@ requests before provider invocation. `Status` exposes only state, potentially-lo
 count, active-request count, and bytes in the current active file.
 
 The schema has no HTTP authorization header, local API key, OAuth credential object,
-authentication URL, or generic URL field. Callers pass JSON request bodies only;
+authentication URL, or generic URL field. New records use schema 2; readers continue to
+accept schema 1 without requiring schema 2 attribution fields. Callers pass JSON request bodies only;
 arbitrary user-provided body content is preserved. Callers must keep gateway-managed
 credentials out of body payloads and must sanitize `safe_error` before recording it.
 

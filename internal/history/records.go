@@ -20,36 +20,40 @@ const (
 	recordReadBufferSize = 64 << 10
 )
 
-// Record is the decoded union of the supported schema-version-1 history lines.
+// Record is the decoded union of supported schema-version-1 and version-2 history lines.
 // Fields that do not apply to Type remain at their zero value. Raw request bodies
 // and response frames belong only to this callback and should not be retained by
 // readers that process an entire history.
 type Record struct {
-	SchemaVersion    int
-	Type             string
-	RequestID        string
-	StartedAt        time.Time
-	TimestampUTC     time.Time
-	ElapsedNS        int64
-	ServiceAccount   *ServiceAccountSnapshot
-	Model            *ModelSnapshot
-	IncomingRequest  json.RawMessage
-	Attempt          int
-	ProviderID       string
-	ProviderName     string
-	UpstreamModel    string
-	EffectiveRequest json.RawMessage
-	EventName        string
-	Sequence         uint64
-	WireText         string
-	Outcome          string
-	HTTPStatus       int
-	SafeError        string
-	Usage            *Usage
-	Timings          Timings
+	SchemaVersion                  int
+	Type                           string
+	RequestID                      string
+	StartedAt                      time.Time
+	TimestampUTC                   time.Time
+	ElapsedNS                      int64
+	ServiceAccount                 *ServiceAccountSnapshot
+	Model                          *ModelSnapshot
+	IncomingRequest                json.RawMessage
+	Attempt                        int
+	ProviderID                     string
+	ProviderName                   string
+	UpstreamModel                  string
+	EffectiveRequest               json.RawMessage
+	UpstreamRequestID              string
+	UpstreamResponseBody           []byte
+	UpstreamResponseBodyTruncated  bool
+	UpstreamResponseBodyReadFailed bool
+	EventName                      string
+	Sequence                       uint64
+	WireText                       string
+	Outcome                        string
+	HTTPStatus                     int
+	SafeError                      string
+	Usage                          *Usage
+	Timings                        Timings
 }
 
-// ReadRecords visits complete, supported schema-version-1 lines in an NDJSON
+// ReadRecords visits complete, supported schema-version-1 or version-2 lines in an NDJSON
 // stream. It retains at most one record line (capped at 512 MiB) at a time and
 // stops immediately if the context or callback reports an error. A non-newline
 // terminated tail is an error; startup recovery handles that only for active.ndjson.
@@ -159,7 +163,7 @@ func decodeRecord(line []byte) (Record, error) {
 	if err := json.Unmarshal(line, &envelope); err != nil {
 		return Record{}, err
 	}
-	if envelope.SchemaVersion != schemaVersion {
+	if envelope.SchemaVersion < minimumSchemaVersion || envelope.SchemaVersion > schemaVersion {
 		return Record{}, fmt.Errorf("unsupported schema version %d", envelope.SchemaVersion)
 	}
 	if !validRequestID(envelope.RequestID) || envelope.StartedAt.IsZero() || envelope.TimestampUTC.IsZero() || envelope.ElapsedNS < 0 {
@@ -209,6 +213,24 @@ func decodeRecord(line []byte) (Record, error) {
 		record.ProviderName = lineValue.ProviderName
 		record.UpstreamModel = lineValue.UpstreamModel
 		record.EffectiveRequest = lineValue.EffectiveRequest
+	case "upstream_response":
+		if envelope.SchemaVersion < 2 {
+			return Record{}, errors.New("upstream_response requires schema version 2")
+		}
+		var lineValue upstreamResponseLine
+		if err := decodeStrict(line, &lineValue); err != nil {
+			return Record{}, err
+		}
+		if lineValue.Attempt < 1 || lineValue.HTTPStatus < 100 || lineValue.HTTPStatus > 599 ||
+			!validUpstreamRequestID(lineValue.UpstreamRequestID) || len(lineValue.Body) > maxEventBytes {
+			return Record{}, errors.New("invalid upstream_response fields")
+		}
+		record.Attempt = lineValue.Attempt
+		record.HTTPStatus = lineValue.HTTPStatus
+		record.UpstreamRequestID = lineValue.UpstreamRequestID
+		record.UpstreamResponseBody = append([]byte(nil), lineValue.Body...)
+		record.UpstreamResponseBodyTruncated = lineValue.BodyTruncated
+		record.UpstreamResponseBodyReadFailed = lineValue.BodyReadFailed
 	case "response_event":
 		var lineValue eventLine
 		if err := decodeStrict(line, &lineValue); err != nil {
@@ -227,13 +249,30 @@ func decodeRecord(line []byte) (Record, error) {
 			return Record{}, err
 		}
 		if lineValue.Attempt < 0 || !validOutcome(lineValue.Outcome) || lineValue.HTTPStatus < 0 || lineValue.HTTPStatus > 599 ||
-			len(lineValue.SafeError) > maxSafeError || !utf8.ValidString(lineValue.SafeError) || !validTimings(lineValue.Timings) || !validUsage(lineValue.Usage) {
+			len(lineValue.SafeError) > maxSafeError || !utf8.ValidString(lineValue.SafeError) || !validTimings(lineValue.Timings) || !validUsage(lineValue.Usage) ||
+			!validUpstreamRequestID(lineValue.UpstreamRequestID) {
 			return Record{}, errors.New("invalid request_end fields")
+		}
+		if envelope.SchemaVersion >= 2 && (strings.TrimSpace(lineValue.ServiceAccount.ID) == "" || strings.TrimSpace(lineValue.ServiceAccount.Name) == "" ||
+			strings.TrimSpace(lineValue.Model.ID) == "" || strings.TrimSpace(lineValue.Model.Name) == "" || lineValue.Model.Version < 1 || strings.TrimSpace(lineValue.Model.Strategy) == "" ||
+			(lineValue.Attempt == 0 && lineValue.Provider != nil) || (lineValue.Attempt > 0 && (lineValue.Provider == nil || strings.TrimSpace(lineValue.Provider.ID) == "" || strings.TrimSpace(lineValue.Provider.Name) == "" || strings.TrimSpace(lineValue.Provider.UpstreamModel) == ""))) {
+			return Record{}, errors.New("invalid request_end attribution")
 		}
 		record.Attempt = lineValue.Attempt
 		record.Outcome = lineValue.Outcome
 		record.HTTPStatus = lineValue.HTTPStatus
 		record.SafeError = lineValue.SafeError
+		record.UpstreamRequestID = lineValue.UpstreamRequestID
+		if envelope.SchemaVersion >= 2 {
+			account := lineValue.ServiceAccount
+			model := lineValue.Model
+			record.ServiceAccount = &account
+			record.Model = &model
+			if lineValue.Provider != nil {
+				provider := *lineValue.Provider
+				record.ProviderID, record.ProviderName, record.UpstreamModel = provider.ID, provider.Name, provider.UpstreamModel
+			}
+		}
 		if lineValue.Usage != nil {
 			record.Usage = cloneUsage(lineValue.Usage)
 		}
