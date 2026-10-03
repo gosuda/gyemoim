@@ -8,6 +8,7 @@
     accounts: [],
     models: [],
     editingModel: null,
+    catalogRequest: 0,
     sensitiveCleanup: new Set(),
   };
   const titles = {
@@ -152,7 +153,7 @@
   function providerStatusDescription(status) {
     if (status === "connected") return "This OpenAI account is connected and ready for direct inference.";
     if (status === "plan_usage_disabled") return "The account is linked, but direct inference access was not granted. Reconnect after enabling access for this account.";
-    if (status === "require_reauthentication") return "The sign-in did not provide offline access and a refresh token. Reconnect this account before using it.";
+    if (status === "require_reauthentication") return "This account’s saved refresh grant can no longer renew access. Reconnect before using it.";
     return "Connect an OpenAI account with Sign in with ChatGPT.";
   }
 
@@ -177,6 +178,8 @@
     const info = element("p", "resource-copy", providerStatusDescription(provider.status));
     const connect = button(provider.status === "disconnected" ? "Connect OpenAI account" : "Reconnect", "primary small", async () => {
       connect.disabled = true;
+      byId("provider-oauth-message").hidden = true;
+      showMessage(byId("provider-oauth-message"));
       showMessage(actionMessage);
       try {
         const result = await api(`/api/providers/${encodeURIComponent(provider.id)}/oauth/start`, {
@@ -190,7 +193,33 @@
     });
     const actionMessage = element("p", "form-message");
     actionMessage.setAttribute("aria-live", "polite");
-    card.append(info, connect, actionMessage);
+    card.append(info, connect);
+    if (provider.status !== "disconnected") {
+      const disconnect = button("Disconnect", "danger quiet small", async () => {
+        disconnect.disabled = true;
+        byId("provider-oauth-message").hidden = true;
+        showMessage(byId("provider-oauth-message"));
+        showMessage(actionMessage);
+        try {
+          const result = await api(`/api/providers/${encodeURIComponent(provider.id)}/disconnect`, {
+            method: "POST", body: JSON.stringify({}),
+          });
+          await loadProviders();
+          if (result?.revocationAttempted && !result.revocationConfirmed) {
+            const notice = byId("provider-oauth-message");
+            showMessage(notice, "Credentials were cleared locally, but OpenAI did not confirm remote sign-out. You can disconnect the app in ChatGPT Settings.", "error");
+            notice.hidden = false;
+          }
+        } catch (error) {
+          showMessage(actionMessage, error.message, "error");
+        } finally {
+          disconnect.disabled = false;
+        }
+      });
+      card.append(disconnect);
+    }
+    actionMessage.setAttribute("aria-live", "polite");
+    card.append(actionMessage);
 
     const renameForm = element("form", "inline-form");
     renameForm.hidden = true;
@@ -529,6 +558,57 @@
     }
     if (state.providers.some((provider) => provider.id === selected)) select.value = selected;
     select.disabled = state.providers.length === 0;
+    resetProviderModelCatalog();
+  }
+
+  function syncModelCatalogControl() {
+    const provider = state.providers.find((item) => item.id === byId("model-provider").value);
+    byId("model-catalog-load").disabled = provider?.status !== "connected";
+  }
+
+  function resetProviderModelCatalog() {
+    state.catalogRequest += 1;
+    byId("provider-model-catalog").replaceChildren();
+    byId("model-catalog-load").textContent = "Load models";
+    showMessage(byId("model-catalog-message"));
+    syncModelCatalogControl();
+  }
+
+  async function loadProviderModelCatalog() {
+    const providerId = byId("model-provider").value;
+    const provider = state.providers.find((item) => item.id === providerId);
+    const load = byId("model-catalog-load");
+    const catalog = byId("provider-model-catalog");
+    const message = byId("model-catalog-message");
+    const requestId = ++state.catalogRequest;
+    catalog.replaceChildren();
+    showMessage(message);
+    syncModelCatalogControl();
+    if (!providerId || provider?.status !== "connected") {
+      showMessage(message, "Connect the selected provider to load its account model list.", "error");
+      return;
+    }
+    load.disabled = true;
+    load.textContent = "Loading…";
+    try {
+      const models = await api(`/api/providers/${encodeURIComponent(providerId)}/models`);
+      if (requestId !== state.catalogRequest || byId("model-provider").value !== providerId) return;
+      for (const model of models) {
+        const option = document.createElement("option");
+        option.value = model.id;
+        option.label = model.displayName;
+        catalog.append(option);
+      }
+      showMessage(message, models.length ? `${models.length} models loaded for ${provider.name}.` : "No displayable models were returned for this account.", models.length ? "success" : "");
+    } catch (error) {
+      if (requestId !== state.catalogRequest || byId("model-provider").value !== providerId) return;
+      showMessage(message, `${error.message} You can still enter an upstream model ID.`, "error");
+    } finally {
+      if (requestId === state.catalogRequest && byId("model-provider").value === providerId) {
+        load.textContent = "Load models";
+        syncModelCatalogControl();
+      }
+    }
   }
 
   function renderModels() {
@@ -579,6 +659,7 @@
     byId("model-name").value = model.name;
     byId("model-provider").value = model.providerId || "";
     byId("model-upstream").value = model.upstreamModel || "";
+    resetProviderModelCatalog();
     byId("model-form-heading").textContent = `Edit ${model.name}`;
     byId("model-submit").textContent = "Save changes";
     byId("model-cancel").hidden = false;
@@ -595,6 +676,7 @@
     byId("model-submit").textContent = "Add Model";
     byId("model-cancel").hidden = true;
     byId("model-metadata-note").hidden = true;
+    resetProviderModelCatalog();
     showMessage(byId("model-form-message"));
   }
 
@@ -665,6 +747,8 @@
 
   byId("model-form").addEventListener("submit", submitModel);
   byId("model-cancel").addEventListener("click", cancelModelEdit);
+  byId("model-provider").addEventListener("change", resetProviderModelCatalog);
+  byId("model-catalog-load").addEventListener("click", loadProviderModelCatalog);
   document.querySelectorAll("[data-page]").forEach((item) => item.addEventListener("click", () => navigate(item.dataset.page)));
   document.querySelectorAll("[data-refresh]").forEach((item) => item.addEventListener("click", () => refreshPage(item.dataset.refresh)));
 
@@ -673,7 +757,7 @@
     const messages = {
       connected: ["OpenAI sign-in completed. Direct inference access is ready.", "success"],
       plan_usage_disabled: ["The account is linked, but direct inference access was not granted.", "error"],
-      require_reauthentication: ["The account is linked, but offline access or its refresh token is missing. Reconnect before using it.", "error"],
+      require_reauthentication: ["The saved refresh grant can no longer renew this account. Reconnect before using it.", "error"],
       authorization_denied: ["OpenAI sign-in was cancelled.", "error"],
       failed: ["OpenAI sign-in could not be completed. Reconnect and try again.", "error"],
     };

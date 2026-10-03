@@ -289,24 +289,33 @@ func (s *Store) GetProviderCredentials(ctx context.Context, providerID string) (
 
 // DisconnectProvider clears all OAuth tokens but preserves the registration identity.
 func (s *Store) DisconnectProvider(ctx context.Context, providerID string) error {
+	return s.ClearProviderCredentials(ctx, providerID, "disconnected")
+}
+
+// ClearProviderCredentials removes unusable OAuth tokens while preserving the
+// registration ID and recording the recovery state exposed by the management UI.
+func (s *Store) ClearProviderCredentials(ctx context.Context, providerID, status string) error {
+	if status != "disconnected" && status != "require_reauthentication" {
+		return errors.New("invalid provider credential state")
+	}
 	_, timestamp := nowText()
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("begin provider disconnection: %w", err)
+		return fmt.Errorf("begin provider credential clearing: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
 	if _, err := tx.ExecContext(ctx, `DELETE FROM provider_credentials WHERE provider_id = ?`, providerID); err != nil {
 		return fmt.Errorf("clear provider credentials: %w", err)
 	}
-	result, err := tx.ExecContext(ctx, `UPDATE providers SET status = 'disconnected', updated_at = ? WHERE id = ?`, timestamp, providerID)
+	result, err := tx.ExecContext(ctx, `UPDATE providers SET status = ?, updated_at = ? WHERE id = ?`, status, timestamp, providerID)
 	if err != nil {
-		return fmt.Errorf("update provider disconnection status: %w", err)
+		return fmt.Errorf("update provider credential status: %w", err)
 	}
 	if err := requireAffected(result, "provider", providerID); err != nil {
 		return err
 	}
 	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit provider disconnection: %w", err)
+		return fmt.Errorf("commit provider credential clearing: %w", err)
 	}
 	return nil
 }

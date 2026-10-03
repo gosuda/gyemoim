@@ -1,6 +1,6 @@
 # Gyemoim Implementation Plan
 
-This plan tracks implementation in small, reviewable tasks. T01 through T07 are complete. T08 through T17 are pending.
+This plan tracks implementation in small, reviewable tasks. T01 through T08 are complete. T09 through T17 are pending.
 
 ## Tasks
 
@@ -13,7 +13,7 @@ This plan tracks implementation in small, reviewable tasks. T01 through T07 are 
 | T05 | Versioned NDJSON request recorder | Complete |
 | T06 | Log rotation and crash-safe recovery | Complete |
 | T07 | OpenAI OAuth login and credential registration | Complete |
-| T08 | Token refresh and provider model catalog | Pending |
+| T08 | Token refresh and provider model catalog | Complete |
 | T09 | OpenAI Responses provider contract and capability validation | Pending |
 | T10 | Streaming gateway, cancellation, request IDs, and timing | Pending |
 | T11 | Non-streaming responses, errors, and resource limits | Pending |
@@ -97,3 +97,13 @@ This plan tracks implementation in small, reviewable tasks. T01 through T07 are 
 - No live account was available. A live sign-in and confirmation of the provider-issued callback fields and real token response remain unverified. T08 refresh, disconnection, and catalog behavior are not included. No automated tests were added or run.
 
 - Parent reviewed OAuth manager, persistence, guards, and UI changes. CGO-disabled Linux/macOS amd64/arm64 builds and JavaScript syntax passed. Live-discovery authorization configuration, denied callback redirect, and invalid-state/error-reflection checks passed. Authenticated sign-in remains unverified.
+
+
+### T08
+
+- Added a cancellable per-provider lock shared by OAuth start/callback, token refresh, and disconnect. Internal callers receive only a currently valid direct-use bearer token; refresh runs on demand within 60 seconds of expiry and atomically replaces the rotating token set.
+- Terminal refresh-token errors and malformed successful rotations clear unusable credentials and mark the saved registration for reauthentication. Transient transport/server errors preserve local credentials; invalid-client errors remain configuration errors.
+- Added same-origin provider disconnect and account-specific model catalog endpoints. Disconnect invalidates pending flow state, clears local tokens before best-effort remote revocation, and keeps the issued client registration. The catalog exposes only visible model slugs and display names from the SIWC response.
+- Updated the Provider and Models UI plus OAuth docs. No live OpenAI account was available to verify refresh rotation, remote revocation, or model availability. No automated tests were added or run.
+
+- Parent reviewed credential rotation, cancellation, disconnect serialization, safe catalog errors, transport reuse, and UI request generations. All four CGO-disabled Linux/macOS builds passed. Manual disconnected-catalog and pending-flow-disconnect checks passed; live refresh/revocation/catalog remain unverified.

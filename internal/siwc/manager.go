@@ -42,6 +42,12 @@ const (
 var (
 	errInvalidFlow = errors.New("invalid or expired OAuth flow")
 	errEndpoint    = errors.New("unexpected Sign in with ChatGPT endpoint")
+
+	ErrProviderNotReady         = errors.New("provider is not ready for direct inference")
+	ErrProviderReauthentication = errors.New("provider must be reauthenticated")
+	ErrProviderAuthUnavailable  = errors.New("provider authentication is temporarily unavailable")
+	ErrProviderOAuthClient      = errors.New("provider OAuth client configuration is invalid")
+	ErrRefreshTokenUnusable     = errors.New("provider refresh token is unusable")
 )
 
 type pendingFlow struct {
@@ -58,8 +64,8 @@ type pendingFlow struct {
 	client      *http.Client
 }
 
-// Manager owns bounded, short-lived browser flows. It does not perform discovery
-// or network access until Start is called by an explicit user action.
+// Manager owns bounded browser flows and provider credentials. Network access begins
+// only after an explicit sign-in, model-catalog, token, or disconnect action.
 type Manager struct {
 	store *config.Store
 	port  int
@@ -70,7 +76,7 @@ type Manager struct {
 	generation map[string]uint64
 
 	locksMu sync.Mutex
-	locks   map[string]*sync.Mutex
+	locks   map[string]chan struct{}
 }
 
 // NewManager creates an offline manager for the loopback listener.
@@ -78,7 +84,7 @@ func NewManager(store *config.Store, port int) *Manager {
 	return &Manager{
 		store: store, port: port,
 		pending: make(map[string]pendingFlow), latest: make(map[string]string),
-		generation: make(map[string]uint64), locks: make(map[string]*sync.Mutex),
+		generation: make(map[string]uint64), locks: make(map[string]chan struct{}),
 	}
 }
 
@@ -88,7 +94,10 @@ func (m *Manager) Start(ctx context.Context, providerID string) (string, error) 
 	if m == nil || m.store == nil || m.port < 1 || m.port > 65535 || providerID == "" {
 		return "", errors.New("OAuth manager is not configured")
 	}
-	unlock := m.lockProvider(providerID)
+	unlock, err := m.lockProvider(ctx, providerID)
+	if err != nil {
+		return "", err
+	}
 	defer unlock()
 
 	providerRecord, err := m.store.GetProvider(ctx, providerID)
@@ -222,7 +231,11 @@ func (m *Manager) ServeCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	unlock := m.lockProvider(flow.providerID)
+	unlock, lockErr := m.lockProvider(r.Context(), flow.providerID)
+	if lockErr != nil {
+		m.redirectResult(w, "failed")
+		return
+	}
 	defer unlock()
 	m.pendingMu.Lock()
 	isLatest := m.generation[flow.providerID] == flow.generation
@@ -309,16 +322,448 @@ func (m *Manager) expirePendingLocked(now time.Time) {
 	}
 }
 
-func (m *Manager) lockProvider(providerID string) func() {
+func (m *Manager) lockProvider(ctx context.Context, providerID string) (func(), error) {
 	m.locksMu.Lock()
 	lock := m.locks[providerID]
 	if lock == nil {
-		lock = &sync.Mutex{}
+		lock = make(chan struct{}, 1)
+		lock <- struct{}{}
 		m.locks[providerID] = lock
 	}
 	m.locksMu.Unlock()
-	lock.Lock()
-	return lock.Unlock
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-lock:
+		return func() { lock <- struct{}{} }, nil
+	}
+}
+
+// AccessToken returns a currently usable direct-use bearer token for an internal
+// caller. It is intentionally not exposed by an HTTP management endpoint.
+func (m *Manager) AccessToken(ctx context.Context, providerID string) (string, error) {
+	if m == nil || m.store == nil || providerID == "" {
+		return "", ErrProviderNotReady
+	}
+	unlock, err := m.lockProvider(ctx, providerID)
+	if err != nil {
+		return "", err
+	}
+	defer unlock()
+
+	providerRecord, err := m.store.GetProvider(ctx, providerID)
+	if err != nil {
+		return "", err
+	}
+	if providerRecord.Type != "openai" || providerRecord.Status != "connected" {
+		if providerRecord.Status == "require_reauthentication" {
+			return "", ErrProviderReauthentication
+		}
+		return "", ErrProviderNotReady
+	}
+	credentials, err := m.store.GetProviderCredentials(ctx, providerID)
+	if err != nil {
+		return "", err
+	}
+	if !hasScope(credentials.Scopes, "chatgpt.tokens.use.direct") || !hasScope(credentials.Scopes, "offline_access") ||
+		strings.TrimSpace(credentials.RefreshToken) == "" || strings.TrimSpace(credentials.AccessToken) == "" || credentials.ExpiresAt.IsZero() {
+		return "", ErrProviderReauthentication
+	}
+	if credentials.ExpiresAt.After(time.Now().Add(time.Minute)) {
+		return credentials.AccessToken, nil
+	}
+	refreshed, status, err := m.refresh(ctx, credentials)
+	if err != nil {
+		if errors.Is(err, ErrRefreshTokenUnusable) {
+			clearCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+			clearErr := m.store.ClearProviderCredentials(clearCtx, providerID, "require_reauthentication")
+			cancel()
+			if clearErr != nil {
+				return "", fmt.Errorf("could not clear unusable provider credentials: %w", clearErr)
+			}
+			return "", ErrProviderReauthentication
+		}
+		return "", err
+	}
+	if status == "require_reauthentication" {
+		clearCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		clearErr := m.store.ClearProviderCredentials(clearCtx, providerID, "require_reauthentication")
+		cancel()
+		if clearErr != nil {
+			return "", fmt.Errorf("could not clear incomplete refreshed credentials: %w", clearErr)
+		}
+		return "", ErrProviderReauthentication
+	}
+	persistCtx, cancelPersist := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	persistErr := m.store.ReplaceProviderCredentialsWithStatus(persistCtx, refreshed, status)
+	cancelPersist()
+	if persistErr != nil {
+		return "", fmt.Errorf("could not save refreshed provider credentials: %w", persistErr)
+	}
+	if ctx.Err() != nil {
+		return "", ctx.Err()
+	}
+	if status != "connected" {
+		return "", ErrProviderNotReady
+	}
+	return refreshed.AccessToken, nil
+}
+
+// Disconnect clears local credentials and invalidates any in-flight browser
+// authorization before it makes a best-effort remote revocation request.
+func (m *Manager) Disconnect(ctx context.Context, providerID string) (attempted, confirmed bool, err error) {
+	if m == nil || m.store == nil || providerID == "" {
+		return false, false, errors.New("OAuth manager is not configured")
+	}
+	unlock, err := m.lockProvider(ctx, providerID)
+	if err != nil {
+		return false, false, err
+	}
+	defer unlock()
+
+	m.pendingMu.Lock()
+	m.generation[providerID]++
+	if state := m.latest[providerID]; state != "" {
+		delete(m.pending, state)
+		delete(m.latest, providerID)
+	}
+	m.pendingMu.Unlock()
+
+	localCtx, cancelLocal := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancelLocal()
+	providerRecord, providerErr := m.store.GetProvider(localCtx, providerID)
+	if providerErr != nil {
+		return false, false, providerErr
+	}
+	if providerRecord.Type != "openai" {
+		return false, false, errors.New("provider does not support Sign in with ChatGPT")
+	}
+	credentials, credentialsErr := m.store.GetProviderCredentials(localCtx, providerID)
+	if credentialsErr != nil && !errors.Is(credentialsErr, config.ErrNotFound) {
+		return false, false, credentialsErr
+	}
+	if clearErr := m.store.DisconnectProvider(localCtx, providerID); clearErr != nil {
+		return false, false, clearErr
+	}
+	if credentialsErr != nil || strings.TrimSpace(credentials.RefreshToken) == "" {
+		return false, false, nil
+	}
+	attempted = true
+	revokeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancel()
+	confirmed = revokeRefreshToken(revokeCtx, credentials)
+	return attempted, confirmed, nil
+}
+
+// CatalogModel contains only the documented model identifier and display label.
+type CatalogModel struct {
+	ID          string `json:"id"`
+	DisplayName string `json:"displayName"`
+}
+
+// ProviderCatalogError reports only the upstream status code; response bodies can
+// contain diagnostics and are never passed to the management API or logs.
+type ProviderCatalogError struct {
+	StatusCode int
+}
+
+func (e *ProviderCatalogError) Error() string {
+	return "OpenAI rejected the model catalog request"
+}
+
+// Models fetches the selected connected account's displayable SIWC model catalog.
+func (m *Manager) Models(ctx context.Context, providerID string) ([]CatalogModel, error) {
+	token, err := m.AccessToken(ctx, providerID)
+	if err != nil {
+		return nil, err
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://api.openai.com/v1/models", nil)
+	if err != nil {
+		return nil, ErrProviderAuthUnavailable
+	}
+	request.Header.Set("Accept", "application/json")
+	request.Header.Set("Authorization", "Bearer "+token)
+	response, err := openAIHTTPClient().Do(request)
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return nil, ErrProviderAuthUnavailable
+	}
+	defer response.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(response.Body, modelCatalogBodyLimit+1))
+	if err != nil || len(body) > modelCatalogBodyLimit {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return nil, ErrProviderAuthUnavailable
+	}
+	if response.StatusCode != http.StatusOK {
+		if response.StatusCode >= 500 || response.StatusCode == http.StatusTooManyRequests {
+			return nil, ErrProviderAuthUnavailable
+		}
+		return nil, &ProviderCatalogError{StatusCode: response.StatusCode}
+	}
+	var payload struct {
+		Models []struct {
+			Slug        string `json:"slug"`
+			DisplayName string `json:"display_name"`
+			Visibility  string `json:"visibility"`
+		} `json:"models"`
+	}
+	decoder := json.NewDecoder(strings.NewReader(string(body)))
+	if err := decoder.Decode(&payload); err != nil {
+		return nil, ErrProviderAuthUnavailable
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return nil, ErrProviderAuthUnavailable
+	}
+	if payload.Models == nil || len(payload.Models) > 2000 {
+		return nil, ErrProviderAuthUnavailable
+	}
+	models := make([]CatalogModel, 0, len(payload.Models))
+	seen := make(map[string]struct{}, len(payload.Models))
+	for _, item := range payload.Models {
+		id := strings.TrimSpace(item.Slug)
+		name := strings.TrimSpace(item.DisplayName)
+		if item.Visibility != "list" || id == "" || name == "" {
+			continue
+		}
+		if _, exists := seen[id]; exists {
+			continue
+		}
+		seen[id] = struct{}{}
+		models = append(models, CatalogModel{ID: id, DisplayName: name})
+	}
+	return models, nil
+}
+
+const modelCatalogBodyLimit = 2 << 20
+
+func (m *Manager) refresh(ctx context.Context, previous config.ProviderCredentials) (config.ProviderCredentials, string, error) {
+	client := oauthHTTPClient()
+	provider, err := discoverOIDCProvider(ctx, client)
+	if err != nil {
+		if ctx.Err() != nil {
+			return config.ProviderCredentials{}, "", ctx.Err()
+		}
+		return config.ProviderCredentials{}, "", ErrProviderAuthUnavailable
+	}
+	tokens, err := exchangeRefreshToken(ctx, client, provider, previous.IssuedClientID, previous.RefreshToken)
+	if err != nil {
+		return config.ProviderCredentials{}, "", err
+	}
+	if strings.TrimSpace(tokens.RefreshToken) == "" {
+		return config.ProviderCredentials{}, "", ErrRefreshTokenUnusable
+	}
+	identity := verifiedIdentity{subject: previous.VerifiedSubject, email: previous.Email}
+	if strings.TrimSpace(tokens.IDToken) != "" {
+		identity, err = verifyRefreshedIdentity(ctx, provider, previous.IssuedClientID, tokens.IDToken)
+		if err != nil || identity.subject == "" || identity.subject != previous.VerifiedSubject {
+			return config.ProviderCredentials{}, "", ErrRefreshTokenUnusable
+		}
+		if identity.email == "" {
+			identity.email = previous.Email
+		}
+	} else {
+		// Refresh responses may omit an ID token. Keep the last validated identity.
+		tokens.IDToken = previous.IDToken
+	}
+	scopes := previous.Scopes
+	if tokens.ScopePresent {
+		scopes = strings.Fields(tokens.ScopeValue)
+	}
+	earliest := tokens.EarliestRefreshAt
+	if len(earliest) == 0 {
+		earliest = previous.EarliestRefreshAt
+	}
+	if len(earliest) != 0 && !json.Valid(earliest) {
+		return config.ProviderCredentials{}, "", ErrRefreshTokenUnusable
+	}
+	refreshed := config.ProviderCredentials{
+		ProviderID: previous.ProviderID, IssuedClientID: previous.IssuedClientID,
+		VerifiedSubject: identity.subject, Email: identity.email,
+		AccessToken: tokens.AccessToken, RefreshToken: tokens.RefreshToken,
+		IDToken: tokens.IDToken, ExpiresAt: tokens.ExpiresAt,
+		EarliestRefreshAt: earliest, Scopes: scopes,
+	}
+	status := connectionStatusFromScopes(scopes, refreshed.RefreshToken)
+	return refreshed, status, nil
+}
+
+func exchangeRefreshToken(ctx context.Context, client *http.Client, provider *oidc.Provider, clientID, refreshToken string) (tokenResponse, error) {
+	var result tokenResponse
+	endpoint := provider.Endpoint().TokenURL
+	if !validIdentityEndpoint(endpoint, tokenPath) || strings.TrimSpace(clientID) == "" || strings.TrimSpace(refreshToken) == "" {
+		return result, ErrProviderOAuthClient
+	}
+	form := url.Values{
+		"grant_type":    {"refresh_token"},
+		"client_id":     {clientID},
+		"refresh_token": {refreshToken},
+		"resource":      {resourceURI},
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(form.Encode()))
+	if err != nil {
+		return result, ErrProviderAuthUnavailable
+	}
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	request.Header.Set("Accept", "application/json")
+	response, err := client.Do(request)
+	if err != nil {
+		if ctx.Err() != nil {
+			return result, ctx.Err()
+		}
+		return result, ErrProviderAuthUnavailable
+	}
+	defer response.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(response.Body, maxHTTPBody+1))
+	if err != nil || len(body) > maxHTTPBody {
+		if ctx.Err() != nil {
+			return result, ctx.Err()
+		}
+		return result, ErrProviderAuthUnavailable
+	}
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		var responseError struct {
+			Error string `json:"error"`
+		}
+		_ = json.Unmarshal(body, &responseError)
+		switch responseError.Error {
+		case "invalid_grant", "invalid_refresh_token", "token_expired", "refresh_token_expired", "refresh_token_invalidated", "refresh_token_reused":
+			return result, ErrRefreshTokenUnusable
+		case "invalid_client":
+			return result, ErrProviderOAuthClient
+		}
+		if response.StatusCode >= 500 || response.StatusCode == http.StatusTooManyRequests || response.StatusCode == http.StatusRequestTimeout {
+			return result, ErrProviderAuthUnavailable
+		}
+		return result, ErrProviderAuthUnavailable
+	}
+	decoder := json.NewDecoder(strings.NewReader(string(body)))
+	decoder.UseNumber()
+	if err := decoder.Decode(&result); err != nil {
+		return tokenResponse{}, ErrRefreshTokenUnusable
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return tokenResponse{}, ErrRefreshTokenUnusable
+	}
+	if strings.TrimSpace(result.AccessToken) == "" || !strings.EqualFold(strings.TrimSpace(result.TokenType), "Bearer") || !json.Valid(result.EarliestRefreshAt) && len(result.EarliestRefreshAt) != 0 {
+		return tokenResponse{}, ErrRefreshTokenUnusable
+	}
+	seconds, err := strconv.ParseFloat(result.ExpiresIn.String(), 64)
+	if err != nil || seconds <= 0 || math.IsInf(seconds, 0) || math.IsNaN(seconds) || seconds > float64(math.MaxInt64)/float64(time.Second) {
+		return tokenResponse{}, ErrRefreshTokenUnusable
+	}
+	duration := time.Duration(seconds * float64(time.Second))
+	if duration <= 0 {
+		return tokenResponse{}, ErrRefreshTokenUnusable
+	}
+	result.ExpiresAt = time.Now().UTC().Add(duration)
+	result.ScopeValue, result.ScopePresent, err = parseScopeField(result.Scope)
+	if err != nil {
+		return tokenResponse{}, ErrRefreshTokenUnusable
+	}
+	result.Scopes = strings.Fields(result.ScopeValue)
+	return result, nil
+}
+
+func verifyRefreshedIdentity(ctx context.Context, provider *oidc.Provider, clientID, rawIDToken string) (verifiedIdentity, error) {
+	var identity verifiedIdentity
+	idToken, err := provider.Verifier(&oidc.Config{ClientID: clientID}).Verify(ctx, rawIDToken)
+	if err != nil || idToken.Subject == "" || idToken.IssuedAt.IsZero() ||
+		idToken.IssuedAt.After(time.Now().Add(5*time.Minute)) || idToken.IssuedAt.After(idToken.Expiry) {
+		return identity, errors.New("Sign in with ChatGPT returned an invalid refreshed identity token")
+	}
+	identity.subject = idToken.Subject
+	var claims struct {
+		Email         string `json:"email"`
+		EmailVerified bool   `json:"email_verified"`
+	}
+	if err := idToken.Claims(&claims); err == nil && claims.EmailVerified {
+		identity.email = strings.TrimSpace(claims.Email)
+	}
+	return identity, nil
+}
+
+func connectionStatusFromScopes(scopes []string, refreshToken string) string {
+	if !hasScope(scopes, "offline_access") || strings.TrimSpace(refreshToken) == "" {
+		return "require_reauthentication"
+	}
+	if !hasScope(scopes, "chatgpt.tokens.use.direct") {
+		return "plan_usage_disabled"
+	}
+	return "connected"
+}
+
+func hasScope(scopes []string, target string) bool {
+	for _, scope := range scopes {
+		if scope == target {
+			return true
+		}
+	}
+	return false
+}
+
+func revokeRefreshToken(ctx context.Context, credentials config.ProviderCredentials) bool {
+	client := oauthHTTPClient()
+	provider, err := discoverOIDCProvider(ctx, client)
+	if err != nil {
+		return false
+	}
+	var claims discoveryClaims
+	if provider.Claims(&claims) != nil || !validIdentityEndpoint(claims.RevocationEndpoint, revocationPath) {
+		return false
+	}
+	endpoint := claims.RevocationEndpoint
+	form := url.Values{
+		"token":           {credentials.RefreshToken},
+		"token_type_hint": {"refresh_token"},
+		"client_id":       {credentials.IssuedClientID},
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(form.Encode()))
+	if err != nil {
+		return false
+	}
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	request.Header.Set("Accept", "application/json")
+	response, err := client.Do(request)
+	if err != nil {
+		return false
+	}
+	defer response.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(response.Body, maxHTTPBody+1))
+	return err == nil && response.StatusCode == http.StatusOK && len(body) == 0
+}
+
+type restrictedOpenAITransport struct {
+	base http.RoundTripper
+}
+
+func (t restrictedOpenAITransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	if request.Method != http.MethodGet || request.URL.Scheme != "https" || request.URL.Hostname() != "api.openai.com" ||
+		request.URL.Port() != "" || request.URL.User != nil || request.URL.Path != "/v1/models" || request.URL.RawQuery != "" || request.URL.Fragment != "" {
+		return nil, errEndpoint
+	}
+	return t.base.RoundTrip(request)
+}
+
+var openAIClientOnce sync.Once
+var sharedOpenAIClient *http.Client
+
+func openAIHTTPClient() *http.Client {
+	openAIClientOnce.Do(func() {
+		transport := http.DefaultTransport.(*http.Transport).Clone()
+		transport.Proxy = nil
+		transport.ForceAttemptHTTP2 = true
+		sharedOpenAIClient = &http.Client{
+			Transport: restrictedOpenAITransport{base: transport}, Timeout: 30 * time.Second,
+			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+		}
+	})
+	return sharedOpenAIClient
 }
 
 func (m *Manager) redirectResult(w http.ResponseWriter, result string) {
@@ -361,6 +806,17 @@ type discoveryClaims struct {
 	TokenEndpoint         string `json:"token_endpoint"`
 	JWKSURI               string `json:"jwks_uri"`
 	RevocationEndpoint    string `json:"revocation_endpoint"`
+}
+
+func discoverOIDCProvider(ctx context.Context, client *http.Client) (*oidc.Provider, error) {
+	provider, err := oidc.NewProvider(oidc.ClientContext(ctx, client), issuerURL)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateDiscovery(provider); err != nil {
+		return nil, err
+	}
+	return provider, nil
 }
 
 func validateDiscovery(provider *oidc.Provider) error {
@@ -423,7 +879,9 @@ type tokenResponse struct {
 	RefreshToken      string          `json:"refresh_token"`
 	IDToken           string          `json:"id_token"`
 	TokenType         string          `json:"token_type"`
-	Scope             string          `json:"scope"`
+	Scope             json.RawMessage `json:"scope"`
+	ScopeValue        string          `json:"-"`
+	ScopePresent      bool            `json:"-"`
 	ExpiresIn         json.Number     `json:"expires_in"`
 	EarliestRefreshAt json.RawMessage `json:"earliest_refresh_at"`
 	Scopes            []string        `json:"-"`
@@ -483,7 +941,11 @@ func exchangeCode(ctx context.Context, client *http.Client, provider *oidc.Provi
 		return tokenResponse{}, errors.New("Sign in with ChatGPT returned an invalid token lifetime")
 	}
 	result.ExpiresAt = time.Now().UTC().Add(duration)
-	result.Scopes = strings.Fields(result.Scope)
+	result.ScopeValue, result.ScopePresent, err = parseScopeField(result.Scope)
+	if err != nil {
+		return tokenResponse{}, errors.New("Sign in with ChatGPT returned invalid scopes")
+	}
+	result.Scopes = strings.Fields(result.ScopeValue)
 	return result, nil
 }
 
@@ -511,8 +973,22 @@ func verifyIdentity(ctx context.Context, provider *oidc.Provider, clientID, nonc
 	return identity, nil
 }
 
+func parseScopeField(raw json.RawMessage) (string, bool, error) {
+	if len(raw) == 0 {
+		return "", false, nil
+	}
+	if strings.TrimSpace(string(raw)) == "null" {
+		return "", true, errors.New("scope must be a string")
+	}
+	var scope string
+	if err := json.Unmarshal(raw, &scope); err != nil {
+		return "", true, err
+	}
+	return scope, true, nil
+}
+
 func connectionStatus(tokens tokenResponse) string {
-	if tokens.Scope == "" {
+	if !tokens.ScopePresent || strings.TrimSpace(tokens.ScopeValue) == "" {
 		return "plan_usage_disabled"
 	}
 	hasScope := make(map[string]bool, len(tokens.Scopes))
@@ -537,17 +1013,25 @@ func (t restrictedTransport) RoundTrip(request *http.Request) (*http.Response, e
 		return nil, errEndpoint
 	}
 	allowed := (request.Method == http.MethodGet && (request.URL.Path == discoveryPath || request.URL.Path == jwksPath)) ||
-		(request.Method == http.MethodPost && request.URL.Path == tokenPath)
+		(request.Method == http.MethodPost && (request.URL.Path == tokenPath || request.URL.Path == revocationPath))
 	if !allowed || request.URL.RawQuery != "" || request.URL.Fragment != "" {
 		return nil, errEndpoint
 	}
 	return t.base.RoundTrip(request)
 }
 
+var oauthClientOnce sync.Once
+var sharedOAuthClient *http.Client
+
 func oauthHTTPClient() *http.Client {
-	transport := &http.Transport{Proxy: nil, ForceAttemptHTTP2: true}
-	return &http.Client{
-		Transport: restrictedTransport{base: transport}, Timeout: 30 * time.Second,
-		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
-	}
+	oauthClientOnce.Do(func() {
+		transport := http.DefaultTransport.(*http.Transport).Clone()
+		transport.Proxy = nil
+		transport.ForceAttemptHTTP2 = true
+		sharedOAuthClient = &http.Client{
+			Transport: restrictedTransport{base: transport}, Timeout: 30 * time.Second,
+			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+		}
+	})
+	return sharedOAuthClient
 }

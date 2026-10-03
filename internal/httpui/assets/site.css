@@ -132,6 +132,9 @@ h5 { margin: 0; color: #3b4654; font-size: 11px; font-weight: 680; }
 .model-form { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); align-items: start; gap: 12px; }
 .field { display: grid; gap: 7px; min-width: 0; }
 .field-hint { color: #87919d; font-size: 9px; line-height: 1.4; }
+.model-catalog-controls { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.model-catalog-controls input { flex: 1; min-width: 0; }
+#model-catalog-message { margin: 0; font-size: 9px; }
 .form-actions { display: flex; align-items: center; gap: 7px; }
 .full-width { grid-column: 1 / -1; }
 .metadata-note { margin: 12px 0 0; color: #77714b; font-size: 10px; }

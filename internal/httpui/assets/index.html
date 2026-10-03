@@ -119,7 +119,7 @@
           <form id="model-form" class="model-form">
             <div class="field"><label for="model-name">Model name</label><input id="model-name" name="name" type="text" maxlength="128" autocomplete="off" required placeholder="e.g. coding"></div>
             <div class="field"><label for="model-provider">Provider</label><select id="model-provider" name="providerId" required><option value="">Choose a provider</option></select></div>
-            <div class="field"><label for="model-upstream">Upstream model</label><input id="model-upstream" name="upstreamModel" type="text" maxlength="256" autocomplete="off" required placeholder="e.g. gpt-5"><span class="field-hint">Enter the upstream model ID accepted by this provider.</span></div>
+            <div class="field"><label for="model-upstream">Upstream model</label><div class="model-catalog-controls"><input id="model-upstream" name="upstreamModel" type="text" maxlength="256" autocomplete="off" list="provider-model-catalog" required placeholder="Enter or choose a model ID"><button class="button quiet small" id="model-catalog-load" type="button">Load models</button></div><datalist id="provider-model-catalog"></datalist><span class="field-hint">Choose an account model or enter its ID. Model details are not inferred.</span><p class="form-message" id="model-catalog-message" aria-live="polite"></p></div>
             <div class="form-actions"><button class="button primary" id="model-submit" type="submit">Add Model</button><button class="button quiet" id="model-cancel" type="button" hidden>Cancel edit</button></div>
             <p class="form-message full-width" id="model-form-message" aria-live="polite"></p>
           </form>

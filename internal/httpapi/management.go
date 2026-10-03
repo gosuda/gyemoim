@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -49,6 +50,10 @@ func (api *managementAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		api.provider(w, r, parts[1])
 	case len(parts) == 4 && parts[0] == "providers" && parts[2] == "oauth" && parts[3] == "start":
 		api.startProviderOAuth(w, r, parts[1])
+	case len(parts) == 3 && parts[0] == "providers" && parts[2] == "disconnect":
+		api.disconnectProvider(w, r, parts[1])
+	case len(parts) == 3 && parts[0] == "providers" && parts[2] == "models":
+		api.providerModels(w, r, parts[1])
 	case len(parts) == 1 && parts[0] == "service-accounts":
 		api.serviceAccounts(w, r)
 	case len(parts) == 2 && parts[0] == "service-accounts":
@@ -137,6 +142,75 @@ func (api *managementAPI) startProviderOAuth(w http.ResponseWriter, r *http.Requ
 	writeJSON(w, http.StatusOK, struct {
 		AuthorizationURL string `json:"authorizationUrl"`
 	}{AuthorizationURL: authorizationURL})
+}
+
+func (api *managementAPI) disconnectProvider(w http.ResponseWriter, r *http.Request, id string) {
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w, http.MethodPost)
+		return
+	}
+	if !decodeOptionalEmptyJSON(w, r) {
+		return
+	}
+	if api.oauth == nil {
+		writeManagementError(w, http.StatusServiceUnavailable, "OAuth sign-out is unavailable", "service_unavailable")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 12*time.Second)
+	defer cancel()
+	attempted, confirmed, err := api.oauth.Disconnect(ctx, id)
+	if errors.Is(err, config.ErrNotFound) {
+		writeManagementFailure(w, err)
+		return
+	}
+	if err != nil {
+		writeManagementError(w, http.StatusInternalServerError, "Could not clear the provider credentials.", "provider_disconnect_failed")
+		return
+	}
+	writeJSON(w, http.StatusOK, struct {
+		RevocationAttempted bool `json:"revocationAttempted"`
+		RevocationConfirmed bool `json:"revocationConfirmed"`
+	}{RevocationAttempted: attempted, RevocationConfirmed: confirmed})
+}
+
+func (api *managementAPI) providerModels(w http.ResponseWriter, r *http.Request, id string) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w, http.MethodGet)
+		return
+	}
+	if api.oauth == nil {
+		writeManagementError(w, http.StatusServiceUnavailable, "Provider model catalog is unavailable.", "provider_auth_unavailable")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 35*time.Second)
+	defer cancel()
+	models, err := api.oauth.Models(ctx, id)
+	if err != nil {
+		if r.Context().Err() != nil {
+			return
+		}
+		var catalogErr *siwc.ProviderCatalogError
+		switch {
+		case errors.Is(err, config.ErrNotFound):
+			writeManagementFailure(w, err)
+		case errors.Is(err, siwc.ErrProviderReauthentication):
+			writeManagementError(w, http.StatusUnauthorized, "Reconnect this OpenAI provider before loading its models.", "provider_reauthentication_required")
+		case errors.Is(err, siwc.ErrProviderNotReady):
+			writeManagementError(w, http.StatusConflict, "Connect an OpenAI account before loading its models.", "provider_not_connected")
+		case errors.Is(err, siwc.ErrProviderOAuthClient):
+			writeManagementError(w, http.StatusBadGateway, "OpenAI OAuth client configuration needs attention.", "provider_oauth_configuration")
+		case errors.Is(err, siwc.ErrProviderAuthUnavailable):
+			writeManagementError(w, http.StatusServiceUnavailable, "OpenAI authentication or model catalog is temporarily unavailable.", "provider_auth_unavailable")
+		case errors.As(err, &catalogErr):
+			writeManagementError(w, http.StatusBadGateway, fmt.Sprintf("OpenAI rejected the model catalog request (HTTP %d). Check the connected account's access.", catalogErr.StatusCode), "provider_catalog_rejected")
+		case errors.Is(err, context.DeadlineExceeded):
+			writeManagementError(w, http.StatusServiceUnavailable, "OpenAI authentication or model catalog is temporarily unavailable.", "provider_auth_unavailable")
+		default:
+			writeManagementError(w, http.StatusInternalServerError, "Could not load provider models.", "provider_models_failed")
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, models)
 }
 
 func (api *managementAPI) provider(w http.ResponseWriter, r *http.Request, id string) {
