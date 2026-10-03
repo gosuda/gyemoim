@@ -1,6 +1,6 @@
 # Gyemoim Implementation Plan
 
-This plan tracks implementation in small, reviewable tasks. T01 through T03 are complete. T04 is implemented and pending root review. T05 through T17 are pending.
+This plan tracks implementation in small, reviewable tasks. T01 through T05 are complete. T06 through T17 are pending.
 
 ## Tasks
 
@@ -9,8 +9,8 @@ This plan tracks implementation in small, reviewable tasks. T01 through T03 are 
 | T01 | Runtime, embedded WebUI, automatic data-directory creation, and process lock | Complete (`c40b2b5`) |
 | T02 | SQLite configuration and persistence | Complete |
 | T03 | ServiceAccounts, local keys, Model grants and configuration, single-target routing strategy, and model-list API | Complete |
-| T04 | Management UI for Providers, ServiceAccounts, Models, and status | Implemented; pending root review |
-| T05 | Versioned NDJSON request recorder | Pending |
+| T04 | Management UI for Providers, ServiceAccounts, Models, and status | Complete |
+| T05 | Versioned NDJSON request recorder | Complete |
 | T06 | Log rotation and crash-safe recovery | Pending |
 | T07 | OpenAI OAuth login and credential registration | Pending |
 | T08 | Token refresh and provider model catalog | Pending |
@@ -74,3 +74,10 @@ This plan tracks implementation in small, reviewable tasks. T01 through T03 are 
 - No automated tests added or run.
 
 - Parent inspected all embedded assets and manually exercised browser creation, grants, key issuance/revocation, navigation clearing, and the mobile layout. Native CGO-disabled build and JavaScript syntax check passed.
+
+
+### T05
+
+- Implemented the version 1 NDJSON recorder, append-only active file, admission/transmission/end durability fences, response-event framing, request usage/timing metadata, sticky storage degradation, and safe status counters.
+- Connected recorder startup and close to the HTTP lifecycle; startup remains available when history storage cannot open, while new recorder admissions fail. The runtime status page reports history health and counters.
+- Added the exact schema and lifecycle notes in [history-format.md](history-format.md). Parent reviewed recorder lifecycle, durability fences, loss accounting, and integration. CGO-disabled Linux/macOS amd64/arm64 builds passed; manual healthy/degraded startup and owner-only history permissions passed. No automated tests were added or run.

@@ -11,6 +11,8 @@ import (
 	"net/http"
 	"runtime"
 	"time"
+
+	"github.com/gosuda/gyemoim/internal/history"
 )
 
 //go:embed assets/*
@@ -18,14 +20,18 @@ var embedded embed.FS
 
 // Status contains runtime information that is safe to expose on the local UI.
 type Status struct {
-	State           string    `json:"state"`
-	DataDirectory   string    `json:"dataDirectory"`
-	Port            int       `json:"port"`
-	StartedAt       time.Time `json:"startedAt"`
-	GoVersion       string    `json:"goVersion"`
-	OperatingSystem string    `json:"operatingSystem"`
-	Architecture    string    `json:"architecture"`
-	SQLiteState     string    `json:"sqliteState"`
+	State                  string    `json:"state"`
+	DataDirectory          string    `json:"dataDirectory"`
+	Port                   int       `json:"port"`
+	StartedAt              time.Time `json:"startedAt"`
+	GoVersion              string    `json:"goVersion"`
+	OperatingSystem        string    `json:"operatingSystem"`
+	Architecture           string    `json:"architecture"`
+	SQLiteState            string    `json:"sqliteState"`
+	HistoryState           string    `json:"historyState"`
+	HistoryPotentiallyLost uint64    `json:"historyPotentiallyLostRecords"`
+	HistoryActive          int       `json:"historyActiveRequests"`
+	HistoryBytesWritten    int64     `json:"historyBytesWritten"`
 }
 
 // DatabaseReadiness is the minimal status dependency needed from the config store.
@@ -33,8 +39,13 @@ type DatabaseReadiness interface {
 	Ping(context.Context) error
 }
 
+// HistoryReadiness is the safe recorder health view needed by the local status API.
+type HistoryReadiness interface {
+	Status() history.RecorderStatus
+}
+
 // New constructs the embedded UI handler.
-func New(dataDirectory string, port int, startedAt time.Time, csrfToken string, database DatabaseReadiness) (http.Handler, error) {
+func New(dataDirectory string, port int, startedAt time.Time, csrfToken string, database DatabaseReadiness, historyStatus HistoryReadiness) (http.Handler, error) {
 	assets, err := fs.Sub(embedded, "assets")
 	if err != nil {
 		return nil, fmt.Errorf("open embedded UI assets: %w", err)
@@ -52,6 +63,7 @@ func New(dataDirectory string, port int, startedAt time.Time, csrfToken string, 
 		OperatingSystem: runtime.GOOS,
 		Architecture:    runtime.GOARCH,
 		SQLiteState:     "ready",
+		HistoryState:    "unavailable",
 	}
 	fileServer := http.FileServer(http.FS(assets))
 
@@ -80,6 +92,18 @@ func New(dataDirectory string, port int, startedAt time.Time, csrfToken string, 
 				currentStatus.State = "degraded"
 			}
 			cancel()
+		}
+		if historyStatus == nil {
+			currentStatus.State = "degraded"
+		} else {
+			history := historyStatus.Status()
+			currentStatus.HistoryState = history.State
+			currentStatus.HistoryPotentiallyLost = history.PotentiallyLostRecords
+			currentStatus.HistoryActive = history.ActiveRequests
+			currentStatus.HistoryBytesWritten = history.BytesWritten
+			if history.State != "ready" {
+				currentStatus.State = "degraded"
+			}
 		}
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		if err := json.NewEncoder(w).Encode(currentStatus); err != nil {

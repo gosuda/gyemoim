@@ -18,6 +18,7 @@ import (
 	"github.com/gosuda/gyemoim/internal/config"
 	"github.com/gosuda/gyemoim/internal/datadir"
 	"github.com/gosuda/gyemoim/internal/gateway"
+	"github.com/gosuda/gyemoim/internal/history"
 	"github.com/gosuda/gyemoim/internal/httpapi"
 	"github.com/gosuda/gyemoim/internal/httpui"
 	"github.com/gosuda/gyemoim/internal/processlock"
@@ -83,12 +84,22 @@ func run(args []string) error {
 		}
 	}()
 
+	historyRecorder, historyOpenErr := history.Open(dataDirectory)
+	if historyOpenErr != nil {
+		fmt.Fprintln(os.Stderr, "gyemoim: request history is unavailable; new inference requests will be rejected")
+	}
+	defer func() {
+		if err := historyRecorder.Close(); err != nil {
+			fmt.Fprintln(os.Stderr, "gyemoim: request history did not close cleanly")
+		}
+	}()
+
 	csrfToken, err := randomToken()
 	if err != nil {
 		return fmt.Errorf("create management request token: %w", err)
 	}
 	startedAt := time.Now().UTC()
-	uiHandler, err := httpui.New(dataDirectory, *port, startedAt, csrfToken, store)
+	uiHandler, err := httpui.New(dataDirectory, *port, startedAt, csrfToken, store, historyRecorder)
 	if err != nil {
 		return err
 	}
@@ -129,9 +140,18 @@ func run(args []string) error {
 
 	select {
 	case err := <-serveResult:
-		cancelServerBase()
 		if errors.Is(err, http.ErrServerClosed) {
+			cancelServerBase()
 			return nil
+		}
+		shutdownContext, cancelShutdown := context.WithTimeout(context.Background(), shutdownTimeout)
+		shutdownErr := server.Shutdown(shutdownContext)
+		cancelShutdown()
+		if shutdownErr != nil {
+			cancelServerBase()
+			_ = server.Close()
+		} else {
+			cancelServerBase()
 		}
 		return fmt.Errorf("HTTP server stopped: %w", err)
 	case <-signals.Done():
