@@ -1,6 +1,6 @@
 # Gyemoim Implementation Plan
 
-This plan tracks implementation in small, reviewable tasks. T01 through T08 are complete. T09 through T17 are pending.
+This plan tracks implementation in small, reviewable tasks. T01 through T09 are complete. T10 through T17 are pending.
 
 ## Tasks
 
@@ -14,7 +14,7 @@ This plan tracks implementation in small, reviewable tasks. T01 through T08 are 
 | T06 | Log rotation and crash-safe recovery | Complete |
 | T07 | OpenAI OAuth login and credential registration | Complete |
 | T08 | Token refresh and provider model catalog | Complete |
-| T09 | OpenAI Responses provider contract and capability validation | Pending |
+| T09 | OpenAI Responses provider contract and capability validation | Complete |
 | T10 | Streaming gateway, cancellation, request IDs, and timing | Pending |
 | T11 | Non-streaming responses, errors, and resource limits | Pending |
 | T12 | pi agent 1.0.0 model metadata and connection configuration | Pending |
@@ -107,3 +107,13 @@ This plan tracks implementation in small, reviewable tasks. T01 through T08 are 
 - Updated the Provider and Models UI plus OAuth docs. No live OpenAI account was available to verify refresh rotation, remote revocation, or model availability. No automated tests were added or run.
 
 - Parent reviewed credential rotation, cancellation, disconnect serialization, safe catalog errors, transport reuse, and UI request generations. All four CGO-disabled Linux/macOS builds passed. Manual disconnected-catalog and pending-flow-disconnect checks passed; live refresh/revocation/catalog remain unverified.
+
+
+### T09 implementation (pending parent review)
+
+- Added a provider-layer Go adapter interface and fixed-host OpenAI Responses implementation. The adapter validates the researched SIWC capability boundary, preserves unknown JSON fields and supported flat tools, normalizes only model/stream/store, returns typed 400-capability errors, and does not read tokens from storage.
+- Added a reusable HTTP transport with endpoint restriction, redirect refusal, dial/TLS/header bounds, no overall SSE timeout, explicit gateway-owned headers, bounded raw non-2xx bodies, selected safe response metadata, and sanitized transport errors.
+- Added bounded incremental SSE frame reading, raw-frame preservation, terminal response JSON and usage extraction, UTF-8 checks, and monotonic connection/transmission/event/output/completion trace offsets. Added [responses-contract.md](responses-contract.md).
+- No automated tests were added or run. No live authenticated account is available, so wire behavior remains unverified.
+
+- Parent reviewed the complete adapter and corrected capability traversal, transport error handling, terminal event retention, and recorder-aligned timing. CGO-disabled Linux/macOS amd64/arm64 builds passed. Live authenticated inference remains unverified; no automated tests were added or run.
