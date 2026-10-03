@@ -9,6 +9,10 @@ import (
 )
 
 var ErrNotFound = errors.New("configuration record not found")
+var ErrUnauthorized = errors.New("configuration identity is no longer active")
+var ErrForbidden = errors.New("configuration permission denied")
+var ErrConflict = errors.New("configuration conflict")
+var ErrReferenced = errors.New("configuration record is still referenced")
 
 // Provider is the non-secret, UI-safe part of an upstream connection.
 type Provider struct {

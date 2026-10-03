@@ -14,20 +14,18 @@ const csrfHeader = "X-Gyemoim-CSRF"
 
 // Guard validates the browser origin and host for management requests.
 type Guard struct {
-	origin string
-	csrf   string
-	host   string
-	port   string
+	csrf string
+	host string
+	port string
 }
 
 // New creates a guard for one exact local origin and listener port.
 func New(port int, csrfToken string) *Guard {
 	portText := strconv.Itoa(port)
 	return &Guard{
-		origin: "http://127.0.0.1:" + portText,
-		csrf:   csrfToken,
-		host:   "127.0.0.1",
-		port:   portText,
+		csrf: csrfToken,
+		host: "127.0.0.1",
+		port: portText,
 	}
 }
 
@@ -35,6 +33,9 @@ func New(port int, csrfToken string) *Guard {
 func (g *Guard) Host(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requestHost, requestPort, err := net.SplitHostPort(r.Host)
+		if err != nil && r.Host == g.host && g.port == "80" {
+			requestHost, requestPort, err = g.host, "80", nil
+		}
 		ip := net.ParseIP(requestHost)
 		if err != nil || ip == nil || !ip.Equal(net.ParseIP(g.host)) || requestPort != g.port {
 			http.Error(w, "invalid Host header", http.StatusMisdirectedRequest)
@@ -67,16 +68,23 @@ func (g *Guard) Management(next http.Handler) http.Handler {
 
 func (g *Guard) validOriginIfPresent(r *http.Request) bool {
 	origin := r.Header.Get("Origin")
-	return origin == "" || origin == g.origin
+	return origin == "" || g.sameOrigin(origin)
 }
 
 func (g *Guard) hasValidOrigin(r *http.Request) bool {
-	origin := r.Header.Get("Origin")
-	if origin == "" {
+	return g.sameOrigin(r.Header.Get("Origin"))
+}
+
+func (g *Guard) sameOrigin(origin string) bool {
+	parsed, err := url.Parse(origin)
+	if err != nil || parsed.Scheme != "http" || parsed.User != nil || parsed.Hostname() != g.host || parsed.Path != "" || parsed.RawQuery != "" || parsed.Fragment != "" {
 		return false
 	}
-	parsed, err := url.Parse(origin)
-	return err == nil && parsed.IsAbs() && parsed.Host != "" && origin == g.origin
+	port := parsed.Port()
+	if port == "" {
+		port = "80"
+	}
+	return port == g.port
 }
 
 func (g *Guard) validCSRF(r *http.Request) bool {

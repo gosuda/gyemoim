@@ -76,6 +76,9 @@ func (s *Store) CreateProvider(ctx context.Context, provider Provider) (Provider
 	_, err := s.db.ExecContext(ctx, `INSERT INTO providers(id, name, provider_type, base_url, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
 		provider.ID, provider.Name, provider.Type, provider.BaseURL, provider.Status, timestamp, timestamp)
 	if err != nil {
+		if isUniqueConstraint(err) {
+			return Provider{}, ErrConflict
+		}
 		return Provider{}, fmt.Errorf("create provider: %w", err)
 	}
 	return provider, nil
@@ -90,15 +93,34 @@ func (s *Store) UpdateProvider(ctx context.Context, provider Provider) error {
 	result, err := s.db.ExecContext(ctx, `UPDATE providers SET name = ?, provider_type = ?, base_url = ?, status = ?, updated_at = ? WHERE id = ?`,
 		provider.Name, provider.Type, provider.BaseURL, provider.Status, timestamp, provider.ID)
 	if err != nil {
+		if isUniqueConstraint(err) {
+			return ErrConflict
+		}
 		return fmt.Errorf("update provider: %w", err)
 	}
 	return requireAffected(result, "provider", provider.ID)
+}
+
+// RenameProvider changes only the display name so concurrent OAuth status updates survive.
+func (s *Store) RenameProvider(ctx context.Context, id, name string) error {
+	_, timestamp := nowText()
+	result, err := s.db.ExecContext(ctx, `UPDATE providers SET name = ?, updated_at = ? WHERE id = ?`, name, timestamp, id)
+	if err != nil {
+		if isUniqueConstraint(err) {
+			return ErrConflict
+		}
+		return fmt.Errorf("rename provider: %w", err)
+	}
+	return requireAffected(result, "provider", id)
 }
 
 // DeleteProvider removes a Provider and its credentials. Models targeting it prevent deletion.
 func (s *Store) DeleteProvider(ctx context.Context, id string) error {
 	result, err := s.db.ExecContext(ctx, `DELETE FROM providers WHERE id = ?`, id)
 	if err != nil {
+		if isForeignKeyConstraint(err) || isRestrictConstraint(err) {
+			return ErrReferenced
+		}
 		return fmt.Errorf("delete provider: %w", err)
 	}
 	return requireAffected(result, "provider", id)
@@ -293,6 +315,9 @@ func (s *Store) CreateServiceAccount(ctx context.Context, account ServiceAccount
 	_, err := s.db.ExecContext(ctx, `INSERT INTO service_accounts(id, name, enabled, created_at, updated_at) VALUES (?, ?, ?, ?, ?)`,
 		account.ID, account.Name, boolInt(account.Enabled), timestamp, timestamp)
 	if err != nil {
+		if isUniqueConstraint(err) {
+			return ServiceAccount{}, ErrConflict
+		}
 		return ServiceAccount{}, fmt.Errorf("create service account: %w", err)
 	}
 	return account, nil
@@ -307,6 +332,9 @@ func (s *Store) UpdateServiceAccount(ctx context.Context, account ServiceAccount
 	result, err := s.db.ExecContext(ctx, `UPDATE service_accounts SET name = ?, enabled = ?, updated_at = ? WHERE id = ?`,
 		account.Name, boolInt(account.Enabled), timestamp, account.ID)
 	if err != nil {
+		if isUniqueConstraint(err) {
+			return ErrConflict
+		}
 		return fmt.Errorf("update service account: %w", err)
 	}
 	return requireAffected(result, "service account", account.ID)
@@ -371,6 +399,12 @@ func (s *Store) CreateLocalKey(ctx context.Context, accountID string, hash []byt
 	_, err = s.db.ExecContext(ctx, `INSERT INTO local_keys(id, account_id, key_hash, display_hint, created_at) VALUES (?, ?, ?, ?, ?)`,
 		key.ID, key.AccountID, append([]byte(nil), hash...), key.DisplayHint, timestamp)
 	if err != nil {
+		if isUniqueConstraint(err) {
+			return LocalKey{}, ErrConflict
+		}
+		if isForeignKeyConstraint(err) {
+			return LocalKey{}, notFound("service account", accountID)
+		}
 		return LocalKey{}, fmt.Errorf("create local key: %w", err)
 	}
 	return key, nil
@@ -510,6 +544,12 @@ func (s *Store) CreateModel(ctx context.Context, model Model) (Model, error) {
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, model.ID, model.Name, model.Strategy, model.Version,
 		string(strategyConfig), nullableString(model.ProviderID), nullableString(model.UpstreamModel), nullableJSON(metadata), timestamp, timestamp)
 	if err != nil {
+		if isUniqueConstraint(err) {
+			return Model{}, ErrConflict
+		}
+		if isForeignKeyConstraint(err) {
+			return Model{}, ErrNotFound
+		}
 		return Model{}, fmt.Errorf("create model: %w", err)
 	}
 	model.StrategyConfigJSON = strategyConfig
@@ -530,6 +570,12 @@ func (s *Store) UpdateModel(ctx context.Context, model Model) error {
 	result, err := s.db.ExecContext(ctx, `UPDATE models SET name = ?, strategy = ?, version = version + 1, strategy_config_json = ?, provider_id = ?, upstream_model = ?, metadata_json = ?, updated_at = ? WHERE id = ?`,
 		model.Name, model.Strategy, string(strategyConfig), nullableString(model.ProviderID), nullableString(model.UpstreamModel), nullableJSON(metadata), timestamp, model.ID)
 	if err != nil {
+		if isUniqueConstraint(err) {
+			return ErrConflict
+		}
+		if isForeignKeyConstraint(err) {
+			return ErrNotFound
+		}
 		return fmt.Errorf("update model: %w", err)
 	}
 	return requireAffected(result, "model", model.ID)
@@ -603,10 +649,23 @@ func (s *Store) ReplaceModelGrants(ctx context.Context, accountID string, modelI
 	} else if err != nil {
 		return fmt.Errorf("check service account before grant replacement: %w", err)
 	}
+	seen := make(map[string]struct{}, len(modelIDs))
+	for _, modelID := range modelIDs {
+		if _, duplicate := seen[modelID]; duplicate {
+			continue
+		}
+		seen[modelID] = struct{}{}
+		var existingModel string
+		if err := tx.QueryRowContext(ctx, `SELECT id FROM models WHERE id = ?`, modelID).Scan(&existingModel); errors.Is(err, sql.ErrNoRows) {
+			return notFound("model", modelID)
+		} else if err != nil {
+			return fmt.Errorf("check model before grant replacement: %w", err)
+		}
+	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM model_grants WHERE account_id = ?`, accountID); err != nil {
 		return fmt.Errorf("clear existing model grants: %w", err)
 	}
-	seen := make(map[string]struct{}, len(modelIDs))
+	seen = make(map[string]struct{}, len(modelIDs))
 	for _, modelID := range modelIDs {
 		if _, duplicate := seen[modelID]; duplicate {
 			continue
@@ -725,4 +784,139 @@ func scanModel(row scanner) (Model, error) {
 		return Model{}, err
 	}
 	return model, nil
+}
+
+// RevokeLocalKeyForAccount revokes a key only when it belongs to the supplied account.
+func (s *Store) RevokeLocalKeyForAccount(ctx context.Context, accountID, keyID string) error {
+	_, timestamp := nowText()
+	result, err := s.db.ExecContext(ctx, `UPDATE local_keys SET revoked_at = COALESCE(revoked_at, ?) WHERE id = ? AND account_id = ?`, timestamp, keyID, accountID)
+	if err != nil {
+		return fmt.Errorf("revoke service account key: %w", err)
+	}
+	return requireAffected(result, "local key", keyID)
+}
+
+// ResolveGrantedRoute reads the current key/account state, explicit grant, Model,
+// and Provider in one read transaction. The returned values form an admission-time
+// snapshot for an inference request; callers should release it before upstream I/O.
+func (s *Store) ResolveGrantedRoute(ctx context.Context, accountID, keyID, modelName string) (ServiceAccount, Model, Provider, error) {
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return ServiceAccount{}, Model{}, Provider{}, fmt.Errorf("begin route snapshot: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	account, err := activeAccountForKey(ctx, tx, accountID, keyID)
+	if err != nil {
+		return ServiceAccount{}, Model{}, Provider{}, err
+	}
+	model, err := scanModel(tx.QueryRowContext(ctx, `SELECT id, name, strategy, version, strategy_config_json, provider_id, upstream_model, metadata_json, created_at, updated_at FROM models WHERE name = ?`, modelName))
+	if errors.Is(err, sql.ErrNoRows) {
+		return ServiceAccount{}, Model{}, Provider{}, notFound("model", modelName)
+	}
+	if err != nil {
+		return ServiceAccount{}, Model{}, Provider{}, fmt.Errorf("read model for route: %w", err)
+	}
+	var grant string
+	err = tx.QueryRowContext(ctx, `SELECT model_id FROM model_grants WHERE account_id = ? AND model_id = ?`, accountID, model.ID).Scan(&grant)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ServiceAccount{}, Model{}, Provider{}, ErrForbidden
+	}
+	if err != nil {
+		return ServiceAccount{}, Model{}, Provider{}, fmt.Errorf("read route grant: %w", err)
+	}
+	if model.ProviderID == "" {
+		return ServiceAccount{}, Model{}, Provider{}, errors.New("configured model has no provider target")
+	}
+	provider, err := scanProvider(tx.QueryRowContext(ctx, `SELECT id, name, provider_type, base_url, status, created_at, updated_at FROM providers WHERE id = ?`, model.ProviderID))
+	if errors.Is(err, sql.ErrNoRows) {
+		return ServiceAccount{}, Model{}, Provider{}, errors.New("configured model provider is missing")
+	}
+	if err != nil {
+		return ServiceAccount{}, Model{}, Provider{}, fmt.Errorf("read route provider: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return ServiceAccount{}, Model{}, Provider{}, fmt.Errorf("commit route snapshot: %w", err)
+	}
+	return account, model, provider, nil
+}
+
+// ListGrantedModelsForKey validates the active key in the same transaction used
+// to snapshot its current explicit Model grants.
+func (s *Store) ListGrantedModelsForKey(ctx context.Context, accountID, keyID string) ([]Model, error) {
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return nil, fmt.Errorf("begin authorized model listing: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := activeAccountForKey(ctx, tx, accountID, keyID); err != nil {
+		return nil, err
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT m.id, m.name, m.strategy, m.version, m.strategy_config_json, m.provider_id, m.upstream_model, m.metadata_json, m.created_at, m.updated_at
+		FROM models m JOIN model_grants g ON g.model_id = m.id WHERE g.account_id = ? ORDER BY m.created_at, m.id`, accountID)
+	if err != nil {
+		return nil, fmt.Errorf("read authorized models: %w", err)
+	}
+	models := make([]Model, 0)
+	for rows.Next() {
+		model, err := scanModel(rows)
+		if err != nil {
+			_ = rows.Close()
+			return nil, fmt.Errorf("read authorized model: %w", err)
+		}
+		models = append(models, model)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, fmt.Errorf("read authorized models: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, fmt.Errorf("close authorized model listing: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit authorized model listing: %w", err)
+	}
+	return models, nil
+}
+
+func activeAccountForKey(ctx context.Context, tx *sql.Tx, accountID, keyID string) (ServiceAccount, error) {
+	var account ServiceAccount
+	var enabled int
+	var createdAt, updatedAt string
+	err := tx.QueryRowContext(ctx, `SELECT a.id, a.name, a.enabled, a.created_at, a.updated_at
+		FROM service_accounts a JOIN local_keys k ON k.account_id = a.id
+		WHERE a.id = ? AND k.id = ? AND k.revoked_at IS NULL AND a.enabled = 1`, accountID, keyID).Scan(
+		&account.ID, &account.Name, &enabled, &createdAt, &updatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ServiceAccount{}, ErrUnauthorized
+	}
+	if err != nil {
+		return ServiceAccount{}, fmt.Errorf("validate service account key: %w", err)
+	}
+	account.Enabled = enabled != 0
+	if account.CreatedAt, err = readTime(createdAt); err != nil {
+		return ServiceAccount{}, fmt.Errorf("read service account creation time: %w", err)
+	}
+	if account.UpdatedAt, err = readTime(updatedAt); err != nil {
+		return ServiceAccount{}, fmt.Errorf("read service account update time: %w", err)
+	}
+	return account, nil
+}
+
+func isUniqueConstraint(err error) bool {
+	var coded interface{ Code() int }
+	if !errors.As(err, &coded) {
+		return false
+	}
+	return coded.Code() == 1555 || coded.Code() == 2067
+}
+
+func isForeignKeyConstraint(err error) bool {
+	var coded interface{ Code() int }
+	return errors.As(err, &coded) && coded.Code() == 787
+}
+
+// SQLite implements ON DELETE RESTRICT with a constraint trigger.
+func isRestrictConstraint(err error) bool {
+	var coded interface{ Code() int }
+	return errors.As(err, &coded) && coded.Code() == 1811
 }

@@ -1,6 +1,6 @@
 # Gyemoim Implementation Plan
 
-This plan tracks implementation in small, reviewable tasks. T01 is complete. T02 through T17 are pending.
+This plan tracks implementation in small, reviewable tasks. T01 through T03 are complete. T04 through T17 are pending.
 
 ## Tasks
 
@@ -8,7 +8,7 @@ This plan tracks implementation in small, reviewable tasks. T01 is complete. T02
 | --- | --- | --- |
 | T01 | Runtime, embedded WebUI, automatic data-directory creation, and process lock | Complete (`c40b2b5`) |
 | T02 | SQLite configuration and persistence | Complete |
-| T03 | ServiceAccounts, local keys, Model grants and configuration, single-target routing strategy, and model-list API | Pending |
+| T03 | ServiceAccounts, local keys, Model grants and configuration, single-target routing strategy, and model-list API | Complete |
 | T04 | Management UI for Providers, ServiceAccounts, Models, and status | Pending |
 | T05 | Versioned NDJSON request recorder | Pending |
 | T06 | Log rotation and crash-safe recovery | Pending |
@@ -45,12 +45,6 @@ This plan tracks implementation in small, reviewable tasks. T01 is complete. T02
 
 ## Review Results
 
-### T02
-
-- Implemented on top of T01 base `c40b2b5`; pending parent review.
-- Added the versioned SQLite configuration store, typed repository methods, stable host UUID, credential separation, live SQLite readiness in status, and manual schema inspection instructions.
-- `CGO_ENABLED=0 go build ./...` passed. Manual startup/status, owner-only database and directory permissions, WAL/schema version, table set, restart-stable host ID, and newer-schema rejection checks passed; no automated tests were added or run.
-
 ### T01
 
 - Parent reviewed every source file and corrected relative XDG path handling and mobile navigation.
@@ -63,4 +57,11 @@ This plan tracks implementation in small, reviewable tasks. T01 is complete. T02
 - Parent reviewed the full schema and repository, including credential transactions, foreign keys, key revocation lookup, and atomic Model revisions.
 - CGO-disabled builds passed for Linux/macOS on amd64/arm64.
 - Manual checks passed for startup/status, WAL/schema version, owner-only DB/WAL/SHM files, stable host ID after restart, and rejection of schema version 99.
+- No automated tests were added or run.
+
+### T03
+
+- Reviewed management endpoints, hashed local keys, explicit grants, transactional authorization snapshots, and the single-target strategy interface.
+- Corrected concurrent Provider rename handling, referenced Provider deletion, JSON errors, and default HTTP-port origin validation.
+- CGO-disabled builds passed for Linux/macOS on amd64/arm64. Manual checks passed for key issuance/revocation, permitted model listing, grant rollback, Model revision increments, conflict/error responses, and secret exclusion.
 - No automated tests were added or run.

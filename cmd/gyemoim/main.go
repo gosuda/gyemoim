@@ -17,6 +17,8 @@ import (
 
 	"github.com/gosuda/gyemoim/internal/config"
 	"github.com/gosuda/gyemoim/internal/datadir"
+	"github.com/gosuda/gyemoim/internal/gateway"
+	"github.com/gosuda/gyemoim/internal/httpapi"
 	"github.com/gosuda/gyemoim/internal/httpui"
 	"github.com/gosuda/gyemoim/internal/processlock"
 	"github.com/gosuda/gyemoim/internal/websecurity"
@@ -93,9 +95,10 @@ func run(args []string) error {
 
 	guard := websecurity.New(*port, csrfToken)
 	mux := http.NewServeMux()
-	// The management guard is deliberately scoped to the UI/API routes. Future OAuth
-	// callbacks and bearer-authenticated /v1 routes must be registered outside it.
-	mux.Handle("/api/", guard.Management(uiHandler))
+	// Browser-origin protections cover the UI and management JSON API. Bearer-authenticated
+	// harness routes share only the loopback Host guard applied by the server.
+	mux.Handle("/api/", guard.Management(httpapi.NewManagement(store, uiHandler)))
+	mux.Handle("/v1/", httpapi.NewHarness(gateway.New(store)))
 	mux.Handle("/", guard.Management(uiHandler))
 
 	serverBase, cancelServerBase := context.WithCancel(context.Background())
