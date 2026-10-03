@@ -1,6 +1,6 @@
 # Gyemoim Implementation Plan
 
-This plan tracks implementation in small, reviewable tasks. T01 through T03 are complete. T04 through T17 are pending.
+This plan tracks implementation in small, reviewable tasks. T01 through T03 are complete. T04 is implemented and pending root review. T05 through T17 are pending.
 
 ## Tasks
 
@@ -9,7 +9,7 @@ This plan tracks implementation in small, reviewable tasks. T01 through T03 are 
 | T01 | Runtime, embedded WebUI, automatic data-directory creation, and process lock | Complete (`c40b2b5`) |
 | T02 | SQLite configuration and persistence | Complete |
 | T03 | ServiceAccounts, local keys, Model grants and configuration, single-target routing strategy, and model-list API | Complete |
-| T04 | Management UI for Providers, ServiceAccounts, Models, and status | Pending |
+| T04 | Management UI for Providers, ServiceAccounts, Models, and status | Implemented; pending root review |
 | T05 | Versioned NDJSON request recorder | Pending |
 | T06 | Log rotation and crash-safe recovery | Pending |
 | T07 | OpenAI OAuth login and credential registration | Pending |
@@ -65,3 +65,12 @@ This plan tracks implementation in small, reviewable tasks. T01 through T03 are 
 - Corrected concurrent Provider rename handling, referenced Provider deletion, JSON errors, and default HTTP-port origin validation.
 - CGO-disabled builds passed for Linux/macOS on amd64/arm64. Manual checks passed for key issuance/revocation, permitted model listing, grant rollback, Model revision increments, conflict/error responses, and secret exclusion.
 - No automated tests were added or run.
+
+### T04
+
+- Implemented embedded management pages for runtime status, Providers, ServiceAccounts, and Models; reviewed and accepted.
+- Connected Provider, account, key, grant, and Model forms to the same-origin management API with CSRF headers. OAuth sign-in remains unavailable until T07; the UI explains this and keeps its connection action disabled.
+- Key plaintext is shown only in the issuance response panel, with copy and dismiss-and-clear actions. Model edits carry existing metadata through the update request for later T12 fields.
+- No automated tests added or run.
+
+- Parent inspected all embedded assets and manually exercised browser creation, grants, key issuance/revocation, navigation clearing, and the mobile layout. Native CGO-disabled build and JavaScript syntax check passed.

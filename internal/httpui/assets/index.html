@@ -18,12 +18,10 @@
       </a>
       <p class="nav-label">Workspace</p>
       <nav aria-label="Main navigation">
-        <button class="nav-item active" type="button" data-page="overview"><span class="nav-icon">◫</span>Overview</button>
-        <button class="nav-item" type="button" disabled aria-disabled="true" title="Unavailable" data-page="providers"><span class="nav-icon">◇</span>Providers</button>
-        <button class="nav-item" type="button" disabled aria-disabled="true" title="Unavailable" data-page="service-accounts"><span class="nav-icon">◎</span>ServiceAccounts</button>
-        <button class="nav-item" type="button" disabled aria-disabled="true" title="Unavailable" data-page="models"><span class="nav-icon">▦</span>Models</button>
-        <button class="nav-item" type="button" disabled aria-disabled="true" title="Unavailable" data-page="requests"><span class="nav-icon">≋</span>Requests</button>
-        <button class="nav-item" type="button" disabled aria-disabled="true" title="Unavailable" data-page="storage"><span class="nav-icon">▤</span>Storage</button>
+        <button class="nav-item active" type="button" data-page="overview" aria-current="page"><span class="nav-icon" aria-hidden="true">◫</span>Overview</button>
+        <button class="nav-item" type="button" data-page="providers"><span class="nav-icon" aria-hidden="true">◇</span>Providers</button>
+        <button class="nav-item" type="button" data-page="service-accounts"><span class="nav-icon" aria-hidden="true">◎</span>Service accounts</button>
+        <button class="nav-item" type="button" data-page="models"><span class="nav-icon" aria-hidden="true">▦</span>Models</button>
       </nav>
       <div class="sidebar-bottom">
         <span class="status-dot" aria-hidden="true"></span>
@@ -40,17 +38,17 @@
         <div class="local-badge"><span class="status-dot" aria-hidden="true"></span>Local instance</div>
       </header>
 
-      <section class="page-view" data-view="overview">
+      <section class="page-view" data-view="overview" aria-labelledby="overview-heading">
         <div class="welcome-row">
           <div>
-            <h2>Gateway status</h2>
+            <h2 id="overview-heading">Gateway status</h2>
             <p class="muted">Runtime information for this local instance.</p>
           </div>
           <span class="ready-badge"><span class="status-dot" aria-hidden="true"></span><span id="status-label">Checking status</span></span>
         </div>
         <div class="status-card">
           <div class="card-heading">
-            <div class="card-icon">⌘</div>
+            <div class="card-icon" aria-hidden="true">⌘</div>
             <div><h3>Runtime</h3><p class="muted">The management interface is available on this device.</p></div>
           </div>
           <dl class="runtime-grid" id="runtime-details" aria-live="polite">
@@ -62,7 +60,78 @@
             <div><dt>Runtime</dt><dd>Loading…</dd></div>
             <div><dt>Platform</dt><dd>Loading…</dd></div>
           </dl>
+          <p class="inline-error" id="status-error" role="status" hidden></p>
         </div>
+      </section>
+
+      <section class="page-view" data-view="providers" aria-labelledby="providers-heading" hidden>
+        <div class="page-intro">
+          <h2 id="providers-heading">Providers</h2>
+          <p class="muted">Set up named upstream connections. Each connection can be selected as a Model target.</p>
+        </div>
+        <aside class="notice" aria-label="Provider connection status">
+          <span class="notice-mark" aria-hidden="true">i</span>
+          <p><strong>OpenAI sign-in is not available yet.</strong> Providers you add remain disconnected until OAuth connection support is added. You can prepare their names and Model routes now.</p>
+        </aside>
+        <div class="section-grid">
+          <section class="panel form-panel" aria-labelledby="provider-create-heading">
+            <div class="panel-heading"><div><h3 id="provider-create-heading">Add a provider</h3><p class="muted">Provider type is OpenAI for this release.</p></div></div>
+            <form id="provider-create-form" class="stack-form">
+              <label for="provider-name">Name</label>
+              <input id="provider-name" name="name" type="text" maxlength="128" autocomplete="off" required placeholder="e.g. Personal OpenAI">
+              <button class="button primary" type="submit">Add provider</button>
+              <p class="form-message" id="provider-create-message" aria-live="polite"></p>
+            </form>
+          </section>
+          <section class="panel list-panel" aria-labelledby="provider-list-heading">
+            <div class="panel-heading"><div><h3 id="provider-list-heading">Configured providers</h3><p class="muted">Connection credentials are never shown here.</p></div><button class="button quiet small" type="button" data-refresh="providers">Refresh</button></div>
+            <div class="card-list" id="provider-list" aria-live="polite"><p class="muted">Loading providers…</p></div>
+          </section>
+        </div>
+      </section>
+
+      <section class="page-view" data-view="service-accounts" aria-labelledby="accounts-heading" hidden>
+        <div class="page-intro">
+          <h2 id="accounts-heading">Service accounts</h2>
+          <p class="muted">Issue local keys for harnesses and grant each account access to specific Models.</p>
+        </div>
+        <div class="section-grid">
+          <section class="panel form-panel" aria-labelledby="account-create-heading">
+            <div class="panel-heading"><div><h3 id="account-create-heading">Add a service account</h3><p class="muted">New accounts are enabled and start with no Model grants.</p></div></div>
+            <form id="account-create-form" class="stack-form">
+              <label for="account-name">Name</label>
+              <input id="account-name" name="name" type="text" maxlength="128" autocomplete="off" required placeholder="e.g. pi work">
+              <button class="button primary" type="submit">Add account</button>
+              <p class="form-message" id="account-create-message" aria-live="polite"></p>
+            </form>
+          </section>
+          <section class="panel list-panel" aria-labelledby="account-list-heading">
+            <div class="panel-heading"><div><h3 id="account-list-heading">Your service accounts</h3><p class="muted">Manage keys and explicit Model access per account.</p></div><button class="button quiet small" type="button" data-refresh="service-accounts">Refresh</button></div>
+            <div class="card-list" id="account-list" aria-live="polite"><p class="muted">Loading accounts…</p></div>
+          </section>
+        </div>
+      </section>
+
+      <section class="page-view" data-view="models" aria-labelledby="models-heading" hidden>
+        <div class="page-intro">
+          <h2 id="models-heading">Models</h2>
+          <p class="muted">Give a route a name your harness will request, then point it to one provider and upstream model.</p>
+        </div>
+        <section class="panel form-panel model-form-panel" aria-labelledby="model-form-heading">
+          <div class="panel-heading"><div><h3 id="model-form-heading">Add a Model</h3><p class="muted">A new Model is not automatically granted to any service account.</p></div></div>
+          <form id="model-form" class="model-form">
+            <div class="field"><label for="model-name">Model name</label><input id="model-name" name="name" type="text" maxlength="128" autocomplete="off" required placeholder="e.g. coding"></div>
+            <div class="field"><label for="model-provider">Provider</label><select id="model-provider" name="providerId" required><option value="">Choose a provider</option></select></div>
+            <div class="field"><label for="model-upstream">Upstream model</label><input id="model-upstream" name="upstreamModel" type="text" maxlength="256" autocomplete="off" required placeholder="e.g. gpt-5"><span class="field-hint">Enter the upstream model ID accepted by this provider.</span></div>
+            <div class="form-actions"><button class="button primary" id="model-submit" type="submit">Add Model</button><button class="button quiet" id="model-cancel" type="button" hidden>Cancel edit</button></div>
+            <p class="form-message full-width" id="model-form-message" aria-live="polite"></p>
+          </form>
+          <p class="metadata-note" id="model-metadata-note" hidden>Advanced metadata is retained when you save this Model.</p>
+        </section>
+        <section class="panel list-panel models-list-panel" aria-labelledby="model-list-heading">
+          <div class="panel-heading"><div><h3 id="model-list-heading">Configured Models</h3><p class="muted">Each Model uses one fixed provider and upstream target.</p></div><button class="button quiet small" type="button" data-refresh="models">Refresh</button></div>
+          <div class="card-list model-card-list" id="model-list" aria-live="polite"><p class="muted">Loading Models…</p></div>
+        </section>
       </section>
     </main>
   </div>
