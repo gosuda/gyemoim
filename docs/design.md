@@ -22,24 +22,38 @@ The service has four primary goals:
 - Implement OpenAI OAuth first, using Sign in with ChatGPT for eligible Responses API requests.
 - Expose the OpenAI Responses API format to harnesses.
 - Make pi agent the first supported harness. Implement the provider-supported Responses API contract rather than a pi-specific subset; Codex support is not a first-version requirement.
-- Issue a separate local API key for each harness. Provider authentication remains centralized.
-- Aggregate statistics by the gateway-issued harness identity and the provider account used for each request.
+- Manage three user-facing concepts in the WebUI: Provider, ServiceAccount, and Model.
+- Issue local API keys to ServiceAccounts used by harnesses. Provider authentication remains centralized.
+- Let users assign Model names and configure their upstream targets and selection strategies.
+- Aggregate statistics by ServiceAccount, requested Model, and the actual Provider and upstream model used for each attempt.
 - Record prompts, responses, tool definitions, and tool results by default, excluding authentication credentials.
 - Preserve all request content without per-harness recording exclusions or automatic body masking.
 - Block new inference requests when request recording is unavailable; do not offer an unlogged bypass.
 - Allow immediate access to the local WebUI without an administrator login or initial approval flow.
-- Apply account disconnection and harness key revocation to new requests without explicitly interrupting requests already in progress.
+- Apply Provider disconnection and ServiceAccount key revocation to new requests without explicitly interrupting requests already in progress.
 - Store configuration and credentials in SQLite; store request history in NDJSON files.
 - Rotate logs and compress closed files by spawning the external `zstd` executable.
 - Retain request history indefinitely by default. Provide storage visibility and manual deletion through the WebUI.
 
 ## Architecture
 
+### Core Concepts
+
+| Concept | Definition | WebUI configuration |
+| --- | --- | --- |
+| Provider | An authenticated upstream connection instance. Two OpenAI accounts are two Providers with the same provider type. | Name, provider type, upstream address, and OAuth or API key credentials. |
+| ServiceAccount | A gateway-issued account used by a harness. It can access multiple Models and therefore multiple Providers. | Name, local keys, and permitted Models. |
+| Model | A user-named routing configuration, independent of an upstream model ID. | Name, Provider/upstream-model targets, and selection strategy with its settings. |
+
+For example, Providers `openai-personal` and `openai-work` can both have type `openai`. A ServiceAccount `pi-work` can access Models `coding` and `quick`. A request with `model: "coding"` selects that configured Model, whose routing strategy chooses a Provider and upstream model ID.
+
+Harness is a client description rather than a separate configuration entity. Provider type describes the upstream API implementation rather than a separate authenticated account. Each Provider owns its authentication state; there is no separate user-facing ProviderConnection concept.
+
 ```mermaid
 flowchart LR
     H[AI Harnesses] -->|Responses API and local key| G[Gateway]
     G --> O[OpenAI]
-    U[Embedded WebUI] --> C[Account, Harness, and Settings Management]
+    U[Embedded WebUI] --> C[Provider, ServiceAccount, and Model Management]
     C --> S[(SQLite)]
     S --> G
     G --> R[Request Recorder]
@@ -50,7 +64,7 @@ flowchart LR
     A --> U
 ```
 
-The request path handles harness identification, account selection, provider authentication, request validation, streaming, cancellation, timing, and recording. Background work handles compression and history analysis.
+The request path handles ServiceAccount authentication, Model authorization, target selection, Provider authentication, request validation, streaming, cancellation, timing, and recording. Background work handles compression and history analysis.
 
 Provider-specific authentication, request constraints, and model catalog conversion belong in the provider layer so that additional providers can be introduced without changing harness identity or storage behavior.
 
@@ -58,14 +72,15 @@ Provider-specific authentication, request constraints, and model catalog convers
 
 | Page | Feature | Behavior |
 | --- | --- | --- |
-| Overview | Usage dashboard | Attribute requests to gateway-issued harness identities and the provider accounts actually used; filter by time and model; show request counts and input, output, cached, and reasoning tokens. |
+| Overview | Usage dashboard | Attribute requests to ServiceAccounts, requested Models, and actual Providers/upstream models; show per-attempt usage and request totals. |
 | Overview | Performance and error summary | Show first-response latency, total duration, failure and cancellation rates, and slow requests. |
 | Providers | OpenAI OAuth connections | Sign in, add accounts, inspect connection status, reauthenticate, and disconnect. |
 | Providers | Token lifecycle | Refresh automatically, serialize refreshes per session, and atomically persist replacement credentials. |
-| Providers | Models and permissions | Show account-specific models and ChatGPT plan authorization; link to provider usage management. |
-| Harnesses | Harness registration | Assign a name, issue or revoke a local key, and select a provider account. |
-| Harnesses | Connection instructions | Provide Base URL and local key setup examples for pi agent over HTTP Responses. |
-| Requests | Request browser | Filter by time, harness, account, model, and status; display requests in progress. |
+| Providers | Upstream catalog and permissions | Show connection-specific upstream models and ChatGPT plan authorization; link to provider usage management. |
+| ServiceAccounts | Account management | Assign a name, issue or revoke local keys, and permit access to Models. |
+| ServiceAccounts | Connection instructions | Provide Base URL, local key, and configured Model name examples for pi agent over HTTP Responses. |
+| Models | Model management | Define user-facing names, upstream targets, and selection strategies with their settings. |
+| Requests | Request browser | Filter by ServiceAccount, requested Model, actual Provider/upstream model, time, and status; display requests in progress. |
 | Requests | Request details | Inspect the incoming request, effective upstream request, response events, tool calls, errors, and usage. |
 | Requests | Timing timeline | Show authentication preparation, connection, transmission, first event, first output, stream termination, and downstream delivery. |
 | Requests | Request comparison | Compare instructions, tools, messages, and model settings; expose context growth and repeated requests. |
@@ -81,19 +96,43 @@ The first version exposes:
 - `POST /v1/responses`
 - `GET /v1/models`
 
-The gateway identifies each harness using its local bearer key and selects the provider account assigned to that harness. It replaces the local credential with the provider credential for upstream requests. Provider access and refresh tokens are never supplied to harnesses.
+The gateway authenticates a ServiceAccount using its local bearer key, resolves the request's `model` to a configured Model, and checks that the ServiceAccount is permitted to use it. The Model's selection strategy chooses a Provider and upstream model ID. The gateway replaces the client Model name and local credential with the selected upstream model ID and Provider credential. Provider access and refresh tokens are never supplied to harnesses.
 
-Local keys are stored as hashes in SQLite. Keys can be issued and revoked from the WebUI.
+ServiceAccount keys are stored as hashes in SQLite. Keys can be issued and revoked from the WebUI.
 
 pi agent is the first integration target. Preserve Responses API behavior across supported clients rather than introducing pi-specific request semantics. OpenAI OAuth capability restrictions still apply and must produce clear errors. The pi version, configuration, and integration acceptance cases will be established during implementation.
 
-When admitting a request, retain its harness identity and selected provider account for attribution and routing. Subsequent routing changes, key revocation, or account disconnection affect new requests. The gateway does not explicitly cancel admitted requests in response to these administrative actions.
+When admitting a request, retain its ServiceAccount identity and a snapshot of the configured Model and routing settings. Record the actual Provider and upstream model for each attempt. Subsequent configuration changes, key revocation, or Provider disconnection affect new requests. The gateway does not explicitly cancel admitted requests in response to these administrative actions.
 
-The model endpoint converts the account-specific provider catalog into the standard OpenAI model-list response expected by clients.
+`GET /v1/models` returns configured Model names authorized for the calling ServiceAccount in the standard OpenAI model-list format. Provider upstream catalogs are available in the WebUI to configure Model targets. Harnesses use the user-defined Model name rather than a Provider-prefixed upstream model ID.
 
 Every inference request receives a gateway request ID, returned through `X-Request-ID`. Provider request IDs are recorded separately.
 
-First-version statistics are grouped by gateway-issued harness identity and provider account. Session and project attribution are deferred to later extensions. The gateway does not treat a harness identity as proof that requests belong to one conversation.
+Statistics are grouped by ServiceAccount, requested Model, and actual Provider/upstream model. Session and project attribution are deferred to later extensions. A ServiceAccount identity is not proof that requests belong to one conversation.
+
+### Extensible Model Selection
+
+Model selection is abstracted through Go interfaces. Fallback is one possible strategy; the configuration model and execution path must also accommodate other strategies, such as weighted selection or selection based on observed latency. Those strategies are extension examples rather than a requirement to implement them all in the first version.
+
+A strategy creates request-local selection state, chooses an initial target, and can receive an attempt outcome when choosing a subsequent target. An illustrative interface boundary is:
+
+```go
+type RoutingStrategy interface {
+    NewSelection(ctx context.Context, request RoutingRequest) (Selection, error)
+}
+
+type Selection interface {
+    Next(ctx context.Context, previous *AttemptOutcome) (Target, error)
+}
+```
+
+`RoutingRequest` contains the request and a snapshot of the Model configuration. `Target` identifies a Provider and its upstream model ID. `AttemptOutcome` describes a previous attempt's result. The initial selection has no previous outcome. Exhaustion is an explicit stop result. Shared strategy implementations must keep per-request attempt state isolated.
+
+Model configuration identifies the strategy and stores its strategy-specific settings. The WebUI exposes the settings supported by registered strategy implementations. The strategy chooses targets; the gateway executor owns authentication, transport, validation, recording, cancellation, and response delivery.
+
+Selection does not imply compatibility between targets. Every selected target must support the request's capabilities. Unsupported request capabilities produce clear errors, and strategy execution must preserve this policy rather than silently rewriting the request.
+
+Any strategy that performs another upstream attempt must explicitly define eligible failure conditions and record every attempt. The executor prevents switching targets after a response has been committed to the client and respects client cancellation. Default execution remains a single upstream attempt; automatic retries or fallback occur only when explicitly configured through a strategy.
 
 ## OpenAI OAuth and Request Handling
 
@@ -113,7 +152,7 @@ Inference uses the public OpenAI Responses endpoint. Upstream HTTP requests use 
 
 The provider layer validates capabilities and records request normalization. Apart from the explicitly documented streaming and storage adaptations, unsupported fields, tools, or conversation-state requests return clear errors rather than being silently removed or changed. The first version does not provide a selectable compatibility mode. HTTP requests must include the necessary conversation history rather than depending on persistent upstream response state.
 
-Propagate client cancellation upstream. Distinguish successful completion, failure, incomplete output, and interrupted streams. The first version does not automatically retry inference requests.
+Propagate client cancellation upstream. Distinguish successful completion, failure, incomplete output, and interrupted streams. The executor does not automatically retry inference requests; any additional attempt is governed by an explicitly configured Model selection strategy.
 
 These constraints are based on [Models and inference](https://developers.openai.com/siwc/token-sharing-open-source/models-and-inference) and [Preview limitations](https://developers.openai.com/siwc/token-sharing-open-source/preview-limitations). Recheck the official requirements when implementing the provider adapter because this integration is a preview.
 
@@ -123,13 +162,15 @@ These constraints are based on [Models and inference](https://developers.openai.
 
 Use token counts reported by the provider. Display cached input tokens and reasoning output tokens as components of input and output usage rather than adding them again to totals. If a request ends without reported usage, display it as unknown rather than zero.
 
+Record the requested Model identity/name, routing configuration version, selected strategy, and each attempt's Provider, upstream model ID, outcome, timing, and reported usage. Group attempts under one gateway request ID. Count client requests separately from upstream attempts and include usage from every attempt that reports it.
+
 Preserve the incoming request and the effective upstream request so that gateway normalization is visible during debugging.
 
 ### Latency Analysis
 
 Record the stages observable at the gateway, including authentication preparation, connection establishment, request transmission, first upstream event, first output, stream completion, and downstream delivery.
 
-These measurements help locate delays but do not independently prove a provider or harness bug. Time spent executing local tools or preparing the next harness request requires harness-side records or additional instrumentation. First-version attribution is limited to the gateway-issued harness identity and provider account; deeper session correlation is a later extension.
+These measurements help locate delays but do not independently prove a provider or harness bug. Time spent executing local tools or preparing the next harness request requires harness-side records or additional instrumentation. Attribution uses ServiceAccount, Model, and each attempt's actual Provider/upstream model; deeper session correlation is a later extension.
 
 ### Cache Analysis
 
@@ -147,7 +188,7 @@ The first version provides history browsing, basic aggregation, request comparis
 
 ### SQLite
 
-Store provider accounts, credentials, issued client IDs, the host ID, harness registrations, local key hashes, routing assignments, and storage settings in SQLite.
+Store Providers and their credentials, issued OAuth client IDs, the host ID, ServiceAccounts and local key hashes, Models and strategy settings, ServiceAccount Model permissions, and storage settings in SQLite.
 
 Create the application data directory automatically. Apply owner-only directory and file permissions. The loopback WebUI opens directly without an administrator login, password, or initial approval step. Protect WebUI mutations with Origin and CSRF validation; these protections must not introduce an administrator sign-in flow.
 
@@ -179,7 +220,7 @@ If request recording becomes unavailable, including because the disk is full, re
 
 1. Runtime, embedded WebUI, automatic data-directory creation, and SQLite setup.
 2. OpenAI OAuth registration, credential persistence, refresh, and account management.
-3. Harness registration, local keys, account routing, model listing, and Responses forwarding.
+3. ServiceAccount registration, local keys, Model permissions and configuration, strategy interfaces, model listing, and Responses forwarding.
 4. Request event recording, streaming status, cancellation, and timing instrumentation.
 5. History browsing, usage aggregation, request comparison, cache analysis, and export.
 6. File rotation, external compression, compressed-history reading, and storage management.
@@ -187,10 +228,13 @@ If request recording becomes unavailable, including because the disk is full, re
 ## Acceptance Criteria
 
 - On a fresh Linux or macOS installation, the executable starts and serves the WebUI without configuration beyond an optional port.
-- Two harnesses using different local keys can share one provider connection while their requests and usage remain independently attributable.
+- Two ServiceAccounts can share one Provider while their requests and usage remain independently attributable.
+- One ServiceAccount can access multiple Providers through its permitted Models.
+- Model listing exposes only permitted configured Model names, and requests are routed using those names.
 - pi agent can connect using the documented Responses configuration, and supported Responses behavior is preserved without pi-specific API semantics.
 - Unsupported request capabilities produce clear errors instead of silent compatibility transformations.
-- Statistics preserve the gateway-issued harness identity and provider account used when each request was admitted.
+- Statistics preserve the ServiceAccount, requested Model, and actual Provider/upstream model for every attempt.
+- Strategy implementations preserve request-local state, record additional attempts, and cannot change targets after the client response is committed.
 - Restart, concurrent refresh, missing authorization scopes, and reauthentication do not mix credential sets or account registrations.
 - Tool calls, normal completion, stream errors, incomplete responses, cancellation, and disconnection are reflected consistently in client behavior and logs.
 - Request comparison exposes changes to instructions, tools, and messages and preserves unknown usage or timing information.
@@ -198,7 +242,7 @@ If request recording becomes unavailable, including because the disk is full, re
 - Missing `zstd` does not prevent startup or NDJSON recording.
 - When recording is unavailable, new inference requests are rejected before provider invocation and the management UI remains accessible.
 - The local WebUI is immediately accessible without an administrator login or initial approval.
-- Key revocation and account disconnection prevent new requests without gateway-initiated cancellation of admitted requests.
+- ServiceAccount key revocation and Provider disconnection prevent new requests without gateway-initiated cancellation of admitted requests.
 - Gateway-managed authentication fields do not appear in request logs or exports; arbitrary prompt and tool content remains intact.
 
 ## Later Extensions
