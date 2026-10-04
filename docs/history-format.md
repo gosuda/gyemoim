@@ -163,3 +163,56 @@ honors context cancellation between records. The exported closed-segment snapsho
 returns sorted filenames and metadata, not absolute paths; active data is excluded.
 Any later maintenance operation that rewrites or deletes closed files must serialize
 with that operation's own snapshot and rotation coordination.
+
+## Date-range deletion and recovery
+
+`POST /api/storage/delete` accepts `firstDate` and `lastDate` as strict `YYYY-MM-DD`
+UTC dates, inclusive. The effective interval is `[firstDate 00:00Z,
+min(day-after-lastDate 00:00Z, request-submission-time))`. Dates after the current UTC
+date, reversed dates, and empty effective ranges are rejected. This keeps requests
+started later on the current UTC day outside a deletion that includes today.
+
+The recorder compares the effective interval against all in-progress requests using
+`started_at`. If any overlap, the API returns HTTP 409 before rotating or changing
+history files. `Recorder.Begin` captures its timestamp under the same recorder mutex
+used for the deletion cutoff and snapshot. Deletion applies across all accounts and
+Models; no identity-specific deletion is available.
+
+After acquiring the exclusive history-maintenance lease and checking active requests,
+the recorder briefly holds its writer mutex to rotate the current active prefix,
+capture the fixed closed-segment basenames, and durably publish the owner-only
+`.history-delete.json` roll-forward journal. It releases that mutex before reading
+segment contents. New queries receive HTTP 503 during maintenance; new inference
+recording can continue in the fresh active file.
+
+Each fixed segment is streamed one bounded NDJSON record at a time. The record is
+decoded to validate it and inspect `started_at`; retained record lines are written
+with their original bytes, without JSON reserialization. A raw replacement temporary
+file is synced and atomically renamed, then its directory is synced. If a raw and
+compressed pair exists, deletion uses the compressed representation as the source,
+streams it through external `zstd -q -dc`, publishes the filtered raw file, durably
+checkpoints that segment in the journal, and only then removes the `.zst` source and
+syncs the directory. The resulting raw segment is eligible for the normal compression
+worker again.
+
+The journal stores only validated closed-segment filenames and the effective range.
+Per-file completion checkpoints make replay idempotent across crashes before or after
+replacement, checkpoint publication, and compressed-source removal. A missing file is
+accepted only where the durable checkpoint establishes that its replacement was
+published; otherwise replay stays pending. Journal and rewrite temporaries use unique
+owner-only names that compression cleanup does not consume.
+
+Startup replays the journal before closed-file validation, compressed-pair recovery,
+or the compression worker starts. If replay cannot finish (including when zstd is
+unavailable for a captured compressed segment), Gyemoim keeps the journal and the
+maintenance lease, exposes `pending_recovery` and safe progress/error status through
+`GET /api/storage`, and returns HTTP 503 to new history queries. Unrelated closed
+segments are still validated. Raw inference recording stays available if the writer
+itself is healthy. Installing zstd after a pending compressed deletion requires a
+restart to retry replay. A shutdown cancels and joins the bounded deletion service
+context; any unfinished roll-forward is completed at the next startup.
+
+The deletion result reports the effective `from` and exclusive `to` timestamps,
+processed segment count, and removed history-record count. The record count is stored
+in the per-segment checkpoint before replacement, so startup replay retains it across
+a crash after the replacement rename.

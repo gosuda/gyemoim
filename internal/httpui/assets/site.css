@@ -284,3 +284,11 @@ h5 { margin: 0; color: #3b4654; font-size: 11px; font-weight: 680; }
   .response-row { grid-template-columns: 1fr; }
   .panel-heading:has(#request-results-summary) .card-actions { width: 100%; justify-content: flex-start; }
 }
+
+.history-deletion-panel { margin-top: 17px; }
+.deletion-warning { margin: 0 0 15px; padding: 11px 12px; border: 1px solid #f0d8d8; border-radius: 6px; color: #8e4141; background: #fff8f8; font-size: 10px; line-height: 1.55; }
+.history-delete-form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)) auto; align-items: end; gap: 11px; }
+.deletion-submit { min-height: 39px; border-color: #e6cccc; color: #9c4141; background: #fff; }
+.deletion-submit:hover:not(:disabled) { border-color: #d9a9a9; color: #8f3333; background: #fff7f7; }
+.deletion-status { margin: 11px 0 0; color: #77818e; font-size: 10px; line-height: 1.5; }
+@media (max-width: 760px) { .history-delete-form { grid-template-columns: minmax(0, 1fr); } }

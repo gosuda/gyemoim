@@ -43,6 +43,31 @@ func (api *managementAPI) requestList(w http.ResponseWriter, r *http.Request) {
 	writeBoundedHistoryJSON(w, http.StatusOK, page)
 }
 
+func (api *managementAPI) deleteStorageHistory(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w, http.MethodPost)
+		return
+	}
+	submittedAt := time.Now().UTC()
+	var input struct {
+		FirstDate string `json:"firstDate"`
+		LastDate  string `json:"lastDate"`
+	}
+	if !decodeRequiredJSON(w, r, &input) {
+		return
+	}
+	if api.storage == nil {
+		writeManagementError(w, http.StatusServiceUnavailable, "history storage is unavailable", "history_unavailable")
+		return
+	}
+	result, err := api.storage.DeleteDateRangeAt(r.Context(), input.FirstDate, input.LastDate, submittedAt)
+	if err != nil {
+		writeHistoryFailure(w, err)
+		return
+	}
+	writeBoundedHistoryJSON(w, http.StatusOK, result)
+}
+
 func (api *managementAPI) storageStatus(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		methodNotAllowed(w, http.MethodGet)
@@ -269,6 +294,14 @@ func parseHistoryTime(w http.ResponseWriter, value, name string) (*time.Time, bo
 
 func writeHistoryFailure(w http.ResponseWriter, err error) {
 	switch {
+	case errors.Is(err, history.ErrActiveRequestOverlap):
+		writeManagementError(w, http.StatusConflict, "an in-progress request started within this UTC date range; wait for it to finish, then retry", "history_deletion_active_request")
+	case errors.Is(err, history.ErrInvalidDeletionRange):
+		writeManagementError(w, http.StatusBadRequest, "choose valid UTC dates through today; the end date must not precede the start date and the effective range must be non-empty", "invalid_history_deletion_range")
+	case errors.Is(err, history.ErrDeletionPending):
+		writeManagementError(w, http.StatusServiceUnavailable, "history deletion is pending recovery; new history queries are unavailable until it completes", "history_deletion_pending")
+	case errors.Is(err, history.ErrRecordingUnavailable):
+		writeManagementError(w, http.StatusServiceUnavailable, "history recording is unavailable", "history_unavailable")
 	case errors.Is(err, history.ErrMaintenance):
 		writeManagementError(w, http.StatusServiceUnavailable, "history files are undergoing maintenance; retry shortly", "history_maintenance")
 	case errors.Is(err, history.ErrQueryBusy):

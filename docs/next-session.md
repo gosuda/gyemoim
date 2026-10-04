@@ -2,7 +2,7 @@
 
 ## Resume point
 
-Finish T16 and T17 in [implementation-plan.md](implementation-plan.md). T01–T15 are implemented; the plan records review and verification details. Read [design.md](design.md), [history-format.md](history-format.md), [responses-contract.md](responses-contract.md), and [pi.md](pi.md) before making changes.
+Finish T17 in [implementation-plan.md](implementation-plan.md). T01–T16 are implemented and reviewed; the plan records verification details. Read [design.md](design.md), [history-format.md](history-format.md), [responses-contract.md](responses-contract.md), and [pi.md](pi.md) before making changes.
 
 The previous session reached the agent thread limit. The user explicitly chose to continue the remaining implementation in a **new session with fresh Luna XHigh agents**, rather than have the root implement the remaining tasks directly.
 
@@ -49,11 +49,13 @@ Connect overview statistics and request filters/details to T13. Show active/comp
 
 Local CLI research confirmed `/usr/bin/zstd` v1.5.7 supports the `-q -c` compression and `-q -dc` decompression flags used by T15. Runtime resolves `zstd` from `PATH` during startup; no zstd library is used. Read [history-format.md](history-format.md) for startup pair recovery, source retention, temporary cleanup, and missing-executable behavior. The Storage page and `GET /api/storage` expose counts, bytes, compression availability/work/errors, recorder state and safe loss counters. After installing zstd into an initially unavailable environment, restart Gyemoim to validate and query existing compressed segments.
 
-## T16: date deletion
+## T16: implemented date deletion
 
 The accepted UX is **409 conflict with no changes when any in-progress request overlaps the selected range**. Do not wait for requests, cancel them, or suppress their logs. Delete all accounts and Models by each record's `started_at`, across all segments.
 
 Use a UTC half-open interval; cap today's end at submission time. Under a brief admission/rotation lock, check overlap and capture a fixed file set, rotate the active prefix, and publish a durable roll-forward journal. Then release admission so new recording continues during rewrites. Move `Begin` timestamp capture under its admission lock to make the cutoff atomic. Serialize compression/deletion. New history queries during maintenance return clear 503 rather than wait. Rewrite raw or decompressed records with bounded memory, sync and atomically publish replacements; replay the idempotent journal after crashes. Remove the journal only after all selected files and directory changes are durable. Requests admitted after the snapshot must not be deleted.
+
+The implementation adds the date form and `POST /api/storage/delete`; see [history-format.md](history-format.md) and [history-query.md](history-query.md) for journal recovery, request cutoffs, and API behavior. Parent source review, four-target builds, JavaScript syntax, selective deletion and replay API checks, and browser controls inspection passed. The active-request conflict path remains source-reviewed, not runtime-verified.
 
 ## T17: packaging and documentation
 

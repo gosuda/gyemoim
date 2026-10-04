@@ -16,25 +16,26 @@ import (
 // StorageStatus contains safe byte and compression metadata. It never includes
 // record contents, credentials, or process stderr.
 type StorageStatus struct {
-	RecorderState               string     `json:"recorderState"`
-	PotentiallyLostRecords      uint64     `json:"potentiallyLostRecords"`
-	RecoveredBytes              uint64     `json:"recoveredBytes"`
-	ActiveRequests              int        `json:"activeRequests"`
-	ActiveBytes                 int64      `json:"activeBytes"`
-	ActiveSegments              int        `json:"activeSegments"`
-	RawSegments                 int        `json:"rawSegments"`
-	RawBytes                    int64      `json:"rawBytes"`
-	CompressedSegments          int        `json:"compressedSegments"`
-	CompressedBytes             int64      `json:"compressedBytes"`
-	PendingSegments             int        `json:"pendingSegments"`
-	PendingBytes                int64      `json:"pendingBytes"`
-	FailedSegments              int        `json:"failedSegments"`
-	CompressionAvailable        bool       `json:"compressionAvailable"`
-	CompressionState            string     `json:"compressionState"`
-	LastCompressionError        string     `json:"lastCompressionError,omitempty"`
-	LastCompressionSegment      string     `json:"lastCompressionSegment,omitempty"`
-	LastCompressionAt           *time.Time `json:"lastCompressionAt,omitempty"`
-	CompressedValidationPending bool       `json:"compressedValidationPending"`
+	RecorderState               string         `json:"recorderState"`
+	PotentiallyLostRecords      uint64         `json:"potentiallyLostRecords"`
+	RecoveredBytes              uint64         `json:"recoveredBytes"`
+	ActiveRequests              int            `json:"activeRequests"`
+	ActiveBytes                 int64          `json:"activeBytes"`
+	ActiveSegments              int            `json:"activeSegments"`
+	RawSegments                 int            `json:"rawSegments"`
+	RawBytes                    int64          `json:"rawBytes"`
+	CompressedSegments          int            `json:"compressedSegments"`
+	CompressedBytes             int64          `json:"compressedBytes"`
+	PendingSegments             int            `json:"pendingSegments"`
+	PendingBytes                int64          `json:"pendingBytes"`
+	FailedSegments              int            `json:"failedSegments"`
+	CompressionAvailable        bool           `json:"compressionAvailable"`
+	CompressionState            string         `json:"compressionState"`
+	LastCompressionError        string         `json:"lastCompressionError,omitempty"`
+	LastCompressionSegment      string         `json:"lastCompressionSegment,omitempty"`
+	LastCompressionAt           *time.Time     `json:"lastCompressionAt,omitempty"`
+	CompressedValidationPending bool           `json:"compressedValidationPending"`
+	Deletion                    DeletionStatus `json:"deletion"`
 }
 
 func listCompressedSegments(dir string) ([]ClosedSegment, error) {
@@ -165,7 +166,7 @@ func (r *Recorder) Storage() StorageStatus {
 	lastError := r.compressionLastError
 	lastSegment := r.compressionLastSegment
 	lastAt := r.compressionLastAt
-	validationPending := r.compressedQueryErr != nil
+	validationPending := r.compressedQueryErr != nil || r.deletionCompressedValidationPending
 	failures := make(map[string]bool, len(r.compressionFailures))
 	for name, failed := range r.compressionFailures {
 		failures[name] = failed
@@ -174,7 +175,7 @@ func (r *Recorder) Storage() StorageStatus {
 
 	status := StorageStatus{RecorderState: recorderState, PotentiallyLostRecords: potentiallyLost, RecoveredBytes: recoveredBytes, ActiveRequests: activeRequests,
 		ActiveBytes: activeBytes, CompressionAvailable: executable != "", LastCompressionError: lastError,
-		LastCompressionSegment: lastSegment, CompressedValidationPending: validationPending}
+		LastCompressionSegment: lastSegment, CompressedValidationPending: validationPending, Deletion: r.DeletionStatus()}
 	if activePresent {
 		status.ActiveSegments = 1
 	}

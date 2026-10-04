@@ -219,7 +219,8 @@ If request recording becomes unavailable, including because the disk is full, re
 - Validate compressed records during startup. If raw and compressed files form a crash-window pair, compare the decompressed SHA-256 and byte length before deleting or deduplicating either file.
 - Expose active, raw, and compressed byte counts; pending and failed work; executable availability; and the latest safe operational error through the Storage page and `GET /api/storage`.
 - Preserve records indefinitely; support storage inspection and manual deletion by date range.
-- Delete all request records in the selected date range across ServiceAccounts and Models. Account- or Model-filtered deletion and configurable retention policies are deferred.
+- Delete all request records whose `started_at` falls in the selected inclusive UTC calendar dates across ServiceAccounts and Models. The effective interval is half-open and its end is capped at the submission time.
+- Reject deletion with HTTP 409 and no file changes while a matching request is in progress. Serialize deletion with queries and compression, and recover from a durable roll-forward journal before startup validation. Account- or Model-filtered deletion and configurable retention policies are deferred.
 
 ## Implementation Sequence
 

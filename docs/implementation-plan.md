@@ -1,6 +1,6 @@
 # Gyemoim Implementation Plan
 
-This plan tracks implementation in small, reviewable tasks. T01 through T15 are complete. T16 and T17 are pending.
+This plan tracks implementation in small, reviewable tasks. T01 through T16 are complete. T17 remains pending.
 
 ## Tasks
 
@@ -21,8 +21,18 @@ This plan tracks implementation in small, reviewable tasks. T01 through T15 are 
 | T13 | History query and usage aggregation | Complete |
 | T14 | Request investigation UI and timing details | Complete |
 | T15 | External zstd compression and storage visibility | Complete |
-| T16 | Date-range request-record deletion | Pending |
+| T16 | Date-range request-record deletion | Complete |
 | T17 | Packaging and user documentation | Pending |
+
+
+### T16
+
+- Added `POST /api/storage/delete` with strict inclusive UTC calendar dates. The server caps the exclusive end at the request submission time, rejects future or empty ranges, and returns the effective half-open range plus the number of removed history records and processed segments.
+- A matching in-progress request produces HTTP 409 before any file changes. The comparison uses `started_at` across every ServiceAccount and Model. `Recorder.Begin` now captures that timestamp under the recorder mutex so admissions and the deletion cutoff are ordered consistently.
+- The existing exclusive history-maintenance lease serializes deletion with compression and returns HTTP 503 to new queries. A brief recorder-lock phase checks active requests, rotates the active prefix, snapshots fixed closed segment names, and durably publishes an owner-only roll-forward journal. Segment rewrites run after releasing the recorder lock while new inference recording continues.
+- Raw and zstd-compressed segments are streamed one original NDJSON line at a time. Retained lines keep their exact bytes; compressed inputs are rewritten to raw files and become eligible for later compression. Per-segment journal checkpoints make atomic replacement and compressed-source cleanup replayable after crashes.
+- Startup replays a valid journal before closed-file validation or compression starts. Failures preserve the journal, keep queries blocked, expose pending progress/error in storage status, and leave raw recording available unless the recorder itself has failed. Shutdown cancels and joins an active deletion operation; its child process is reaped and the journal remains for restart recovery.
+- The Storage page includes an irreversible all-accounts/all-models date form with active-request conflict and maintenance status. Parent reviewed every change and corrected submission cutoffs, journal capacity, cleanup and shutdown races, startup validation wiring, and UI polling/navigation. CGO-disabled builds passed for Linux/macOS amd64/arm64; JavaScript syntax and diff checks passed. Manual API inspection passed for selective deletion across raw/compressed segments, preserved requests outside the range, invalid/future dates, today's cutoff, partial compressed deletion replay, unavailable-zstd recovery status, and restart completion. Browser inspection passed for date controls, scope/status text, and cancellation preserving history. Active-request conflict and large-archive concurrency behavior were source-reviewed, not runtime-verified. No automated tests were added or run.
 
 ## Confirmed Implementation Decisions
 

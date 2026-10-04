@@ -204,6 +204,17 @@
           <div class="panel-heading"><div><h3 id="storage-operations-heading">Compression status</h3><p class="muted">Pending work is checked once per minute. Failed compression keeps the raw source.</p></div></div>
           <dl class="runtime-grid" id="storage-details"><div><dt>Status</dt><dd>Loading…</dd></div></dl>
         </section>
+        <section class="panel history-deletion-panel" aria-labelledby="history-deletion-heading">
+          <div class="panel-heading"><div><h3 id="history-deletion-heading">Delete history by date</h3><p class="muted">Delete every request record started during the selected inclusive UTC calendar dates.</p></div></div>
+          <p class="deletion-warning">This permanently deletes matching history for all ServiceAccounts and Models. If any matching request is still in progress, the operation is rejected without changing files. Today's end is capped at the server submission time, so requests started later today remain.</p>
+          <form id="history-delete-form" class="history-delete-form">
+            <div class="field"><label for="history-delete-first">First date (UTC, inclusive)</label><input id="history-delete-first" name="firstDate" type="date" required></div>
+            <div class="field"><label for="history-delete-last">Last date (UTC, inclusive)</label><input id="history-delete-last" name="lastDate" type="date" required></div>
+            <button class="button danger deletion-submit" type="submit">Delete matching history</button>
+          </form>
+          <p class="form-message" id="history-delete-message" role="status" aria-live="polite"></p>
+          <p class="deletion-status" id="history-delete-status" role="status" aria-live="polite">Loading deletion status…</p>
+        </section>
       </section>
     </main>
   </div>

@@ -4,6 +4,28 @@ The loopback management API reads request history from NDJSON. History is not
 stored in SQLite. These endpoints are available under the same local Host and
 browser-origin protections as the rest of `/api/`.
 
+## Date-range deletion
+
+`POST /api/storage/delete` accepts a bounded strict JSON object:
+
+```json
+{"firstDate":"2026-10-01","lastDate":"2026-10-03"}
+```
+
+Both dates are inclusive UTC calendar days. The server applies the effective
+half-open range `[firstDate 00:00Z, min(day-after-lastDate 00:00Z, submission-time))`.
+Future dates, reversed ranges, and empty effective ranges return HTTP 400. The result
+includes the effective `from` and exclusive `to` timestamps, `segmentsProcessed`, and
+`recordsRemoved`.
+
+Deletion uses `started_at` and applies to all accounts and Models. If any matching
+request is in progress, HTTP 409 is returned before any history file changes. While
+deleting, new queries return HTTP 503 with `history_maintenance`. If roll-forward
+recovery is pending after a failure or restart, queries remain HTTP 503 and
+`GET /api/storage` exposes the deletion range, segment progress, state, and safe error.
+The journal is replayed before normal history validation and compression at startup.
+
+
 ## Request list
 
 `GET /api/requests` returns a bounded page of request summaries:
@@ -97,7 +119,7 @@ fixed file snapshot and release the recorder mutex before scanning. Closed files
 are opened one at a time, and the active file is read only through its captured
 length. Recording and rotation continue during a scan.
 
-The query lease also coordinates compression and later deletion work. When exclusive
+The query lease coordinates compression and date-range deletion. When exclusive
 history maintenance is active, new queries return HTTP 503 with `history_maintenance`
 rather than waiting. Closed `.ndjson.zst` segments are streamed through an external
 `zstd -q -dc` child; queries check the child's exit status after EOF and cancel, close,

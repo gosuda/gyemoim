@@ -88,6 +88,8 @@ func (api *managementAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		api.usage(w, r)
 	case len(parts) == 1 && parts[0] == "storage":
 		api.storageStatus(w, r)
+	case len(parts) == 2 && parts[0] == "storage" && parts[1] == "delete":
+		api.deleteStorageHistory(w, r)
 	default:
 		writeManagementError(w, http.StatusNotFound, "management endpoint not found", "not_found")
 	}
