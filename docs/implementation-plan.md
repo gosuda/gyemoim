@@ -1,6 +1,6 @@
 # Gyemoim Implementation Plan
 
-This plan tracks implementation in small, reviewable tasks. T01 through T12 are complete. T13 through T17 are pending and will resume in a new session; see [next-session.md](next-session.md).
+This plan tracks implementation in small, reviewable tasks. T01 through T13 are complete. T14 through T17 are pending.
 
 ## Tasks
 
@@ -18,7 +18,7 @@ This plan tracks implementation in small, reviewable tasks. T01 through T12 are 
 | T10 | Streaming gateway, cancellation, request IDs, and timing | Complete |
 | T11 | Non-streaming responses, errors, and resource limits | Complete |
 | T12 | pi agent 1.0.0 model metadata and connection configuration | Complete |
-| T13 | History query and usage aggregation | Pending |
+| T13 | History query and usage aggregation | Complete |
 | T14 | Request investigation UI and timing details | Pending |
 | T15 | External zstd compression and storage visibility | Pending |
 | T16 | Date-range request-record deletion | Pending |
@@ -145,4 +145,21 @@ This plan tracks implementation in small, reviewable tasks. T01 through T12 are 
 - No automated tests were added or run. `go build ./...` and `node --check internal/httpui/assets/site.js` passed.
 
 - Parent reviewed every change and corrected provider-object shape, Model alias IDs, and explicit null validation. CGO-disabled Linux/macOS amd64/arm64 builds and JavaScript syntax checks passed. Manual API checks passed for readiness, mapped efforts, compatibility flags, disabled accounts and removed grants. Browser checks passed for setup controls and metadata edit/preservation. No automated tests were added or run; authenticated live pi inference remains unverified.
+
+
+### T13 implementation (pending root review)
+
+- Added bounded `/api/requests`, request-detail/content, paginated SSE event, and `/api/usage` endpoints. Lists filter by UTC start range, account, Model, actual Provider, upstream Model, and outcome; pages order by request start descending then request ID ascending.
+- Queries hold a fixed history read lease, briefly capture closed-file names/lengths and the active file descriptor/length under the recorder mutex, then scan without holding the writer mutex. Closed files are opened one at a time. A maintenance gate is available for T15/T16 and returns HTTP 503 to new queries during maintenance. At most four query leases run concurrently.
+- Schema 1 ends are joined to starts/transmissions in batches of 128; historical interrupted starts are detected in bounded batches. Query scans have a 30 second deadline and return explicit errors instead of partial results. Active requests are copied as small snapshots.
+- Detail responses retain only bounded metadata. Incoming/effective JSON, upstream HTTP bodies, and SSE frames can be retrieved in byte chunks; event pages cap count and raw bytes and point to retrieval URLs for omitted or oversized frames. Raw recorded bytes and truncation/read-failure flags remain available.
+- Usage aggregates separate client requests and upstream attempts, track known and unknown values for each token count, cap groups at 1000, and report cache-ratio unavailability when inputs are unknown, total input is zero, or cached input exceeds input. The route and response contract are in [history-query.md](history-query.md).
+- Parent manually checked pagination, legacy attribution, interrupted starts, aggregate known/unknown counts, body chunks, large-event retrieval, binary HTTP-body preservation, missing-event errors, and reversed segment filename order. `CGO_ENABLED=0 go build ./...` passed. No automated tests were added or run. Four-target builds and final root review are pending.
 - Additional agent creation and research-agent resumption were rejected with `agent thread limit reached`. The user chose to resume T13–T17 in a new session with the same Luna XHigh workflow. [next-session.md](next-session.md) preserves the task boundaries, decisions, and review constraints.
+
+### T13
+
+- Added bounded file snapshots and a separate query/maintenance lease, four concurrent query slots, paginated summaries, schema 1 attribution and interrupted requests, detailed metadata, exact body/event chunks, and usage aggregates. Full request history stays outside SQLite.
+- Parent reviewed every source change and corrected closed-file descriptor lifetime, interrupted detection, filename-order-independent detail folding, durations, sequence pagination, chunk offset handling, bounded response writes, and aggregate cache-ratio semantics.
+- CGO-disabled Linux/macOS amd64/arm64 builds passed. Manual API checks passed for unique pagination, schema 1 records, interrupted requests, known/unknown/zero token accounting, grouping and invalid parameters, reversed segment order, a 2 MiB event and chunk retrieval, exact binary HTTP error bodies, and missing-request errors. No automated tests were added or run. Query performance at large archive sizes has not been measured.
+- API contract: [history-query.md](history-query.md).

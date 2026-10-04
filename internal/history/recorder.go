@@ -143,6 +143,7 @@ type Recorder struct {
 	rotationDone           chan struct{}
 	rotationStarted        bool
 	rotationStopOnce       sync.Once
+	queryGate              *operationGate
 }
 
 // Request is a handle for one admitted inference request. It is safe for concurrent
@@ -166,8 +167,9 @@ type Request struct {
 // is validated before append, and only an incomplete active-file tail is truncated.
 func Open(dataDir string) (*Recorder, error) {
 	r := &Recorder{
-		active: make(map[string]*Request),
-		state:  "degraded",
+		active:    make(map[string]*Request),
+		state:     "degraded",
+		queryGate: newOperationGate(),
 	}
 	if strings.TrimSpace(dataDir) == "" {
 		return r, r.degrade(errors.New("history data directory is empty"))

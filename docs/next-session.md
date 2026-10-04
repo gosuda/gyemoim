@@ -2,7 +2,7 @@
 
 ## Resume point
 
-Finish T13 through T17 in [implementation-plan.md](implementation-plan.md). T01–T12 are implemented; the plan records review and verification details. Read [design.md](design.md), [history-format.md](history-format.md), [responses-contract.md](responses-contract.md), and [pi.md](pi.md) before making changes.
+Finish T14 through T17 in [implementation-plan.md](implementation-plan.md). T01–T13 are implemented; the plan records review and verification details. Read [design.md](design.md), [history-format.md](history-format.md), [responses-contract.md](responses-contract.md), and [pi.md](pi.md) before making changes.
 
 The previous session reached the agent thread limit. The user explicitly chose to continue the remaining implementation in a **new session with fresh Luna XHigh agents**, rather than have the root implement the remaining tasks directly.
 
@@ -16,11 +16,11 @@ The previous session reached the agent thread limit. The user explicitly chose t
 - Use shell tools with an explicit worktree working directory. Relative `apply_patch` previously wrote into the main repository; do not use it for worktree edits.
 - Provide concise Korean progress updates. Documents and UI are in English.
 
-## T13: bounded history queries
+## T13: implemented query foundations
 
-Implement request list/filter, request details/event pagination, and aggregates over NDJSON without retaining all requests or events in memory. Schema 2 ends contain self-contained account/Model/actual Provider attribution and usage/timings. Read schema 1 too; do not silently exclude legacy records or interrupted starts without ends.
+T13 is complete; read [history-query.md](history-query.md) for the API. It implements request list/filter, request details/event pagination, and aggregates over NDJSON without retaining all requests or events in memory. Schema 2 ends contain self-contained account/Model/actual Provider attribution and usage/timings. Read schema 1 too; do not silently exclude legacy records or interrupted starts without ends.
 
-Suggested boundaries:
+Implemented boundaries and review context:
 
 - Obtain a fixed file snapshot with a **brief** recorder lock: open the active file and capture its byte length plus closed-file names; read only that prefix. Rotation can rename the open file without invalidating its descriptor. Do not hold the writer mutex during a scan.
 - Introduce a separate file lease/maintenance gate for query lifetime, later compression and deletion. Keep lock order consistent; the writer must not acquire a file lease while holding its mutex.
@@ -32,6 +32,8 @@ Suggested boundaries:
 - Context cancellation, error reporting, malformed records, and decompression failures must be visible.
 
 ## T14: investigation UI
+
+Use the existing `history.QueryService` and management routes documented in `history-query.md`. Summaries expose `durationNs`, snake-case timing offsets, usage and historical identity snapshots. Event pages have base64 raw data, explicit omission/name-preview flags and raw chunk URLs. Body chunks return octet-stream with X-Content headers. Preserve byte offsets and decode UTF-8 carefully at chunk boundaries; do not load an entire long stream into an unbounded browser array.
 
 Connect overview statistics and request filters/details to T13. Show active/completed/failed/cancelled/incomplete/interrupted requests, incoming/effective content, tools/events, usage and cache ratio, separate upstream/local IDs, and the observable timing stages. Unknown values need explicit presentation. Raw content must use safe text rendering. Request comparisons, cache-miss explanations, exports and automated analysis are deferred.
 
