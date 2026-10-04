@@ -104,3 +104,22 @@ cancellation, malformed records, missing legacy attribution, read failures, and
 timeouts return visible errors; a query does not silently omit unreadable segments.
 The implementation can still query intact history when recording is degraded, as
 long as the selected files can be read and decoded.
+
+
+## WebUI history investigation
+
+The Overview combines `/api/usage` across all readable history with a separate
+`/api/requests?limit=100` timing sample. Usage known totals include only reported
+values; known and unknown request coverage is shown per token field. Outcome rates
+use all client requests as their displayed denominator. Performance values describe
+the newest bounded sample and are not global latency percentiles.
+
+The Requests page filters by the UTC half-open start-time range and exact
+ServiceAccount, requested Model, actual Provider, upstream Model, and outcome values.
+Configured IDs are suggested, and deleted historical IDs can be entered directly.
+Results are requested in cursor pages of 25; the UI does not auto-fetch every page.
+
+Request details keep incoming, effective-attempt, HTTP response, and SSE event bytes
+separate. Body and event chunks replace the prior preview, show their byte position,
+total and recording flags, and render only as text. A displayed chunk can split JSON,
+SSE, UTF-8, or tool content, so it is not presented as a complete JSON document.

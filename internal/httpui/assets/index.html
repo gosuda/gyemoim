@@ -22,6 +22,7 @@
         <button class="nav-item" type="button" data-page="providers"><span class="nav-icon" aria-hidden="true">◇</span>Providers</button>
         <button class="nav-item" type="button" data-page="service-accounts"><span class="nav-icon" aria-hidden="true">◎</span>Service accounts</button>
         <button class="nav-item" type="button" data-page="models"><span class="nav-icon" aria-hidden="true">▦</span>Models</button>
+        <button class="nav-item" type="button" data-page="requests"><span class="nav-icon" aria-hidden="true">≡</span>Requests</button>
       </nav>
       <div class="sidebar-bottom">
         <span class="status-dot" aria-hidden="true"></span>
@@ -62,6 +63,21 @@
           </dl>
           <p class="inline-error" id="status-error" role="status" hidden></p>
         </div>
+        <section class="panel overview-history" aria-labelledby="overview-history-heading">
+          <div class="panel-heading"><div><h2 id="overview-history-heading">Usage and outcomes</h2><p class="muted">Token usage and request outcomes cover all history that can be read.</p></div><button class="button quiet small" type="button" data-refresh="overview">Refresh</button></div>
+          <p class="form-message" id="overview-history-message" role="status" aria-live="polite">Loading history…</p>
+          <div id="overview-history-summary" class="usage-summary"></div>
+          <div class="overview-analysis-grid">
+            <section class="overview-subsection" aria-labelledby="overview-outcomes-heading"><h3 id="overview-outcomes-heading">Outcomes</h3><div id="overview-outcomes"></div></section>
+            <section class="overview-subsection" aria-labelledby="overview-usage-heading"><div class="panel-heading compact-heading"><div><h3 id="overview-usage-heading">Usage breakdown</h3><p class="muted">Cached input and reasoning output are subsets.</p></div><label class="inline-select" for="overview-group-by">Group by <select id="overview-group-by"><option value="">All history</option><option value="account">Service account</option><option value="model">Requested Model</option><option value="provider">Actual provider</option><option value="upstream_model">Upstream model</option></select></label></div><div class="table-scroll"><table class="data-table"><thead><tr><th>Group</th><th>Requests</th><th>Input</th><th>Output</th><th>Cached input</th><th>Reasoning output</th><th>Cache ratio</th></tr></thead><tbody id="overview-usage-groups"></tbody></table></div></section>
+          </div>
+        </section>
+        <section class="panel overview-performance" aria-labelledby="overview-performance-heading">
+          <div class="panel-heading"><div><h2 id="overview-performance-heading">Recent performance</h2><p class="muted">Timing sample from the most recent 100 requests. Missing offsets stay unknown.</p></div></div>
+          <p class="form-message" id="overview-performance-message" role="status" aria-live="polite">Loading recent requests…</p>
+          <div id="overview-performance-summary" class="usage-summary"></div>
+          <div class="table-scroll"><table class="data-table"><thead><tr><th>Started</th><th>Service account</th><th>Model</th><th>Outcome</th><th>Duration</th><th>First output</th><th></th></tr></thead><tbody id="overview-recent-requests"></tbody></table></div>
+        </section>
       </section>
 
       <section class="page-view" data-view="providers" aria-labelledby="providers-heading" hidden>
@@ -147,6 +163,32 @@
         <section class="panel list-panel models-list-panel" aria-labelledby="model-list-heading">
           <div class="panel-heading"><div><h3 id="model-list-heading">Configured Models</h3><p class="muted">Each Model uses one fixed provider and upstream target.</p></div><button class="button quiet small" type="button" data-refresh="models">Refresh</button></div>
           <div class="card-list model-card-list" id="model-list" aria-live="polite"><p class="muted">Loading Models…</p></div>
+        </section>
+      </section>
+
+      <section class="page-view requests-view" data-view="requests" aria-labelledby="requests-heading" hidden>
+        <div class="page-intro"><h2 id="requests-heading">Request history</h2><p class="muted">Search a bounded page of recorded requests. Time filters use UTC RFC 3339; identity fields accept configured suggestions or historical IDs.</p></div>
+        <section class="panel request-filters" aria-labelledby="request-filters-heading">
+          <div class="panel-heading"><div><h3 id="request-filters-heading">Filters</h3><p class="muted">Results use request start time and are ordered newest first.</p></div></div>
+          <form id="request-filter-form" class="request-filter-grid">
+            <div class="field"><label for="request-from">Started from (UTC)</label><input id="request-from" name="from" type="text" autocomplete="off" placeholder="YYYY-MM-DDTHH:mm:ssZ"></div>
+            <div class="field"><label for="request-to">Started before (UTC)</label><input id="request-to" name="to" type="text" autocomplete="off" placeholder="YYYY-MM-DDTHH:mm:ssZ"></div>
+            <div class="field"><label for="request-account-id">Service account ID</label><input id="request-account-id" name="account_id" list="request-account-options" autocomplete="off" placeholder="Any account"><datalist id="request-account-options"></datalist></div>
+            <div class="field"><label for="request-model-id">Requested Model ID</label><input id="request-model-id" name="model_id" list="request-model-options" autocomplete="off" placeholder="Any Model"><datalist id="request-model-options"></datalist></div>
+            <div class="field"><label for="request-provider-id">Actual provider ID</label><input id="request-provider-id" name="provider_id" list="request-provider-options" autocomplete="off" placeholder="Any provider"><datalist id="request-provider-options"></datalist></div>
+            <div class="field"><label for="request-upstream-model">Upstream model ID</label><input id="request-upstream-model" name="upstream_model" list="request-upstream-options" autocomplete="off" placeholder="Any upstream model"><datalist id="request-upstream-options"></datalist></div>
+            <div class="field"><label for="request-outcome">Outcome</label><select id="request-outcome" name="outcome"><option value="">Any outcome</option><option value="active">Active</option><option value="interrupted">Interrupted</option><option value="completed">Completed</option><option value="failed">Failed</option><option value="cancelled">Cancelled</option><option value="incomplete">Incomplete</option></select></div>
+            <div class="form-actions filter-actions"><button class="button primary" type="submit">Apply filters</button><button class="button quiet" id="request-filter-reset" type="button">Reset</button></div>
+          </form>
+        </section>
+        <section class="panel request-results" aria-labelledby="request-results-heading">
+          <div class="panel-heading"><div><h3 id="request-results-heading">Requests</h3><p class="muted" id="request-results-summary">Loading…</p></div><div class="card-actions"><button class="button quiet small" type="button" id="request-refresh">Refresh</button><button class="button small" type="button" id="request-page-previous" disabled>Previous page</button><button class="button small" type="button" id="request-page-next" disabled>Next page</button></div></div>
+          <p class="form-message" id="request-list-message" role="status" aria-live="polite"></p>
+          <div class="table-scroll"><table class="data-table request-table"><thead><tr><th>Started</th><th>Service account</th><th>Requested Model</th><th>Actual provider / upstream</th><th>Outcome</th><th>Duration</th><th>Status</th><th></th></tr></thead><tbody id="request-list"></tbody></table></div>
+        </section>
+        <section class="panel request-detail-panel" id="request-detail-panel" aria-labelledby="request-detail-heading" hidden>
+          <div class="panel-heading"><div><h3 id="request-detail-heading">Request details</h3><p class="muted" id="request-detail-subtitle"></p></div><button class="button quiet small" id="request-detail-close" type="button">Close details</button></div>
+          <div id="request-detail-content"></div>
         </section>
       </section>
     </main>

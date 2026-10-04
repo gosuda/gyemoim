@@ -2,7 +2,7 @@
 
 ## Resume point
 
-Finish T14 through T17 in [implementation-plan.md](implementation-plan.md). T01–T13 are implemented; the plan records review and verification details. Read [design.md](design.md), [history-format.md](history-format.md), [responses-contract.md](responses-contract.md), and [pi.md](pi.md) before making changes.
+Finish T15 through T17 in [implementation-plan.md](implementation-plan.md). T01–T14 are implemented; the plan records review and verification details. Read [design.md](design.md), [history-format.md](history-format.md), [responses-contract.md](responses-contract.md), and [pi.md](pi.md) before making changes.
 
 The previous session reached the agent thread limit. The user explicitly chose to continue the remaining implementation in a **new session with fresh Luna XHigh agents**, rather than have the root implement the remaining tasks directly.
 
@@ -25,13 +25,21 @@ Implemented boundaries and review context:
 - Obtain a fixed file snapshot with a **brief** recorder lock: open the active file and capture its byte length plus closed-file names; read only that prefix. Rotation can rename the open file without invalidating its descriptor. Do not hold the writer mutex during a scan.
 - Introduce a separate file lease/maintenance gate for query lifetime, later compression and deletion. Keep lock order consistent; the writer must not acquire a file lease while holding its mutex.
 - Scan ends once with a bounded page heap, ordering by request start descending then stable request ID. Filter by start range, ServiceAccount, Model, actual Provider/upstream model, and outcome. Use small snapshots for active requests.
-- For interrupted historical starts, use bounded batches and a second scan for matching ends rather than an unbounded request-ID map. Provide a bounded scan deadline and an honest partial/cursor result if needed.
+- For interrupted historical starts, use bounded batches and a second scan for matching ends rather than an unbounded request-ID map. Provide a bounded scan deadline and return an explicit timeout rather than partial results.
 - Detail and event responses need explicit count/byte bounds. One event can be 64 MiB; avoid full stream arrays. Preserve exact incoming/effective JSON, raw events, upstream HTTP response bytes, IDs and timings.
 - Aggregate client request counts separately from upstream attempt counts. Cached input and reasoning output are subsets; unknown counts remain distinct from zero. Cache ratio is unavailable if counts are unknown or input is zero.
 - Segment filenames are **not chronological event order**. Recovery segments may use old request-start times. Fold records by elapsed offset/sequence and do not prune solely by segment filename.
 - Context cancellation, error reporting, malformed records, and decompression failures must be visible.
 
-## T14: investigation UI
+## T14: implemented investigation UI
+
+The implementation adds an all-history Overview usage/outcomes view, a latest-100
+request timing sample, and a bounded Requests page with filters, cursor pagination,
+request details, safe content previews, and observed timing offsets. The page uses
+plain-text preview rendering and replaceable 256 KiB chunks; no automated tests were
+added or run. Parent source review, four-target builds, JavaScript syntax checks and
+manual fixture browser inspection passed. The fixture is artificial and does not
+verify live OpenAI behavior.
 
 Use the existing `history.QueryService` and management routes documented in `history-query.md`. Summaries expose `durationNs`, snake-case timing offsets, usage and historical identity snapshots. Event pages have base64 raw data, explicit omission/name-preview flags and raw chunk URLs. Body chunks return octet-stream with X-Content headers. Preserve byte offsets and decode UTF-8 carefully at chunk boundaries; do not load an entire long stream into an unbounded browser array.
 
