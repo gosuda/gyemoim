@@ -39,14 +39,31 @@ corruption and prevented subsequent history queries.
 The fix checks that each pair is still pending cleanup after acquiring the
 maintenance lease, before accessing its files.
 
-## Deferred finding
+## Resolved and deferred history-query scaling finding
 
-The independent history review confirmed that request-start reconciliation uses
-batches of 128 and rescans the captured archive for each batch. This also affects
-completed schema 2 requests in unfiltered queries. Large archives can therefore
-reach the existing 30-second query budget. This documented, unmeasured scaling
-limit remains deferred; fixing it needs a separate query/index design that keeps
-history outside SQLite and preserves bounded memory and crash recovery.
+The original finding was that request-start reconciliation used batches of 128 and
+rescanned the captured archive for each batch, including completed schema 2 requests
+in unfiltered queries. The schema 2 completed-start problem is resolved: while
+reading end records, unfiltered and interrupted queries collect exact request IDs in
+128-byte NUL-padded slots. Up to 8 MiB stays in memory; larger sets spill into a
+query-owned mode-0700 temporary directory as sorted runs, then merge with no more
+than 31 input files plus one output. The run-path bookkeeping is capped at 4096
+initial runs; exceeding that bound returns a query error. The resulting sorted index
+is binary-searched before a start enters the interrupted batch. For an all-completed
+schema 2 archive this leaves two full history scans (ends and starts), independent
+of the number of completed requests, instead of rescanning once per 128 completed
+starts. Actual interrupted requests add their existing resolver scans.
+
+The actual interrupted starts still go through 128-ID resolver batches, and schema 1
+end attribution still uses its existing 128-ID batches. Those cases can still rescan
+the archive and reach the 30-second query deadline. Spilled-index membership also
+uses random file reads proportional to `log2(index size)` per filter-eligible start;
+large indexes add temporary-disk and random-read I/O. Scratch files are removed when
+the query exits, but an abrupt process crash can leave files for normal temporary
+directory cleanup. History remains in NDJSON, and this index exists only for one
+query. Index build, read, merge, and cleanup failures have a dedicated safe API error;
+context deadlines still map to the query timeout response, and temporary paths are
+not exposed.
 
 ## Verification and limits
 
@@ -59,3 +76,25 @@ Provider remained blocked (409). No automated tests were
 added or run. The timing-sensitive races are source-reviewed;
 authenticated OpenAI and pi integration and native macOS execution remain
 unverified.
+
+### Query-scaling follow-up verification
+
+Two Luna XHigh agents implemented and independently reviewed the exact-ID index.
+The coordinating agent reviewed the code and manually compared an artificial raw
+archive containing 70,000 completed schema 2 requests and two interrupted starts.
+The previous binary returned HTTP 504 at 30.00 seconds for a one-row unfiltered
+request page. The new binary returned HTTP 200 in approximately 6.3 seconds on the
+same archive. This is one local fixture measurement, not a general latency bound.
+
+Usage included 70,002 client requests, 70,000 completed requests, and two interrupted
+requests. The interrupted filter returned the two expected IDs. Observed scratch
+directory/file modes were 0700/0600; scratch was removed after successful queries
+and client cancellation. An unavailable scratch directory returned HTTP 500 with
+`history_query_index_unavailable`, no partial page or scratch path, while recording
+remained ready. Restoring the directory allowed the next query to succeed.
+
+A separate compressed fixture preserved all six schema 1/schema 2 request totals,
+its interrupted request, and exact binary upstream error bytes. Four-target builds,
+JavaScript/Bash syntax checks, and diff checks passed. No automated tests ran.
+Multi-level merges beyond 31 input runs were source-reviewed, not runtime-verified;
+live-provider and native macOS verification limits remain.

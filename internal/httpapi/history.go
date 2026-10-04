@@ -322,6 +322,8 @@ func writeHistoryFailure(w http.ResponseWriter, err error) {
 		writeManagementError(w, http.StatusGatewayTimeout, "history query exceeded its 30 second time limit; narrow the date range or filters", "history_query_timeout")
 	case errors.Is(err, context.Canceled):
 		return
+	case errors.Is(err, history.ErrQueryIndexUnavailable):
+		writeManagementError(w, http.StatusInternalServerError, "The temporary history query index could not be built, read, or removed; check temporary-directory access and free disk space.", "history_query_index_unavailable")
 	case errors.Is(err, history.ErrQueryUnavailable):
 		writeManagementError(w, http.StatusServiceUnavailable, "history storage is unavailable", "history_unavailable")
 	default:

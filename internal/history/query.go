@@ -36,6 +36,8 @@ var (
 	ErrAggregateOverflow = errors.New("history aggregate counter overflow")
 )
 
+var ErrQueryIndexUnavailable = errors.New("temporary history query index is unavailable")
+
 // QueryService exposes bounded, snapshot-consistent history reads.
 type QueryService struct{ recorder *Recorder }
 
@@ -244,7 +246,17 @@ func startSummary(record Record) RequestSummary {
 	return summary
 }
 
-func scanSummaries(ctx context.Context, snapshot *QuerySnapshot, filter QueryFilter, visit func(RequestSummary) error) error {
+func scanSummaries(ctx context.Context, snapshot *QuerySnapshot, filter QueryFilter, visit func(RequestSummary) error) (returnErr error) {
+	needsInterrupted := filter.Outcome == "" || filter.Outcome == "interrupted"
+	var completedIDs *completedIDIndex
+	if needsInterrupted {
+		completedIDs = newCompletedIDIndex()
+		defer func() {
+			if err := completedIDs.close(); err != nil {
+				returnErr = errors.Join(returnErr, queryIndexFailure("close or remove query index", err))
+			}
+		}()
+	}
 	legacy := make(map[string]RequestSummary, MaxQueryBatch)
 	flushLegacy := func() error {
 		if len(legacy) == 0 {
@@ -259,6 +271,11 @@ func scanSummaries(ctx context.Context, snapshot *QuerySnapshot, filter QueryFil
 			return nil
 		}
 		if record.SchemaVersion >= 2 {
+			if completedIDs != nil {
+				if err := completedIDs.add(ctx, record.RequestID); err != nil {
+					return queryIndexFailure("collect completed request IDs", err)
+				}
+			}
 			return visit(summaryFromEnd(record))
 		}
 		legacy[record.RequestID] = summaryFromEnd(record)
@@ -273,8 +290,11 @@ func scanSummaries(ctx context.Context, snapshot *QuerySnapshot, filter QueryFil
 		return err
 	}
 
-	if filter.Outcome != "" && filter.Outcome != "interrupted" {
+	if !needsInterrupted {
 		return nil
+	}
+	if err := completedIDs.finalize(ctx); err != nil {
+		return queryIndexFailure("finalize completed request ID index", err)
 	}
 	batch := make(map[string]*startCandidate, MaxQueryBatch)
 	flushStarts := func() error {
@@ -312,6 +332,13 @@ func scanSummaries(ctx context.Context, snapshot *QuerySnapshot, filter QueryFil
 			filter.AccountID != "" && summary.ServiceAccount.ID != filter.AccountID || filter.ModelID != "" && summary.Model.ID != filter.ModelID {
 			return nil
 		}
+		ended, err := completedIDs.contains(ctx, record.RequestID)
+		if err != nil {
+			return queryIndexFailure("probe completed request ID index", err)
+		}
+		if ended {
+			return nil
+		}
 		if _, exists := batch[record.RequestID]; !exists {
 			batch[record.RequestID] = &startCandidate{summary: summary}
 		}
@@ -323,6 +350,13 @@ func scanSummaries(ctx context.Context, snapshot *QuerySnapshot, filter QueryFil
 		return err
 	}
 	return flushStarts()
+}
+
+func queryIndexFailure(action string, err error) error {
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("%w: %s: %w", ErrQueryIndexUnavailable, action, err)
 }
 
 func resolveLegacyEnds(ctx context.Context, snapshot *QuerySnapshot, pending map[string]RequestSummary, visit func(RequestSummary) error) error {

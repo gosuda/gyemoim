@@ -16,6 +16,22 @@ The user requested sequential fresh Luna XHigh implementation tasks, root review
 - Use shell tools with an explicit worktree working directory. Relative `apply_patch` previously wrote into the main repository; do not use it for worktree edits.
 - Provide concise Korean progress updates. Documents and UI are in English.
 
+## Post-implementation review and query scaling
+
+Luna XHigh source review covered the complete repository. The accepted fixes
+serialize Provider disconnect/deletion with durable request admission and token
+preparation, bound upstream error-body reads to 30 seconds, and revalidate pending
+compression cleanup after its maintenance lease. See [code-review.md](code-review.md).
+
+The follow-up query change builds an exact, query-local index of completed schema 2
+request IDs. It uses bounded memory and private temporary sorted runs rather than
+SQLite history storage. Completed starts no longer trigger one archive rescan per
+128 requests. Legacy attribution and actual interrupted starts still use bounded
+resolver batches; very large spilled indexes add random-read I/O. Scratch errors
+have a distinct `history_query_index_unavailable` response, and a process crash can
+leave OS temporary files. The original live-account and native macOS verification
+limits remain.
+
 ## T13: implemented query foundations
 
 T13 is complete; read [history-query.md](history-query.md) for the API. It implements request list/filter, request details/event pagination, and aggregates over NDJSON without retaining all requests or events in memory. Schema 2 ends contain self-contained account/Model/actual Provider attribution and usage/timings. Read schema 1 too; do not silently exclude legacy records or interrupted starts without ends.

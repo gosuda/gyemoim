@@ -48,12 +48,15 @@ the full archive to compute a total count. The UTC time range is half-open
 `[from,to)` and filters use request start time.
 
 Schema 2 end records supply their own account, Model, Provider, outcome, usage, and
-timing attribution. Schema 1 ends are joined to their start and transmission records
-in batches of at most 128 IDs. Starts without an end are included as
-`outcome: "interrupted"`; active in-process requests are included as
-`outcome: "active"`. Segment filenames do not determine request order. If the
-bounded legacy/interrupted rescans exceed the 30 second query budget, the API returns
-a timeout error and no partial page.
+timing attribution. During the end-record scan, unfiltered and interrupted queries
+build an exact index of schema 2 end IDs. This prevents completed schema 2 starts
+from entering the interrupted-start resolver. Schema 1 ends are joined to their
+start and transmission records in batches of at most 128 IDs. Starts without an end
+are included as `outcome: "interrupted"`; active in-process requests are included as
+`outcome: "active"`. Segment filenames do not determine request order. Legacy
+resolution and actual unmatched-start rescans remain batched; if those scans or index
+I/O exceed the 30 second query budget, the API returns a timeout error and no partial
+page.
 
 ## Request details and full content
 
@@ -118,6 +121,21 @@ once; further queries return HTTP 503 with `history_query_busy`. Queries acquire
 fixed file snapshot and release the recorder mutex before scanning. Closed files
 are opened one at a time, and the active file is read only through its captured
 length. Recording and rotation continue during a scan.
+
+The exact schema 2 end-ID index uses fixed 128-byte NUL-padded IDs. Up to 8 MiB of
+IDs are sorted and deduplicated in memory. Larger indexes spill sorted runs to a
+unique owner-only temporary directory, merge at most 31 input runs at a time, then
+binary-search a single sorted file before an interrupted-start batch is queued. The
+index and its temporary files belong to one snapshot query and are removed on query
+exit; no persistent index is kept. A process crash can leave temporary files for the
+operating system's temporary-directory cleanup. The remaining legacy and actual
+interrupted-start batches can still rescan the archive, and large spilled indexes
+also add temporary-disk and random-read I/O within the query deadline. The index
+supports at most 4096 initial runs; exceeding that fixed bookkeeping bound returns a
+query error. Temporary index build, read, merge, or cleanup failures return HTTP 500
+with `history_query_index_unavailable`; the response suggests checking temporary
+directory access and free disk space without exposing a scratch path. Context
+deadlines continue to return the history query timeout response.
 
 The query lease coordinates compression and date-range deletion. When exclusive
 history maintenance is active, new queries return HTTP 503 with `history_maintenance`
