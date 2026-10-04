@@ -116,7 +116,9 @@ kind of safe SSE error and end as `failed`. A downstream write failure ends as `
 even if its event cannot be delivered.
 
 HTTP error bodies and successful non-SSE response bodies are retained as exact bounded
-bytes in schema 2 `upstream_response` records. Their bodies are not echoed in gateway
+bytes in schema 2 `upstream_response` records. These body reads have a 30-second budget
+after headers arrive; a timeout cancels the upstream request and preserves received
+bytes with read-failure metadata. Their bodies are not echoed in gateway
 HTTP errors. Upstream 429 remains 429 with a validated `Retry-After` when available. Provider
 401/403 becomes 502 with a Provider authorization error, without a local-key challenge.
 Upstream 400/404/422 retains its status with a safe request-rejection message; 503/504
@@ -133,6 +135,14 @@ uses the same 30-second write deadline, and a failed delivery records cancellati
 If a history write fails after admission, the admitted inference continues and later
 history writes may be lost; the recorder's counters report that loss. A recorder already
 degraded at `Begin` rejects inference with 503 before SIWC token refresh or provider I/O.
+Before `Begin`, the executor holds a per-Provider lease and checks only the local
+connected status; this orders the admission point with disconnect and Provider
+deletion without reading credentials or performing network I/O. After `Begin`, request
+validation and token resolution (including any refresh) run while the lease is held.
+Unsupported requests remain recorded because `Prepare` follows `Begin`. If `Begin`
+fails, the lease is released without token refresh or provider I/O. After a token is
+resolved, the lease is released before the durable upstream-transmission record and
+provider `Send`.
 
 ## Verification status
 

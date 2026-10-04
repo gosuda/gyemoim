@@ -25,7 +25,7 @@ const (
 )
 
 type tokenSource interface {
-	AccessToken(context.Context, string) (string, error)
+	BeginAccessTokenPreparation(context.Context, string) (siwc.AccessTokenPreparation, error)
 }
 
 type harnessAPI struct {
@@ -158,6 +158,23 @@ func (api *harnessAPI) serveResponses(w http.ResponseWriter, r *http.Request) {
 		api.writeGatewayError(w, err)
 		return
 	}
+	preparation, err := api.tokens.BeginAccessTokenPreparation(r.Context(), route.Provider.ID)
+	if err != nil {
+		if r.Context().Err() != nil {
+			return
+		}
+		message, code := safeProviderAuthError(err)
+		writeHarnessError(w, http.StatusBadGateway, message, "server_error", code)
+		return
+	}
+	preparationOpen := true
+	releasePreparation := func() {
+		if preparationOpen {
+			preparation.Close()
+			preparationOpen = false
+		}
+	}
+	defer releasePreparation()
 
 	handle, err := api.recorder.Begin(history.Start{
 		ServiceAccount:  history.ServiceAccountSnapshot{ID: route.Identity.Account.ID, Name: route.Identity.Account.Name},
@@ -165,6 +182,7 @@ func (api *harnessAPI) serveResponses(w http.ResponseWriter, r *http.Request) {
 		IncomingRequest: body,
 	})
 	if err != nil {
+		releasePreparation()
 		if errors.Is(err, history.ErrRecordingUnavailable) {
 			writeHarnessError(w, http.StatusServiceUnavailable, "request recording is unavailable", "server_error", "recording_unavailable")
 		} else {
@@ -191,6 +209,7 @@ func (api *harnessAPI) serveResponses(w http.ResponseWriter, r *http.Request) {
 
 	selectedTarget, err := route.Selection.Next(r.Context(), nil)
 	if err != nil || selectedTarget.ProviderID != route.Provider.ID || selectedTarget.UpstreamModel != route.Model.UpstreamModel {
+		releasePreparation()
 		message := "the configured model route is unavailable"
 		finish("failed", 0, message, nil, history.Timings{}, history.EndDetails{})
 		writeHarnessError(w, http.StatusInternalServerError, message, "server_error", "route_unavailable")
@@ -199,6 +218,7 @@ func (api *harnessAPI) serveResponses(w http.ResponseWriter, r *http.Request) {
 
 	prepared, err := api.adapter.Prepare(selectedTarget.UpstreamModel, body)
 	if err != nil {
+		releasePreparation()
 		var capability *provider.CapabilityError
 		if errors.As(err, &capability) {
 			finish("failed", 0, capability.Message, nil, history.Timings{}, history.EndDetails{})
@@ -209,10 +229,11 @@ func (api *harnessAPI) serveResponses(w http.ResponseWriter, r *http.Request) {
 		writeHarnessError(w, http.StatusBadRequest, "request could not be prepared for the provider", "invalid_request_error", "invalid_request")
 		return
 	}
-	managedToken, err := api.tokens.AccessToken(r.Context(), route.Provider.ID)
+	managedToken, err := preparation.AccessToken(r.Context())
 	authPreparationNS := handle.ElapsedNS()
 	timings := history.Timings{AuthenticationPreparationNS: &authPreparationNS}
 	if err != nil {
+		releasePreparation()
 		if r.Context().Err() != nil {
 			finish("cancelled", 0, "request was cancelled during provider authentication", nil, timings, history.EndDetails{})
 			return
@@ -222,6 +243,7 @@ func (api *harnessAPI) serveResponses(w http.ResponseWriter, r *http.Request) {
 		writeHarnessError(w, http.StatusBadGateway, message, "server_error", code)
 		return
 	}
+	releasePreparation()
 
 	target := history.ProviderSnapshot{ID: route.Provider.ID, Name: route.Provider.Name, UpstreamModel: selectedTarget.UpstreamModel}
 	if err := handle.Transmit(history.Attempt{Number: 1, Provider: target, EffectiveRequest: prepared.EffectiveJSON}); err != nil {

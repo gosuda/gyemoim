@@ -221,8 +221,15 @@ func (a *OpenAIResponsesAdapter) Send(ctx context.Context, managedToken, gateway
 	if !validPreparedJSON(prepared.EffectiveJSON) {
 		return nil, ErrInvalidPrepared
 	}
+	requestCtx, cancelRequest := context.WithCancel(ctx)
+	streamOwnsCancellation := false
+	defer func() {
+		if !streamOwnsCancellation {
+			cancelRequest()
+		}
+	}()
 
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, openAIResponsesURL, bytes.NewReader(prepared.EffectiveJSON))
+	request, err := http.NewRequestWithContext(requestCtx, http.MethodPost, openAIResponsesURL, bytes.NewReader(prepared.EffectiveJSON))
 	if err != nil {
 		return nil, ErrInvalidPrepared
 	}
@@ -257,7 +264,7 @@ func (a *OpenAIResponsesAdapter) Send(ctx context.Context, managedToken, gateway
 		trace:             trace,
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		result.ErrorBody, result.ErrorBodyTruncated, result.ErrorBodyReadFailed = readBoundedErrorBody(response.Body)
+		result.ErrorBody, result.ErrorBodyTruncated, result.ErrorBodyReadFailed = readBoundedErrorBody(response.Body, cancelRequest)
 		if response.Body != nil {
 			_ = response.Body.Close()
 		}
@@ -266,7 +273,7 @@ func (a *OpenAIResponsesAdapter) Send(ctx context.Context, managedToken, gateway
 	mediaType, _, mediaTypeErr := mime.ParseMediaType(response.Header.Get("Content-Type"))
 	if mediaTypeErr != nil || !strings.EqualFold(mediaType, "text/event-stream") {
 		result.UnexpectedContentType = true
-		result.ErrorBody, result.ErrorBodyTruncated, result.ErrorBodyReadFailed = readBoundedErrorBody(response.Body)
+		result.ErrorBody, result.ErrorBodyTruncated, result.ErrorBodyReadFailed = readBoundedErrorBody(response.Body, cancelRequest)
 		if response.Body != nil {
 			_ = response.Body.Close()
 		}
@@ -277,6 +284,8 @@ func (a *OpenAIResponsesAdapter) Send(ctx context.Context, managedToken, gateway
 	} else {
 		result.body = response.Body
 	}
+	result.cancel = cancelRequest
+	streamOwnsCancellation = true
 	return result, nil
 }
 
@@ -371,10 +380,14 @@ func productionResponsesClient() *http.Client {
 	return sharedResponsesClient
 }
 
-func readBoundedErrorBody(body io.ReadCloser) ([]byte, bool, bool) {
+func readBoundedErrorBody(body io.ReadCloser, cancelRequest context.CancelFunc) ([]byte, bool, bool) {
 	if body == nil {
 		return nil, false, false
 	}
+	// Error responses have no streaming lifetime. Cancel the transport request
+	// after a finite drain budget so stalled bodies cannot occupy a slot forever.
+	deadline := time.AfterFunc(30*time.Second, cancelRequest)
+	defer deadline.Stop()
 	data, err := io.ReadAll(io.LimitReader(body, maxErrorBodyBytes+1))
 	truncated := len(data) > maxErrorBodyBytes
 	if truncated {
@@ -547,6 +560,7 @@ type UpstreamResponse struct {
 	reader *SSEReader
 	trace  *Trace
 	closed bool
+	cancel context.CancelFunc
 }
 
 // NextEvent incrementally reads one complete SSE frame. A final unterminated frame
@@ -570,6 +584,9 @@ func (r *UpstreamResponse) Close() error {
 		return nil
 	}
 	r.closed = true
+	if r.cancel != nil {
+		defer r.cancel()
+	}
 	if r.body == nil {
 		return nil
 	}

@@ -79,6 +79,21 @@ type Manager struct {
 	locks   map[string]chan struct{}
 }
 
+// AccessTokenPreparation serializes a request's durable admission and token
+// resolution with provider credential removal. The bearer remains request-local.
+type AccessTokenPreparation interface {
+	AccessToken(context.Context) (string, error)
+	Close()
+}
+
+type accessTokenPreparation struct {
+	manager    *Manager
+	providerID string
+	unlock     func()
+	mu         sync.Mutex
+	closed     bool
+}
+
 // NewManager creates an offline manager for the loopback listener.
 func NewManager(store *config.Store, port int) *Manager {
 	return &Manager{
@@ -339,6 +354,59 @@ func (m *Manager) lockProvider(ctx context.Context, providerID string) (func(), 
 	}
 }
 
+// BeginAccessTokenPreparation takes the provider lock and verifies locally that
+// the provider is connected. It does not read credentials or perform network I/O.
+// Call AccessToken only after the request's durable history admission succeeds.
+func (m *Manager) BeginAccessTokenPreparation(ctx context.Context, providerID string) (AccessTokenPreparation, error) {
+	if m == nil || m.store == nil || providerID == "" {
+		return nil, ErrProviderNotReady
+	}
+	unlock, err := m.lockProvider(ctx, providerID)
+	if err != nil {
+		return nil, err
+	}
+	providerRecord, err := m.store.GetProvider(ctx, providerID)
+	if err != nil {
+		unlock()
+		return nil, err
+	}
+	if err := providerReadinessError(providerRecord); err != nil {
+		unlock()
+		return nil, err
+	}
+	return &accessTokenPreparation{manager: m, providerID: providerID, unlock: unlock}, nil
+}
+
+func (p *accessTokenPreparation) AccessToken(ctx context.Context) (string, error) {
+	if p == nil {
+		return "", ErrProviderNotReady
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.closed || p.manager == nil {
+		return "", ErrProviderNotReady
+	}
+	return p.manager.accessTokenLocked(ctx, p.providerID)
+}
+
+func (p *accessTokenPreparation) Close() {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	if p.closed {
+		p.mu.Unlock()
+		return
+	}
+	p.closed = true
+	unlock := p.unlock
+	p.unlock = nil
+	p.mu.Unlock()
+	if unlock != nil {
+		unlock()
+	}
+}
+
 // AccessToken returns a currently usable direct-use bearer token for an internal
 // caller. It is intentionally not exposed by an HTTP management endpoint.
 func (m *Manager) AccessToken(ctx context.Context, providerID string) (string, error) {
@@ -350,16 +418,18 @@ func (m *Manager) AccessToken(ctx context.Context, providerID string) (string, e
 		return "", err
 	}
 	defer unlock()
+	return m.accessTokenLocked(ctx, providerID)
+}
 
+// accessTokenLocked resolves or refreshes a token while the caller holds the
+// provider lock. Request preparation leases use it without reacquiring the lock.
+func (m *Manager) accessTokenLocked(ctx context.Context, providerID string) (string, error) {
 	providerRecord, err := m.store.GetProvider(ctx, providerID)
 	if err != nil {
 		return "", err
 	}
-	if providerRecord.Type != "openai" || providerRecord.Status != "connected" {
-		if providerRecord.Status == "require_reauthentication" {
-			return "", ErrProviderReauthentication
-		}
-		return "", ErrProviderNotReady
+	if err := providerReadinessError(providerRecord); err != nil {
+		return "", err
 	}
 	credentials, err := m.store.GetProviderCredentials(ctx, providerID)
 	if err != nil {
@@ -409,6 +479,16 @@ func (m *Manager) AccessToken(ctx context.Context, providerID string) (string, e
 	return refreshed.AccessToken, nil
 }
 
+func providerReadinessError(providerRecord config.Provider) error {
+	if providerRecord.Status == "require_reauthentication" {
+		return ErrProviderReauthentication
+	}
+	if providerRecord.Type != "openai" || providerRecord.Status != "connected" {
+		return ErrProviderNotReady
+	}
+	return nil
+}
+
 // Disconnect clears local credentials and invalidates any in-flight browser
 // authorization before it makes a best-effort remote revocation request.
 func (m *Manager) Disconnect(ctx context.Context, providerID string) (attempted, confirmed bool, err error) {
@@ -453,6 +533,32 @@ func (m *Manager) Disconnect(ctx context.Context, providerID string) (attempted,
 	defer cancel()
 	confirmed = revokeRefreshToken(revokeCtx, credentials)
 	return attempted, confirmed, nil
+}
+
+// DeleteProvider removes the provider and its local credentials while holding
+// the same lock used by admission, token refresh, and OAuth callbacks. Pending
+// browser authorization is invalidated only after the database deletion succeeds.
+func (m *Manager) DeleteProvider(ctx context.Context, providerID string) error {
+	if m == nil || m.store == nil || providerID == "" {
+		return errors.New("OAuth manager is not configured")
+	}
+	unlock, err := m.lockProvider(ctx, providerID)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+
+	if err := m.store.DeleteProvider(ctx, providerID); err != nil {
+		return err
+	}
+	m.pendingMu.Lock()
+	m.generation[providerID]++
+	if state := m.latest[providerID]; state != "" {
+		delete(m.pending, state)
+		delete(m.latest, providerID)
+	}
+	m.pendingMu.Unlock()
+	return nil
 }
 
 // CatalogModel contains only the documented model identifier and display label.

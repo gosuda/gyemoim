@@ -32,7 +32,7 @@ The service has four primary goals:
 - Preserve all request content without per-harness recording exclusions or automatic body masking.
 - Block new inference requests when request recording is unavailable; do not offer an unlogged bypass.
 - Allow immediate access to the local WebUI without an administrator login or initial approval flow.
-- Apply Provider disconnection and ServiceAccount key revocation to new requests without explicitly interrupting requests already in progress.
+- Apply Provider disconnection/deletion and ServiceAccount key revocation to new requests without explicitly interrupting requests already in progress.
 - Store configuration and credentials in SQLite; store request history in NDJSON files.
 - Rotate logs and compress closed files by spawning the external `zstd` executable.
 - Retain request history indefinitely. Provide storage visibility and deletion of all request records in a selected date range; do not offer ServiceAccount- or Model-specific deletion in the first version.
@@ -104,7 +104,7 @@ ServiceAccount keys are stored as hashes in SQLite. Keys can be issued and revok
 
 pi agent is the first integration target. Preserve Responses API behavior across supported clients rather than introducing pi-specific request semantics. OpenAI OAuth capability restrictions still apply and must produce clear errors. The pi version, configuration, and integration acceptance cases will be established during implementation.
 
-When admitting a request, retain its ServiceAccount identity and a snapshot of the configured Model and routing settings. Record the actual Provider and upstream model for each attempt. Subsequent configuration changes, key revocation, or Provider disconnection affect new requests. The gateway does not explicitly cancel admitted requests in response to these administrative actions.
+When admitting a request, retain its ServiceAccount identity and a snapshot of the configured Model and routing settings. Record the actual Provider and upstream model for each attempt. For Responses requests, the gateway serializes Provider credential removal by disconnect or deletion with a local connected-status check, durable history admission, and token resolution. A disconnected provider is rejected before admission; token refresh remains after durable admission, and a failed admission performs no refresh or provider I/O. The lease ends after token resolution and before upstream transmission. Subsequent configuration changes, key revocation, or Provider credential removal affect new requests. The gateway does not explicitly cancel admitted requests in response to these administrative actions.
 
 `GET /v1/models` returns configured Model names authorized for the calling ServiceAccount in the standard OpenAI model-list format. Provider upstream catalogs are available in the WebUI to configure Model targets. Harnesses use the user-defined Model name rather than a Provider-prefixed upstream model ID.
 
@@ -256,7 +256,7 @@ Implementation is split into T01 through T17 and tracked in [implementation-plan
 - Missing `zstd` does not prevent startup or NDJSON recording.
 - When recording is unavailable, new inference requests are rejected before provider invocation and the management UI remains accessible.
 - The local WebUI is immediately accessible without an administrator login or initial approval.
-- ServiceAccount key revocation and Provider disconnection prevent new requests without gateway-initiated cancellation of admitted requests.
+- ServiceAccount key revocation and Provider credential removal by disconnection or deletion prevent new requests without gateway-initiated cancellation of admitted requests.
 - Gateway-managed authentication fields do not appear in request logs or exports; arbitrary prompt and tool content remains intact.
 
 ## Later Extensions

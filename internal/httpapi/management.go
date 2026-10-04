@@ -267,7 +267,11 @@ func (api *managementAPI) provider(w http.ResponseWriter, r *http.Request, id st
 		}
 		writeJSON(w, http.StatusOK, provider)
 	case http.MethodDelete:
-		if err := api.store.DeleteProvider(r.Context(), id); err != nil {
+		if api.oauth == nil {
+			writeManagementError(w, http.StatusServiceUnavailable, "Provider deletion is unavailable.", "service_unavailable")
+			return
+		}
+		if err := api.oauth.DeleteProvider(r.Context(), id); err != nil {
 			writeManagementFailure(w, err)
 			return
 		}

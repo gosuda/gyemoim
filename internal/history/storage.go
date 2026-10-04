@@ -362,6 +362,10 @@ func (r *Recorder) retryVerifiedSourceCleanup(ctx context.Context) {
 			if leaseErr != nil {
 				return
 			}
+			if !r.sourceCleanupStillPending(name) {
+				_ = lease.Close()
+				continue
+			}
 			compressedName := name + compressedSuffix
 			compressedPath := filepath.Join(r.historyDir, compressedName)
 			syncErr := syncCompressedFile(compressedPath)
@@ -389,6 +393,10 @@ func (r *Recorder) retryVerifiedSourceCleanup(ctx context.Context) {
 		lease, err := r.BeginMaintenance(ctx)
 		if err != nil {
 			return
+		}
+		if !r.sourceCleanupStillPending(name) {
+			_ = lease.Close()
+			continue
 		}
 		compressedName := name + compressedSuffix
 		compressedPath := filepath.Join(r.historyDir, compressedName)
@@ -439,6 +447,16 @@ func (r *Recorder) retryVerifiedSourceCleanup(ctx context.Context) {
 		}
 		_ = lease.Close()
 	}
+}
+
+// The name list is captured before maintenance admission. Deletion may finish
+// in between and replace a pair with filtered raw history, making cleanup stale.
+// Call only while holding the maintenance lease, which prevents another deletion
+// from invalidating the membership check before file operations complete.
+func (r *Recorder) sourceCleanupStillPending(name string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.verifiedCompressed[name]
 }
 
 func (r *Recorder) compressClosedSegment(ctx context.Context, segment ClosedSegment) error {
