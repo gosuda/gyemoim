@@ -1,6 +1,6 @@
 # Gyemoim Implementation Plan
 
-This plan tracks implementation in small, reviewable tasks. T01 through T14 are complete. T15 through T17 are pending.
+This plan tracks implementation in small, reviewable tasks. T01 through T15 are complete. T16 and T17 are pending.
 
 ## Tasks
 
@@ -20,7 +20,7 @@ This plan tracks implementation in small, reviewable tasks. T01 through T14 are 
 | T12 | pi agent 1.0.0 model metadata and connection configuration | Complete |
 | T13 | History query and usage aggregation | Complete |
 | T14 | Request investigation UI and timing details | Complete |
-| T15 | External zstd compression and storage visibility | Pending |
+| T15 | External zstd compression and storage visibility | Complete |
 | T16 | Date-range request-record deletion | Pending |
 | T17 | Packaging and user documentation | Pending |
 
@@ -163,3 +163,12 @@ This plan tracks implementation in small, reviewable tasks. T01 through T14 are 
 - Added request details for historical identities, Model version/strategy, actual provider/upstream target, local/upstream request IDs, attempts, response status, safe errors, provider-reported usage, and observed monotonic timing offsets.
 - Incoming/effective request bytes, HTTP response bodies, and raw SSE/tool frames display as safe plain text. Body and frame previews use replaceable 256 KiB chunks, report byte ranges/recording flags, identify split UTF-8 boundaries or replacement, and avoid claiming a partial preview is complete JSON. Event name previews and omitted raw-frame flags remain visible.
 - Parent reviewed all changed assets and docs, and corrected snapshot field names, table rendering, query cancellation scope, cursor advancement, applied filter snapshots, and HTTP status-zero wording. CGO-disabled Linux/macOS amd64/arm64 builds, JavaScript syntax and diff checks passed. Manual browser inspection passed for usage/outcome totals, request detail and cache usage, completed filters and UTC validation, 2 MiB event chunks, binary response preview labeling, and mobile layout. No automated tests were added or run. Live authenticated inference remains unverified.
+
+
+### T15
+
+- Added external-only zstd compression for immutable closed segments on the existing one-minute worker tick. Compression uses a unique owner-only same-directory temporary file and the sync, rename, directory-sync, source-remove, directory-sync publication sequence. Source files remain until successful compressed publication and directory sync; pending source cleanup and post-removal sync failures retry on later ticks.
+- Startup validates raw and compressed segments. Crash-window raw/compressed pairs are deduplicated only after streaming byte-length and SHA-256 comparison. Missing zstd leaves raw recording available and makes compressed queries explicitly unavailable. Invalid or mismatched compressed data is preserved and degrades startup.
+- Extended query snapshots to stream `.zst` segments through an external `zstd -q -dc` child, checking its exit status and cancelling/reaping it on early termination. Compression uses T13's maintenance lease without holding the recorder mutex during process I/O.
+- Added `GET /api/storage` and a Storage page for active/raw/compressed sizes and counts, pending/failed work, executable availability, recorder state/loss counters, and the last safe compression error.
+- Local `/usr/bin/zstd` v1.5.7 help and `go doc os/exec.Cmd` were inspected before implementation; no library or dependency was added. `go build ./...` and `node --check internal/httpui/assets/site.js` passed. No automated tests were added or run. Root manual fixture checks covered minute-tick compression, unchanged usage counts, compressed body/event chunks, owner-only modes, startup pair deduplication, missing-zstd behavior, and malformed compressed history; parent reviewed every source and documentation change and accepted the implementation. Matching and mismatched crash-window pairs were checked manually, with mismatches preserving both files. CGO-disabled builds passed for Linux/macOS amd64/arm64. Live upstream inference remains unverified.

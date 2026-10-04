@@ -21,6 +21,32 @@ Names sort lexically by segment start time. Publication syncs the active file, c
 it, renames it, syncs the history directory, creates a new owner-only active file, and
 syncs the directory again. The directory is also synced when first created.
 
+Closed segments may be stored as either their raw `.ndjson` file or as a same-basename
+`.ndjson.zst` file. Once per minute, after startup recovery is complete, the recorder
+checks for closed raw segments and invokes the external `zstd` program with `-q -c`.
+It writes stdout to an owner-only, uniquely named temporary file in the history
+directory, syncs that file, renames it to the final `.zst` name, syncs the directory,
+then removes the raw source and syncs the directory again. Failures before publication,
+and failures after publication but before source removal, leave the raw source in
+place. Published pairs are recorded as verified so history queries do not count them
+twice; a later minute check retries source cleanup. If removal succeeds but the last
+directory sync fails, a later minute check syncs the compressed copy and directory
+again. If a crash restores the raw directory entry, startup verifies the pair again.
+
+On startup, every compressed segment is streamed through `zstd -q -dc` and validated
+with the same bounded record decoder as raw history. A raw/compressed pair is compared
+by decompressed byte length and SHA-256 before the source can be removed or omitted
+from a query snapshot. Mismatches and malformed compressed files are preserved and
+degrade recorder startup. If `zstd` is unavailable, raw recording still opens, but
+queries that encounter compressed segments return an explicit unavailable error and
+status marks compressed validation as pending. Installing `zstd` after startup
+requires a restart before compressed history is validated and queried.
+
+Known crash-left compression temporary files use
+`<segment>.ndjson.zst.tmp-<32 lowercase hex digits>` names. Startup cleanup removes
+only matching regular files and never follows or removes links. Unknown files are
+left untouched.
+
 Startup scans each closed segment and the active file one bounded line at a time.
 Records are limited to 512 MiB to allow JSON escaping of the largest 64 MiB UTF-8 SSE
 frame (up to roughly 384 MiB before record overhead). A complete line with malformed

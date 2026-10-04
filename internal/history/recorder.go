@@ -144,6 +144,15 @@ type Recorder struct {
 	rotationStarted        bool
 	rotationStopOnce       sync.Once
 	queryGate              *operationGate
+	zstdExecutable         string
+	compressionCtx         context.Context
+	compressionCancel      context.CancelFunc
+	verifiedCompressed     map[string]bool
+	compressionFailures    map[string]bool
+	compressionLastError   string
+	compressionLastSegment string
+	compressionLastAt      time.Time
+	compressedQueryErr     error
 }
 
 // Request is a handle for one admitted inference request. It is safe for concurrent
@@ -167,9 +176,11 @@ type Request struct {
 // is validated before append, and only an incomplete active-file tail is truncated.
 func Open(dataDir string) (*Recorder, error) {
 	r := &Recorder{
-		active:    make(map[string]*Request),
-		state:     "degraded",
-		queryGate: newOperationGate(),
+		active:              make(map[string]*Request),
+		state:               "degraded",
+		queryGate:           newOperationGate(),
+		verifiedCompressed:  make(map[string]bool),
+		compressionFailures: make(map[string]bool),
 	}
 	if strings.TrimSpace(dataDir) == "" {
 		return r, r.degrade(errors.New("history data directory is empty"))
@@ -199,15 +210,77 @@ func Open(dataDir string) (*Recorder, error) {
 		}
 	}
 	r.historyDir = dir
+	r.zstdExecutable = resolveZstdExecutable()
+	if err := cleanupCompressionTemps(dir); err != nil {
+		r.noteCompressionError("temporary compression files could not be cleaned up", "")
+	}
 
 	segments, err := listClosedSegments(dir)
 	if err != nil {
 		return r, r.degrade(fmt.Errorf("list closed history segments: %w", err))
 	}
+	compressed, err := listCompressedSegments(dir)
+	if err != nil {
+		return r, r.degrade(fmt.Errorf("list compressed history segments: %w", err))
+	}
 	for _, segment := range segments {
 		path := filepath.Join(dir, segment.Name)
 		if err := validateHistoryFile(path, false, nil); err != nil {
 			return r, r.degrade(fmt.Errorf("closed history segment %q is invalid: %w", segment.Name, err))
+		}
+	}
+	if len(compressed) > 0 && r.zstdExecutable == "" {
+		r.compressedQueryErr = ErrZstdUnavailable
+		r.noteCompressionError("compressed history cannot be validated because zstd is unavailable", "")
+	}
+	for _, segment := range compressed {
+		compressedPath := filepath.Join(dir, segment.Name)
+		if r.zstdExecutable == "" {
+			continue
+		}
+		digest, length, validationErr := validateCompressedHistory(context.Background(), r.zstdExecutable, compressedPath, nil)
+		if validationErr != nil {
+			r.compressedQueryErr = fmt.Errorf("%w: segment %q could not be validated", ErrCompressedHistoryInvalid, segment.Name)
+			r.compressionFailures[segment.Name] = true
+			r.noteCompressionError("compressed history failed startup validation", segment.Name)
+			return r, r.degrade(fmt.Errorf("compressed history segment %q is invalid: %w", segment.Name, validationErr))
+		}
+		if err := syncCompressedFile(compressedPath); err != nil {
+			r.compressedQueryErr = fmt.Errorf("%w: segment %q could not be synced", ErrCompressedHistoryInvalid, segment.Name)
+			return r, r.degrade(fmt.Errorf("sync validated compressed history segment %q: %w", segment.Name, err))
+		}
+		rawName := strings.TrimSuffix(segment.Name, compressedSuffix)
+		rawPath := filepath.Join(dir, rawName)
+		if _, statErr := os.Lstat(rawPath); errors.Is(statErr, os.ErrNotExist) {
+			continue
+		} else if statErr != nil {
+			return r, r.degrade(fmt.Errorf("inspect raw source for compressed segment %q: %w", segment.Name, statErr))
+		}
+		rawDigest, rawLength, hashErr := hashRegularFile(context.Background(), rawPath)
+		if hashErr != nil {
+			r.compressedQueryErr = fmt.Errorf("%w: pair %q could not be compared", ErrCompressedHistoryInvalid, rawName)
+			return r, r.degrade(fmt.Errorf("verify raw and compressed history pair %q: %w", segment.Name, hashErr))
+		}
+		if length != rawLength || digest != rawDigest {
+			r.compressedQueryErr = fmt.Errorf("%w: pair %q does not match", ErrCompressedHistoryInvalid, rawName)
+			r.compressionFailures[segment.Name] = true
+			r.noteCompressionError("raw and compressed history copies do not match", rawName)
+			return r, r.degrade(fmt.Errorf("raw and compressed history segment pair %q does not match", rawName))
+		}
+		r.verifiedCompressed[rawName] = true
+		if err := syncDirectory(dir); err != nil {
+			return r, r.degrade(fmt.Errorf("sync history directory before raw source removal: %w", err))
+		}
+		if err := os.Remove(rawPath); err != nil {
+			r.compressionFailures[segment.Name] = true
+			r.noteCompressionError("verified raw source could not be removed", rawName)
+			continue
+		}
+		if err := syncDirectory(dir); err != nil {
+			r.compressionFailures[segment.Name] = true
+			r.noteCompressionError("history directory could not be synced after source removal", rawName)
+		} else {
+			delete(r.verifiedCompressed, rawName)
 		}
 	}
 
@@ -328,6 +401,7 @@ func Open(dataDir string) (*Recorder, error) {
 			return r, fmt.Errorf("rotate recovered active history file: %w", err)
 		}
 	}
+	r.compressionCtx, r.compressionCancel = context.WithCancel(context.Background())
 	r.startRotation()
 	return r, nil
 }
@@ -444,6 +518,7 @@ func (r *Recorder) startRotation() {
 					_ = r.rotateLocked(time.Now())
 				}
 				r.mu.Unlock()
+				r.compressPending(r.compressionCtx)
 			case <-r.rotationStop:
 				return
 			}
@@ -455,7 +530,12 @@ func (r *Recorder) stopRotation() {
 	if !r.rotationStarted {
 		return
 	}
-	r.rotationStopOnce.Do(func() { close(r.rotationStop) })
+	r.rotationStopOnce.Do(func() {
+		close(r.rotationStop)
+		if r.compressionCancel != nil {
+			r.compressionCancel()
+		}
+	})
 	<-r.rotationDone
 }
 

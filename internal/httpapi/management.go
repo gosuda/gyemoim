@@ -31,13 +31,14 @@ type managementAPI struct {
 	fallback http.Handler
 	oauth    *siwc.Manager
 	history  *history.QueryService
+	storage  *history.Recorder
 	port     int
 }
 
 // NewManagement creates the management API handler. Paths outside the JSON API
 // routes fall through to the embedded UI, which also owns /api/status.
 func NewManagement(store *config.Store, fallback http.Handler, oauthManager *siwc.Manager, port int, recorder *history.Recorder) http.Handler {
-	return &managementAPI{store: store, gateway: gateway.New(store), fallback: fallback, oauth: oauthManager, history: history.NewQueryService(recorder), port: port}
+	return &managementAPI{store: store, gateway: gateway.New(store), fallback: fallback, oauth: oauthManager, history: history.NewQueryService(recorder), storage: recorder, port: port}
 }
 
 func (api *managementAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -85,6 +86,8 @@ func (api *managementAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		api.requestContent(w, r, parts[1])
 	case len(parts) == 1 && parts[0] == "usage":
 		api.usage(w, r)
+	case len(parts) == 1 && parts[0] == "storage":
+		api.storageStatus(w, r)
 	default:
 		writeManagementError(w, http.StatusNotFound, "management endpoint not found", "not_found")
 	}

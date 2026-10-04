@@ -23,6 +23,7 @@
         <button class="nav-item" type="button" data-page="service-accounts"><span class="nav-icon" aria-hidden="true">◎</span>Service accounts</button>
         <button class="nav-item" type="button" data-page="models"><span class="nav-icon" aria-hidden="true">▦</span>Models</button>
         <button class="nav-item" type="button" data-page="requests"><span class="nav-icon" aria-hidden="true">≡</span>Requests</button>
+        <button class="nav-item" type="button" data-page="storage"><span class="nav-icon" aria-hidden="true">▤</span>Storage</button>
       </nav>
       <div class="sidebar-bottom">
         <span class="status-dot" aria-hidden="true"></span>
@@ -189,6 +190,19 @@
         <section class="panel request-detail-panel" id="request-detail-panel" aria-labelledby="request-detail-heading" hidden>
           <div class="panel-heading"><div><h3 id="request-detail-heading">Request details</h3><p class="muted" id="request-detail-subtitle"></p></div><button class="button quiet small" id="request-detail-close" type="button">Close details</button></div>
           <div id="request-detail-content"></div>
+        </section>
+      </section>
+
+      <section class="page-view" data-view="storage" aria-labelledby="storage-heading" hidden>
+        <div class="page-intro"><h2 id="storage-heading">History storage</h2><p class="muted">Closed history is compressed with the external zstd program. Compression never blocks raw request recording.</p></div>
+        <section class="panel" aria-labelledby="storage-summary-heading">
+          <div class="panel-heading"><div><h3 id="storage-summary-heading">Storage summary</h3><p class="muted">Sizes describe the current history directory. Active history is still being written.</p></div><button class="button quiet small" type="button" data-refresh="storage">Refresh</button></div>
+          <p class="form-message" id="storage-message" role="status" aria-live="polite">Loading storage…</p>
+          <div id="storage-summary" class="usage-summary"></div>
+        </section>
+        <section class="panel request-results" aria-labelledby="storage-operations-heading">
+          <div class="panel-heading"><div><h3 id="storage-operations-heading">Compression status</h3><p class="muted">Pending work is checked once per minute. Failed compression keeps the raw source.</p></div></div>
+          <dl class="runtime-grid" id="storage-details"><div><dt>Status</dt><dd>Loading…</dd></div></dl>
         </section>
       </section>
     </main>

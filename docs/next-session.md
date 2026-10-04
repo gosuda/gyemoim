@@ -2,7 +2,7 @@
 
 ## Resume point
 
-Finish T15 through T17 in [implementation-plan.md](implementation-plan.md). T01–T14 are implemented; the plan records review and verification details. Read [design.md](design.md), [history-format.md](history-format.md), [responses-contract.md](responses-contract.md), and [pi.md](pi.md) before making changes.
+Finish T16 and T17 in [implementation-plan.md](implementation-plan.md). T01–T15 are implemented; the plan records review and verification details. Read [design.md](design.md), [history-format.md](history-format.md), [responses-contract.md](responses-contract.md), and [pi.md](pi.md) before making changes.
 
 The previous session reached the agent thread limit. The user explicitly chose to continue the remaining implementation in a **new session with fresh Luna XHigh agents**, rather than have the root implement the remaining tasks directly.
 
@@ -45,11 +45,9 @@ Use the existing `history.QueryService` and management routes documented in `his
 
 Connect overview statistics and request filters/details to T13. Show active/completed/failed/cancelled/incomplete/interrupted requests, incoming/effective content, tools/events, usage and cache ratio, separate upstream/local IDs, and the observable timing stages. Unknown values need explicit presentation. Raw content must use safe text rendering. Request comparisons, cache-miss explanations, exports and automated analysis are deferred.
 
-## T15: external zstd and storage
+## T15: implemented external zstd and storage
 
-Use an external process only; do not research or add a zstd library. Missing `zstd` keeps raw recording functional and status explains compression unavailable/pending. Check closed files once per minute. Compress to owner-only same-directory temporary output, sync, rename, sync directory, then remove source and sync directory. Keep source on failure. Verify a crash-window compressed/source pair represents identical data before removing or deduplicating either copy. Use bounded streaming verification.
-
-Read compressed records through `zstd -dc`; close pipes, cancel and reap children on early query termination. Serialize compression with deletion and coordinate file queries using T13's lease. Show raw/compressed bytes, pending/failed work and availability. Startup validation must cover compressed history as well as raw history; avoid duplicate request counts when both representations exist. Exact CLI flags and process handling still require delegated research.
+Local CLI research confirmed `/usr/bin/zstd` v1.5.7 supports the `-q -c` compression and `-q -dc` decompression flags used by T15. Runtime resolves `zstd` from `PATH` during startup; no zstd library is used. Read [history-format.md](history-format.md) for startup pair recovery, source retention, temporary cleanup, and missing-executable behavior. The Storage page and `GET /api/storage` expose counts, bytes, compression availability/work/errors, recorder state and safe loss counters. After installing zstd into an initially unavailable environment, restart Gyemoim to validate and query existing compressed segments.
 
 ## T16: date deletion
 

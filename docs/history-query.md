@@ -97,9 +97,14 @@ fixed file snapshot and release the recorder mutex before scanning. Closed files
 are opened one at a time, and the active file is read only through its captured
 length. Recording and rotation continue during a scan.
 
-The query lease also provides the maintenance coordination hook used by later
-compression and deletion work. When exclusive history maintenance is active, new
-queries return HTTP 503 with `history_maintenance` rather than waiting. Context
+The query lease also coordinates compression and later deletion work. When exclusive
+history maintenance is active, new queries return HTTP 503 with `history_maintenance`
+rather than waiting. Closed `.ndjson.zst` segments are streamed through an external
+`zstd -q -dc` child; queries check the child's exit status after EOF and cancel, close,
+and reap it after early termination. If compressed history exists but `zstd` cannot be
+started, queries return HTTP 503 with `compressed_history_unavailable` rather than
+silently reading only raw segments. Compressed startup validation failures return
+HTTP 500 with `compressed_history_invalid`; affected files remain preserved. Context
 cancellation, malformed records, missing legacy attribution, read failures, and
 timeouts return visible errors; a query does not silently omit unreadable segments.
 The implementation can still query intact history when recording is degraded, as

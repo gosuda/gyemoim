@@ -126,9 +126,10 @@ func (r *Recorder) BeginMaintenance(ctx context.Context) (*MaintenanceLease, err
 }
 
 type queryFile struct {
-	name   string
-	size   int64
-	active bool
+	name       string
+	size       int64
+	active     bool
+	compressed bool
 }
 
 // QuerySnapshot pins the active inode and a fixed set of closed-file names and
@@ -167,14 +168,35 @@ func (r *Recorder) querySnapshot(ctx context.Context) (*QuerySnapshot, error) {
 	}
 	snapshot := &QuerySnapshot{recorder: r, lease: lease, activeRequests: make(map[string]RequestSummary)}
 	r.mu.Lock()
+	if r.compressedQueryErr != nil && !errors.Is(r.compressedQueryErr, ErrZstdUnavailable) {
+		validationErr := r.compressedQueryErr
+		r.mu.Unlock()
+		_ = snapshot.Close()
+		return nil, validationErr
+	}
 	segments, listErr := listClosedSegments(r.historyDir)
 	if listErr != nil {
 		r.mu.Unlock()
 		_ = snapshot.Close()
 		return nil, fmt.Errorf("list closed history files: %w", listErr)
 	}
+	compressed, compressedErr := listCompressedSegments(r.historyDir)
+	if compressedErr != nil {
+		r.mu.Unlock()
+		_ = snapshot.Close()
+		return nil, fmt.Errorf("list compressed history files: %w", compressedErr)
+	}
+	compressedNames := make(map[string]bool, len(compressed))
+	for _, segment := range compressed {
+		compressedNames[segment.Name] = true
+	}
 	for _, segment := range segments {
-		snapshot.files = append(snapshot.files, queryFile{name: segment.Name, size: segment.Size})
+		if !r.verifiedCompressed[segment.Name] || !compressedNames[segment.Name+compressedSuffix] {
+			snapshot.files = append(snapshot.files, queryFile{name: segment.Name, size: segment.Size})
+		}
+	}
+	for _, segment := range compressed {
+		snapshot.files = append(snapshot.files, queryFile{name: segment.Name, size: segment.Size, compressed: true})
 	}
 	activePath := filepath.Join(r.historyDir, activeFileName)
 	activeFile, openErr := os.Open(activePath)
@@ -232,7 +254,7 @@ func (s *QuerySnapshot) scan(ctx context.Context, visit func(Record) error) erro
 			reader = io.NewSectionReader(s.active, 0, file.size)
 		} else {
 			var err error
-			opened, err = os.Open(filepath.Join(s.recorder.historyDir, file.name))
+			opened, err = openRegularFile(filepath.Join(s.recorder.historyDir, file.name))
 			if err != nil {
 				return fmt.Errorf("open history file %s: %w", file.name, err)
 			}
@@ -241,9 +263,26 @@ func (s *QuerySnapshot) scan(ctx context.Context, visit func(Record) error) erro
 				_ = opened.Close()
 				return fmt.Errorf("inspect history file %s: %w", file.name, statErr)
 			}
-			if !info.Mode().IsRegular() || info.Size() < file.size {
+			if !info.Mode().IsRegular() || info.Size() < file.size || (file.compressed && info.Size() != file.size) {
 				_ = opened.Close()
 				return fmt.Errorf("history file %s changed during a read lease", file.name)
+			}
+			if file.compressed {
+				process, startErr := startZstdReader(ctx, s.recorder.zstdExecutable, opened)
+				if startErr != nil {
+					_ = opened.Close()
+					return fmt.Errorf("decompress history file %s: %w", file.name, startErr)
+				}
+				err := ReadRecords(ctx, process, visit)
+				err = process.Finish(err)
+				closeErr := opened.Close()
+				if err == nil {
+					err = closeErr
+				}
+				if err != nil {
+					return fmt.Errorf("read history file %s: %w", file.name, err)
+				}
+				continue
 			}
 			reader = io.NewSectionReader(opened, 0, file.size)
 		}

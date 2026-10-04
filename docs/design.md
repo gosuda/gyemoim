@@ -212,10 +212,12 @@ If request recording becomes unavailable, including because the disk is full, re
 - Compress only closed files.
 - Check for compression work once per minute.
 - Invoke the external `zstd` executable; do not embed a zstd library.
-- Write compressed output to a temporary file, complete publication under the final filename, and only then remove the source NDJSON file.
+- Write compressed output to an owner-only temporary file in the history directory, sync it, rename it to `<segment>.zst`, sync the directory, then remove the source NDJSON file and sync the directory again.
 - Keep the source file when compression fails.
-- If `zstd` is unavailable, continue recording NDJSON and display compression as pending or unavailable.
-- Read compressed history through an external `zstd -dc` process.
+- If `zstd` is unavailable, continue recording NDJSON and display compression as unavailable. Compressed history remains visible but queries return an explicit unavailable error until the executable is available and history is revalidated.
+- Read compressed history through an external `zstd -dc` process. Cancel and reap the child if a query stops early, and check its exit status after reaching EOF.
+- Validate compressed records during startup. If raw and compressed files form a crash-window pair, compare the decompressed SHA-256 and byte length before deleting or deduplicating either file.
+- Expose active, raw, and compressed byte counts; pending and failed work; executable availability; and the latest safe operational error through the Storage page and `GET /api/storage`.
 - Preserve records indefinitely; support storage inspection and manual deletion by date range.
 - Delete all request records in the selected date range across ServiceAccounts and Models. Account- or Model-filtered deletion and configurable retention policies are deferred.
 

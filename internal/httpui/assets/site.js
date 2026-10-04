@@ -23,6 +23,7 @@
     "service-accounts": "Service accounts",
     models: "Models",
     requests: "Requests",
+    storage: "Storage",
   };
 
   const byId = (id) => document.getElementById(id);
@@ -100,6 +101,66 @@
     if (page === "service-accounts") return loadAccounts();
     if (page === "models") return loadModelsAndProviders();
     if (page === "requests") return loadRequestHistory();
+    if (page === "storage") return loadStorage();
+  }
+
+  async function loadStorage() {
+    const token = beginHistoryFetch();
+    const message = byId("storage-message");
+    const summary = byId("storage-summary");
+    const details = byId("storage-details");
+    showMessage(message, "Loading history storage…");
+    try {
+      const status = await api("/api/storage", { signal: token.controller.signal });
+      if (!historyFetchIsCurrent(token) || state.page !== "storage") return;
+      const metrics = [
+        ["Active history", formatBytes(status.activeBytes), `${formatNumber(status.activeSegments)} active file`],
+        ["Closed raw history", formatBytes(status.rawBytes), `${formatNumber(status.rawSegments)} segments`],
+        ["Compressed history", formatBytes(status.compressedBytes), `${formatNumber(status.compressedSegments)} segments`],
+        ["Pending compression", formatBytes(status.pendingBytes), `${formatNumber(status.pendingSegments)} raw segments`],
+      ];
+      summary.replaceChildren(...metrics.map(([label, value, note]) => {
+        const metric = element("div", "usage-metric");
+        metric.append(element("strong", "", value), element("span", "", `${label} · ${note}`));
+        return metric;
+      }));
+      const fields = [
+        ["History recording", status.recorderState],
+        ["Potentially lost records", formatNumber(status.potentiallyLostRecords)],
+        ["Active requests", formatNumber(status.activeRequests)],
+        ["Compression", status.compressionState],
+        ["zstd executable", status.compressionAvailable ? "Available" : "Unavailable"],
+        ["Failed segments", formatNumber(status.failedSegments)],
+        ["Compressed validation", status.compressedValidationPending ? "Pending or unavailable" : "Complete"],
+        ["Last compression error", status.lastCompressionError || "None"],
+        ["Affected segment", status.lastCompressionSegment || "—"],
+        ["Last attempt", status.lastCompressionAt ? new Date(status.lastCompressionAt).toLocaleString() : "—"],
+      ];
+      details.replaceChildren(...fields.map(([name, value]) => {
+        const row = element("div");
+        row.append(element("dt", "", name), element("dd", "", value));
+        return row;
+      }));
+      showMessage(message, "Closed raw segments are replaced by compressed segments after successful publication. History has no automatic expiration.");
+    } catch (error) {
+      if (!historyFetchIsCurrent(token) || state.page !== "storage") return;
+      summary.replaceChildren();
+      details.replaceChildren();
+      showMessage(message, `Storage status could not be loaded: ${error.message}`, "error");
+    }
+  }
+
+  function formatBytes(value) {
+    const bytes = Number(value) || 0;
+    if (bytes < 1024) return `${formatNumber(bytes)} B`;
+    const units = ["KiB", "MiB", "GiB", "TiB"];
+    let scaled = bytes / 1024;
+    let unit = units[0];
+    for (let index = 1; scaled >= 1024 && index < units.length; index++) {
+      scaled /= 1024;
+      unit = units[index];
+    }
+    return `${new Intl.NumberFormat(undefined, { maximumFractionDigits: 1 }).format(scaled)} ${unit}`;
   }
 
   async function loadStatus() {

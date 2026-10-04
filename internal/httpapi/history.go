@@ -43,6 +43,18 @@ func (api *managementAPI) requestList(w http.ResponseWriter, r *http.Request) {
 	writeBoundedHistoryJSON(w, http.StatusOK, page)
 }
 
+func (api *managementAPI) storageStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w, http.MethodGet)
+		return
+	}
+	if api.storage == nil {
+		writeManagementError(w, http.StatusServiceUnavailable, "history storage is unavailable", "history_unavailable")
+		return
+	}
+	writeJSON(w, http.StatusOK, api.storage.Storage())
+}
+
 func (api *managementAPI) requestDetail(w http.ResponseWriter, r *http.Request, id string) {
 	if r.Method != http.MethodGet {
 		methodNotAllowed(w, http.MethodGet)
@@ -261,6 +273,10 @@ func writeHistoryFailure(w http.ResponseWriter, err error) {
 		writeManagementError(w, http.StatusServiceUnavailable, "history files are undergoing maintenance; retry shortly", "history_maintenance")
 	case errors.Is(err, history.ErrQueryBusy):
 		writeManagementError(w, http.StatusServiceUnavailable, "too many history queries are active; retry shortly", "history_query_busy")
+	case errors.Is(err, history.ErrZstdUnavailable):
+		writeManagementError(w, http.StatusServiceUnavailable, "compressed history is unavailable because the zstd executable could not be started", "compressed_history_unavailable")
+	case errors.Is(err, history.ErrCompressedHistoryInvalid):
+		writeManagementError(w, http.StatusInternalServerError, "compressed history failed validation; affected files were preserved", "compressed_history_invalid")
 	case errors.Is(err, history.ErrInvalidQuery):
 		writeManagementError(w, http.StatusBadRequest, "history query parameters are invalid", "invalid_history_query")
 	case errors.Is(err, history.ErrQueryNotFound):
