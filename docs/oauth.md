@@ -1,6 +1,6 @@
 # Sign in with ChatGPT
 
-Gyemoim follows OpenAI's [Sign in with ChatGPT registration and sign-in flow](https://developers.openai.com/siwc/token-sharing-open-source/sign-in) and [account and session guidance](https://developers.openai.com/siwc/token-sharing-open-source/profiles-and-sessions). It starts sign-in only after a user presses **Connect OpenAI account** or **Reconnect**. Startup stays offline. The browser leaves the local UI for the authorization page and returns to the same listener at `http://127.0.0.1:<port>/auth/callback`.
+Gyemoim follows OpenAI's [Sign in with ChatGPT registration and sign-in flow](https://developers.openai.com/siwc/token-sharing-open-source/sign-in) and [account and session guidance](https://developers.openai.com/siwc/token-sharing-open-source/profiles-and-sessions). It starts sign-in only after a user presses **Connect OpenAI account** or **Reconnect**. Startup stays offline. The browser leaves the local UI for the authorization page and returns to the same listener at `http://127.0.0.1:<port>/auth/callback`. The active listener port is captured for each sign-in attempt. [OpenAI's registration guidance](https://developers.openai.com/siwc/token-sharing-open-source/sign-in) allows the loopback port to vary on later sign-ins while keeping the scheme, host, and callback path unchanged; the exact selected URI is reused within that authorization attempt. A live reauthorization after changing Gyemoim's port has not been verified.
 
 ## Authorization flow
 

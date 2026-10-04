@@ -1,6 +1,6 @@
 # Gyemoim Implementation Plan
 
-This plan tracks implementation in small, reviewable tasks. T01 through T16 are complete. T17 remains pending.
+All implementation tasks T01 through T17 are complete, reviewed, and committed. Verification details and remaining live-runtime checks are recorded below.
 
 ## Tasks
 
@@ -22,7 +22,7 @@ This plan tracks implementation in small, reviewable tasks. T01 through T16 are 
 | T14 | Request investigation UI and timing details | Complete |
 | T15 | External zstd compression and storage visibility | Complete |
 | T16 | Date-range request-record deletion | Complete |
-| T17 | Packaging and user documentation | Pending |
+| T17 | Packaging and user documentation | Complete |
 
 
 ### T16
@@ -33,6 +33,15 @@ This plan tracks implementation in small, reviewable tasks. T01 through T16 are 
 - Raw and zstd-compressed segments are streamed one original NDJSON line at a time. Retained lines keep their exact bytes; compressed inputs are rewritten to raw files and become eligible for later compression. Per-segment journal checkpoints make atomic replacement and compressed-source cleanup replayable after crashes.
 - Startup replays a valid journal before closed-file validation or compression starts. Failures preserve the journal, keep queries blocked, expose pending progress/error in storage status, and leave raw recording available unless the recorder itself has failed. Shutdown cancels and joins an active deletion operation; its child process is reaped and the journal remains for restart recovery.
 - The Storage page includes an irreversible all-accounts/all-models date form with active-request conflict and maintenance status. Parent reviewed every change and corrected submission cutoffs, journal capacity, cleanup and shutdown races, startup validation wiring, and UI polling/navigation. CGO-disabled builds passed for Linux/macOS amd64/arm64; JavaScript syntax and diff checks passed. Manual API inspection passed for selective deletion across raw/compressed segments, preserved requests outside the range, invalid/future dates, today's cutoff, partial compressed deletion replay, unavailable-zstd recovery status, and restart completion. Browser inspection passed for date controls, scope/status text, and cancellation preserving history. Active-request conflict and large-archive concurrency behavior were source-reviewed, not runtime-verified. No automated tests were added or run.
+
+
+### T17
+
+- Added a first-run [README](../README.md) covering source and release builds, embedded WebUI startup, the OpenAI Provider / Model alias / ServiceAccount grant and one-time key workflow, exact Pi 1.0.0 configuration readiness, Responses API curl examples, loopback/proxy behavior, data paths, stopped-service whole-directory backup/restore, history recovery, optional external zstd, full-body recording, usage uncertainty, and current verification limits. Existing detailed OAuth, Pi, Responses, and history documents remain linked for deeper behavior.
+- Added `scripts/build-release.sh`, a Bash/Linux/macOS script that stages CGO-disabled `-trimpath` builds for linux/amd64, linux/arm64, darwin/amd64, and darwin/arm64, then publishes the four deterministic filenames. It writes only those named outputs, refuses symlinks/non-file targets, does not clean an output directory, and does not run tests. `.gitignore` covers `dist/`, the native `gyemoim` output, and the script's root-level staging directory.
+- Updated [oauth.md](oauth.md) from official OpenAI SIWC registration guidance: later sign-ins may use a different loopback port, with scheme, host, and callback path fixed and one exact URI reused within each attempt. Authenticated changed-port reauthorization remains unverified.
+- Root ran the final release script to `/tmp/gyemoim-t17-release output.otmGI6`; all four targets built with the path containing spaces. `bash -n` and `git diff --check` passed. Root confirmed the Linux amd64/arm64 outputs are statically linked and the Darwin amd64/arm64 outputs are Mach-O binaries. The packaged Linux binary ran from `/tmp`, served embedded `assets/site.js` with HTTP 200, and reported ready status on port 19092 without external runtime assets. Root also reported native Linux checks against the final T16 runtime: fresh default-port 9092 startup/status; mode 0700 data directory and mode 0600 SQLite/WAL/SHM/history/lock files; clear errors for a second process on the same data directory and for a different data directory attempting the same port; graceful Ctrl-C followed by a successful restart on custom port 19092.
+- No automated tests were added or run. The macOS targets were cross-compiled, not run on macOS. Authenticated OpenAI sign-in, refresh, catalog, inference, complete Pi-to-Gyemoim use, and changed-port reauthorization remain unverified. Parent reviewed and accepted every T17 change.
 
 ## Confirmed Implementation Decisions
 

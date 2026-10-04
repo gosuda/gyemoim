@@ -1,10 +1,10 @@
 # Implementation Handoff
 
-## Resume point
+## Implementation status
 
-Finish T17 in [implementation-plan.md](implementation-plan.md). T01–T16 are implemented and reviewed; the plan records verification details. Read [design.md](design.md), [history-format.md](history-format.md), [responses-contract.md](responses-contract.md), and [pi.md](pi.md) before making changes.
+All T01–T17 tasks are implemented, reviewed, and committed. There are no remaining tasks in the accepted implementation plan. Read [README.md](../README.md) for running and packaging, and [implementation-plan.md](implementation-plan.md) for task-by-task verification. Live authenticated OpenAI and Pi use, native macOS execution, and the active-request deletion conflict at runtime remain unverified; these are verification limits, not claims of successful checks.
 
-The previous session reached the agent thread limit. The user explicitly chose to continue the remaining implementation in a **new session with fresh Luna XHigh agents**, rather than have the root implement the remaining tasks directly.
+The user requested sequential fresh Luna XHigh implementation tasks, root review and commit, and no automated tests.
 
 ## Required workflow
 
@@ -57,13 +57,13 @@ Use a UTC half-open interval; cap today's end at submission time. Under a brief 
 
 The implementation adds the date form and `POST /api/storage/delete`; see [history-format.md](history-format.md) and [history-query.md](history-query.md) for journal recovery, request cutoffs, and API behavior. Parent source review, four-target builds, JavaScript syntax, selective deletion and replay API checks, and browser controls inspection passed. The active-request conflict path remains source-reviewed, not runtime-verified.
 
-## T17: packaging and documentation
+## T17: implemented packaging and documentation
 
-Add a beginner README and small build/release script for CGO-disabled Linux/macOS amd64/arm64 binaries. Assets are already embedded. No installers/service managers needed. Source requires Go 1.25 or newer. Document default `127.0.0.1:9092`, `--port`, first-run UI workflow and exact T12 pi configuration, stop/restart, data paths, complete stopped-service backup/restore and recovery behavior, external optional zstd, full-body recording and SQLite credentials.
+The README and release script are present. README covers the local first-run workflow, Pi agent 1.0.0 configuration, generic local API calls, backup/restore and recovery, privacy, and optional external zstd. The script builds the four CGO-disabled targets with `-trimpath`, stages in the output directory, and updates only the four named output files. See `docs/implementation-plan.md` for review status and evidence.
 
-Outgoing OAuth/catalog/Responses transports explicitly use `Proxy=nil`; HTTP(S)_PROXY is not supported for outbound OpenAI calls. This is distinct from harness proxy bypass for loopback. No license has been selected; do not invent one.
+A complete four-target release-script build, Bash syntax check, and diff whitespace check passed during implementation. Root reported native Linux startup/status, owner-only mode, process-lock and port-conflict, graceful Ctrl-C, and custom-port restart checks against the final T16 runtime. Root ran the final script to a path containing spaces, confirmed the four binary formats, and started the packaged Linux binary outside the repository; see the plan for details.
 
-Build all four targets and manually inspect the native Linux startup, status, permissions, port/process conflicts and graceful shutdown. No automated tests. Live authenticated OpenAI sign-in/refresh/catalog/inference and live pi usage have **not** been verified. No native macOS runtime check is available; cross-compilation is not a runtime check. Keep these limitations explicit.
+No automated tests were added or run. The cross-built macOS binaries have not been run on macOS. Live authenticated OpenAI sign-in, refresh, catalog, inference, and a complete Pi-to-Gyemoim session remain unverified. Parent source review accepted the final changes.
 
 ## Runtime and local references
 
