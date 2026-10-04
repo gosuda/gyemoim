@@ -464,6 +464,7 @@ type AttemptDetail struct {
 type ResponseDetail struct {
 	Attempt           int    `json:"attempt"`
 	HTTPStatus        int    `json:"httpStatus"`
+	ContentType       string `json:"contentType,omitempty"`
 	UpstreamRequestID string `json:"upstreamRequestId,omitempty"`
 	BodyBytes         int64  `json:"bodyBytes"`
 	BodyTruncated     bool   `json:"bodyTruncated"`
@@ -524,6 +525,7 @@ func (q *QueryService) Detail(ctx context.Context, requestID string) (RequestDet
 			detail.ResponseCount++
 			if len(detail.Responses) < MaxDetailResponses {
 				detail.Responses = append(detail.Responses, ResponseDetail{Attempt: record.Attempt, HTTPStatus: record.HTTPStatus,
+					ContentType: record.UpstreamContentType,
 					UpstreamRequestID: record.UpstreamRequestID, BodyBytes: int64(len(record.UpstreamResponseBody)),
 					BodyTruncated: record.UpstreamResponseBodyTruncated, BodyReadFailed: record.UpstreamResponseBodyReadFailed,
 					BodyURL: fmt.Sprintf("/api/requests/%s/body?kind=http_response&attempt=%d", requestID, record.Attempt)})

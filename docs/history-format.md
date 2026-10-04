@@ -98,6 +98,9 @@ successful handle.
 
 - `attempt`: attempt whose HTTP response was received.
 - `http_status`: actual upstream HTTP status.
+- `content_type`: sanitized upstream `Content-Type` header value, empty when the
+  upstream sent no header. An empty value is meaningful: the live Responses endpoint
+  currently omits the header on streaming and error responses alike.
 - `upstream_request_id`: validated provider request ID, if supplied.
 - `body`: exact raw response bytes encoded by JSON as base64. It is bounded to 64 MiB.
 - `body_truncated` and `body_read_failed`: indicate that the adapter could not retain a
@@ -105,7 +108,8 @@ successful handle.
   exceeded the cap and reading also failed.
 
 This record preserves non-2xx bodies and successful responses with an unexpected
-content type. It contains no upstream response headers or managed authorization token.
+content type. It contains no managed authorization token and no upstream response
+headers other than the sanitized `content_type` and request-ID values above.
 The following `request_end` record provides the durability fence.
 
 ### `response_event`

@@ -56,7 +56,17 @@ A 2xx response whose media type is not `text/event-stream` also returns the boun
 body and `ErrNoEventStream`; the executor can return an explicit gateway error while
 retaining that upstream response. `ErrorBodyTruncated` and `ErrorBodyReadFailed`
 disclose a body limit or read failure.
-Only a validated content type, a safe upstream request ID, and a valid `Retry-After`
+
+A missing `Content-Type` header is decided by a bounded sniff of the body instead of
+failing outright: the live endpoint has omitted the header on successful SSE streams
+and on JSON error responses alike. A body that starts with SSE framing (optional UTF-8
+BOM, then empty lines, `:` comments, or `event`/`id`/`retry`/`data` field lines) is
+treated as a stream with the sniffed bytes prepended; anything else keeps the strict
+`ErrNoEventStream` failure. A header that is present is still parsed strictly, with one
+leniency: malformed media-type parameters fall back to comparing the portion before the
+first parameter, so a parameter quirk cannot reject a correct `text/event-stream`.
+Only a validated content type, a safe upstream request ID (including the
+`X-Oai-Request-Id` header the endpoint now sends), and a valid `Retry-After`
 value are exposed as response metadata. Transport errors are reduced to safe
 sentinels; the URL, token, request, and raw transport error are not included.
 

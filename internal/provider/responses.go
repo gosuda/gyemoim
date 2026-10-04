@@ -270,8 +270,38 @@ func (a *OpenAIResponsesAdapter) Send(ctx context.Context, managedToken, gateway
 		}
 		return result, nil
 	}
-	mediaType, _, mediaTypeErr := mime.ParseMediaType(response.Header.Get("Content-Type"))
-	if mediaTypeErr != nil || !strings.EqualFold(mediaType, "text/event-stream") {
+	rawContentType := strings.TrimSpace(response.Header.Get("Content-Type"))
+	explicitEventStream := false
+	if rawContentType != "" {
+		mediaType, _, mediaTypeErr := mime.ParseMediaType(rawContentType)
+		if mediaTypeErr != nil {
+			// Malformed parameters must not reject a correct media type; compare
+			// the portion before the first parameter instead.
+			mediaType = strings.TrimSpace(strings.SplitN(rawContentType, ";", 2)[0])
+		}
+		explicitEventStream = strings.EqualFold(mediaType, "text/event-stream")
+	}
+	if rawContentType == "" {
+		// The Responses endpoint has omitted Content-Type on successful streams.
+		// An absent header is decided by a bounded sniff of the body instead: a
+		// body that starts with SSE framing is a stream; anything else keeps the
+		// strict unexpected-content-type failure with its recorded bytes.
+		prefix, isEventStream := sniffEventStreamBody(response.Body)
+		if !isEventStream {
+			result.UnexpectedContentType = true
+			result.ErrorBody, result.ErrorBodyTruncated, result.ErrorBodyReadFailed = readBoundedErrorBody(
+				prefixReadCloser(prefix, response.Body), cancelRequest)
+			if response.Body != nil {
+				_ = response.Body.Close()
+			}
+			return result, ErrNoEventStream
+		}
+		result.body = prefixReadCloser(prefix, response.Body)
+		result.cancel = cancelRequest
+		streamOwnsCancellation = true
+		return result, nil
+	}
+	if !explicitEventStream {
 		result.UnexpectedContentType = true
 		result.ErrorBody, result.ErrorBodyTruncated, result.ErrorBodyReadFailed = readBoundedErrorBody(response.Body, cancelRequest)
 		if response.Body != nil {
@@ -410,12 +440,117 @@ func safeHeader(value string, limit int) string {
 }
 
 func upstreamRequestID(header http.Header) string {
-	for _, name := range []string{"X-Request-Id", "OpenAI-Request-Id"} {
+	for _, name := range []string{"X-Request-Id", "OpenAI-Request-Id", "X-Oai-Request-Id"} {
 		if value := safeHeader(header.Get(name), 256); value != "" {
 			return value
 		}
 	}
 	return ""
+}
+
+// maxContentTypeSniffBytes bounds how much of a body may be read to decide
+// whether a response without a Content-Type header carries an SSE stream.
+const maxContentTypeSniffBytes = 8 << 10
+
+// sseFieldNames are the field names allowed at the start of an SSE stream,
+// longest first so an incomplete line can never outgrow every candidate.
+var sseFieldNames = []string{"event", "retry", "data", "id"}
+
+// sniffEventStreamBody reads a bounded prefix of a response body that arrived
+// without a Content-Type header and reports whether it starts like an SSE
+// stream. The caller must prepend the returned prefix to whatever consumes the
+// body. A read error or exhausted bytes keep the stream decision so the SSE
+// reader surfaces the failure with stream recording semantics.
+func sniffEventStreamBody(body io.Reader) (prefix []byte, isEventStream bool) {
+	if body == nil {
+		return nil, true
+	}
+	buffer := make([]byte, 0, 1024)
+	chunk := make([]byte, 512)
+	for len(buffer) < maxContentTypeSniffBytes {
+		read, readErr := body.Read(chunk)
+		if read > 0 {
+			buffer = append(buffer, chunk[:read]...)
+			if decided, isStream := classifyEventStreamPrefix(buffer); decided {
+				return buffer, isStream
+			}
+		}
+		if readErr != nil || read == 0 {
+			return buffer, true
+		}
+	}
+	_, isEventStream = classifyEventStreamPrefix(buffer)
+	return buffer, isEventStream
+}
+
+// classifyEventStreamPrefix decides whether a body prefix is consistent with an
+// SSE stream: optional UTF-8 BOM, then empty lines, comment lines starting with
+// ':', or field lines such as "data:". JSON and other bodies cannot start that
+// way, so the classification cannot mistake them for streams. The second result
+// reports whether the prefix alone decided the outcome.
+func classifyEventStreamPrefix(prefix []byte) (decided, isEventStream bool) {
+	content := bytes.TrimPrefix(prefix, []byte{0xEF, 0xBB, 0xBF})
+	for {
+		index := bytes.IndexByte(content, '\n')
+		complete := index >= 0
+		line := content
+		if complete {
+			line = content[:index]
+		}
+		line = bytes.TrimSuffix(line, []byte{'\r'})
+		switch {
+		case len(line) == 0:
+			if !complete {
+				return true, true // only empty content so far is a valid stream start
+			}
+		case line[0] == ':':
+			if !complete {
+				return true, true // a comment fragment is still stream framing
+			}
+		case isSSEFieldLine(line):
+			return true, true
+		case complete || len(line) > len(sseFieldNames[0]):
+			// A complete line, or one too long to still become a field name,
+			// that matches no SSE field: not an event stream.
+			return true, false
+		}
+		if !complete {
+			return false, false // more bytes are needed to decide
+		}
+		content = content[index+1:]
+	}
+}
+
+func isSSEFieldLine(line []byte) bool {
+	for _, name := range sseFieldNames {
+		if len(line) > len(name) && line[len(name)] == ':' &&
+			strings.EqualFold(string(line[:len(name)]), name) {
+			return true
+		}
+	}
+	return false
+}
+
+// prefixReadCloser prepends sniffed bytes to a response body while preserving
+// the underlying body's close semantics.
+func prefixReadCloser(prefix []byte, body io.ReadCloser) io.ReadCloser {
+	if len(prefix) == 0 {
+		if body == nil {
+			return io.NopCloser(bytes.NewReader(nil))
+		}
+		return body
+	}
+	var reader io.Reader = bytes.NewReader(prefix)
+	if body != nil {
+		reader = io.MultiReader(bytes.NewReader(prefix), body)
+	}
+	if body == nil {
+		return io.NopCloser(reader)
+	}
+	return struct {
+		io.Reader
+		io.Closer
+	}{reader, body}
 }
 
 func retryAfter(value string) string {

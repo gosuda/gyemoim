@@ -62,7 +62,9 @@ page.
 
 `GET /api/requests/{requestId}` returns the summary, timing offsets, attempt and
 upstream-response metadata, event counts, and byte counts for the incoming and
-effective request bodies. Large bodies are not embedded in this response. Retrieve
+effective request bodies. Each upstream response entry includes `contentType`, the
+sanitized upstream `Content-Type` header value; it is absent when the upstream sent
+no header. Large bodies are not embedded in this response. Retrieve
 their exact recorded bytes with:
 
 `GET /api/requests/{requestId}/body?kind=incoming`

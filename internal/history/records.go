@@ -40,6 +40,7 @@ type Record struct {
 	UpstreamModel                  string
 	EffectiveRequest               json.RawMessage
 	UpstreamRequestID              string
+	UpstreamContentType            string
 	UpstreamResponseBody           []byte
 	UpstreamResponseBodyTruncated  bool
 	UpstreamResponseBodyReadFailed bool
@@ -222,11 +223,12 @@ func decodeRecord(line []byte) (Record, error) {
 			return Record{}, err
 		}
 		if lineValue.Attempt < 1 || lineValue.HTTPStatus < 100 || lineValue.HTTPStatus > 599 ||
-			!validUpstreamRequestID(lineValue.UpstreamRequestID) || len(lineValue.Body) > maxEventBytes {
+			!validContentTypeHeader(lineValue.ContentType) || !validUpstreamRequestID(lineValue.UpstreamRequestID) || len(lineValue.Body) > maxEventBytes {
 			return Record{}, errors.New("invalid upstream_response fields")
 		}
 		record.Attempt = lineValue.Attempt
 		record.HTTPStatus = lineValue.HTTPStatus
+		record.UpstreamContentType = lineValue.ContentType
 		record.UpstreamRequestID = lineValue.UpstreamRequestID
 		record.UpstreamResponseBody = append([]byte(nil), lineValue.Body...)
 		record.UpstreamResponseBodyTruncated = lineValue.BodyTruncated

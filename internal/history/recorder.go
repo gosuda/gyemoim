@@ -907,12 +907,14 @@ func (r *Recorder) writeEndLocked(h *Request, outcome string, httpStatus int, sa
 }
 
 // HTTPResponse stores a bounded upstream HTTP error/non-SSE body as exact bytes.
-// It is a non-durable record; the following End is the durability fence.
-func (h *Request) HTTPResponse(status int, upstreamRequestID string, body []byte, truncated, readFailed bool) error {
+// contentType is the sanitized upstream Content-Type header value, empty when the
+// upstream sent none. It is a non-durable record; the following End is the
+// durability fence.
+func (h *Request) HTTPResponse(status int, contentType, upstreamRequestID string, body []byte, truncated, readFailed bool) error {
 	if h == nil || h.recorder == nil {
 		return ErrRecordingUnavailable
 	}
-	if status < 100 || status > 599 || !validUpstreamRequestID(upstreamRequestID) || len(body) > maxEventBytes {
+	if status < 100 || status > 599 || !validContentTypeHeader(contentType) || !validUpstreamRequestID(upstreamRequestID) || len(body) > maxEventBytes {
 		return fmt.Errorf("%w: upstream response snapshot is invalid", ErrInvalidRecord)
 	}
 	r := h.recorder
@@ -937,7 +939,7 @@ func (h *Request) HTTPResponse(status int, upstreamRequestID string, body []byte
 			TimestampUTC:  now.UTC(),
 			ElapsedNS:     h.elapsedNS(now),
 		},
-		Attempt: h.lastAttempt, HTTPStatus: status, UpstreamRequestID: upstreamRequestID,
+		Attempt: h.lastAttempt, HTTPStatus: status, ContentType: contentType, UpstreamRequestID: upstreamRequestID,
 		Body: append([]byte(nil), body...), BodyTruncated: truncated, BodyReadFailed: readFailed,
 	}
 	return r.writeLocked(line, false)
@@ -1144,6 +1146,7 @@ type upstreamResponseLine struct {
 	baseLine
 	Attempt           int    `json:"attempt"`
 	HTTPStatus        int    `json:"http_status"`
+	ContentType       string `json:"content_type"`
 	UpstreamRequestID string `json:"upstream_request_id"`
 	Body              []byte `json:"body"`
 	BodyTruncated     bool   `json:"body_truncated"`
@@ -1203,6 +1206,20 @@ func validUpstreamRequestID(id string) bool {
 	}
 	for i := 0; i < len(id); i++ {
 		if id[i] < 0x20 || id[i] > 0x7e {
+			return false
+		}
+	}
+	return true
+}
+
+// validContentTypeHeader accepts an empty value, because a missing upstream
+// Content-Type header is exactly what must stay visible in history.
+func validContentTypeHeader(contentType string) bool {
+	if len(contentType) > 512 {
+		return false
+	}
+	for i := 0; i < len(contentType); i++ {
+		if contentType[i] < 0x20 || contentType[i] > 0x7e {
 			return false
 		}
 	}

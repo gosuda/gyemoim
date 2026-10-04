@@ -273,7 +273,7 @@ func (api *harnessAPI) serveResponses(w http.ResponseWriter, r *http.Request) {
 		if upstream.StatusCode < 200 || upstream.StatusCode >= 300 || upstream.UnexpectedContentType {
 			// Preserve exact bounded upstream bytes in history; never return the raw
 			// body to a caller because it may include provider details or secrets.
-			_ = handle.HTTPResponse(upstream.StatusCode, upstreamRequestID, upstream.ErrorBody, upstream.ErrorBodyTruncated, upstream.ErrorBodyReadFailed)
+			_ = handle.HTTPResponse(upstream.StatusCode, upstream.ContentType, upstreamRequestID, upstream.ErrorBody, upstream.ErrorBodyTruncated, upstream.ErrorBodyReadFailed)
 		}
 	}
 	controller := http.NewResponseController(w)
