@@ -16,8 +16,7 @@ import (
 const BootstrapUsername = "admin"
 
 // bootstrapPasswordEntropyBytes yields 128 bits of entropy, which base64url
-// encodes to 22 unambiguous characters — comfortably above the 12-character
-// login minimum.
+// encodes to 22 unambiguous characters.
 const bootstrapPasswordEntropyBytes = 16
 
 // EnsureBootstrapAdmin creates the initial "admin" user when no management user

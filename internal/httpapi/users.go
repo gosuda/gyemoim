@@ -42,8 +42,10 @@ func (api *managementAPI) users(w http.ResponseWriter, r *http.Request) {
 		if !ok {
 			return
 		}
-		if utf8.RuneCountInString(input.Password) < minPasswordLength {
-			writeManagementError(w, http.StatusBadRequest, "password must contain at least 12 characters", "invalid_request")
+		// No password length or composition policy (decision 1); an empty
+		// password is the only thing refused.
+		if input.Password == "" {
+			writeManagementError(w, http.StatusBadRequest, "password must not be empty", "invalid_request")
 			return
 		}
 		hash, err := config.HashPassword(input.Password)
@@ -130,8 +132,10 @@ func (api *managementAPI) resetUserPassword(w http.ResponseWriter, r *http.Reque
 	if !decodeRequiredJSON(w, r, &input) {
 		return
 	}
-	if utf8.RuneCountInString(input.NewPassword) < minPasswordLength {
-		writeManagementError(w, http.StatusBadRequest, "new password must contain at least 12 characters", "invalid_request")
+	// No password length or composition policy (decision 1); an empty password
+	// is the only thing refused.
+	if input.NewPassword == "" {
+		writeManagementError(w, http.StatusBadRequest, "new password must not be empty", "invalid_request")
 		return
 	}
 	hash, err := config.HashPassword(input.NewPassword)

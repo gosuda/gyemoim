@@ -54,7 +54,8 @@ browsers / remote agents
 1. **Multi-user management login.** All logged-in users have full management
    rights (personal-tool scope; a future `is_admin` column can refine this).
    Passwords hashed with argon2id (pure Go, respects the CGO constraint);
-   minimum length 12.
+   no length or composition policy — only emptiness is rejected (decided
+   2026-10-09, superseding the original minimum-length-12 rule).
 2. **Sessions: 24 h absolute expiry, no sliding renewal.** Cookie
    `gym_session` carries a 256-bit random ID; only its SHA-256 hash is stored
    (same pattern as `local_keys`). Cookie flags: `HttpOnly`, `SameSite=Lax`

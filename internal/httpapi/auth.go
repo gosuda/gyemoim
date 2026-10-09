@@ -10,14 +10,12 @@ import (
 	"net/http"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/gosuda/gyemoim/internal/config"
 )
 
 const (
-	sessionLifetime   = 24 * time.Hour
-	minPasswordLength = 12
+	sessionLifetime = 24 * time.Hour
 )
 
 // writeInvalidCredentials answers every failed login and current-password check
@@ -137,8 +135,10 @@ func (api *managementAPI) changePassword(w http.ResponseWriter, r *http.Request,
 		writeInvalidCredentials(w)
 		return
 	}
-	if utf8.RuneCountInString(input.NewPassword) < minPasswordLength {
-		writeManagementError(w, http.StatusBadRequest, "new password must contain at least 12 characters", "invalid_request")
+	// No password length or composition policy (decision 1); an empty password
+	// is the only thing refused.
+	if input.NewPassword == "" {
+		writeManagementError(w, http.StatusBadRequest, "new password must not be empty", "invalid_request")
 		return
 	}
 	hash, err := config.HashPassword(input.NewPassword)

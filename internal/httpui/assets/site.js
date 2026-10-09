@@ -668,10 +668,10 @@
   }
 
   async function resetUserPassword(user) {
-    const newPassword = window.prompt(`Set a new password for “${user.username}” (at least 12 characters). Their sessions are signed out and the password must be changed again at the next sign-in.`);
+    const newPassword = window.prompt(`Set a new password for “${user.username}”. Their sessions are signed out and the password must be changed again at the next sign-in.`);
     if (newPassword === null) return;
-    if (newPassword.length < 12) {
-      window.alert("The new password must contain at least 12 characters.");
+    if (newPassword === "") {
+      window.alert("The new password must not be empty.");
       return;
     }
     try {
