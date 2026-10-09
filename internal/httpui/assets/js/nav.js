@@ -11,7 +11,7 @@
 import { cancelHistoryFetches } from "./api.js";
 import { state } from "./state.js";
 import { byId } from "./dom.js";
-import { loadStatus, loadOverviewHistory } from "./pages/overview.js";
+import { loadSetupHealth, loadStatus, loadOverviewHistory, startOverviewAutoRefresh, stopOverviewAutoRefresh } from "./pages/overview.js";
 import { loadProviders } from "./pages/providers.js";
 import { loadAccounts } from "./pages/service-accounts.js";
 import { loadModelsAndProviders } from "./pages/models.js";
@@ -83,7 +83,10 @@ function showPage(page, params = new URLSearchParams()) {
   });
   document.title = `${titles[page]} · Gyemoim`;
   byId("page-title").textContent = titles[page];
-  byId("breadcrumb").textContent = titles[page].toUpperCase();
+  // Decision 8: the auto-refresh timer belongs to the Overview page; it is
+  // stopped on every other page and when the SPA is left entirely.
+  if (page === "overview") startOverviewAutoRefresh();
+  else stopOverviewAutoRefresh();
   refreshPage(page, params);
 }
 
@@ -96,7 +99,7 @@ export function navigate(page, params = null) {
 }
 
 export async function refreshPage(page = state.page, params = null) {
-  if (page === "overview") return Promise.all([loadStatus(), loadOverviewHistory()]);
+  if (page === "overview") return Promise.all([loadStatus(), loadOverviewHistory(), loadSetupHealth()]);
   if (page === "providers") return loadProviders();
   if (page === "service-accounts") return loadAccounts();
   if (page === "models") return loadModelsAndProviders();

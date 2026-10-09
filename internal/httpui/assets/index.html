@@ -10,6 +10,7 @@
   <script type="module" src="/assets/js/app.js"></script>
 </head>
 <body>
+  <a class="skip-link" href="#main-content" id="skip-link">Skip to main content</a>
   <div class="app-shell">
     <aside class="sidebar">
       <a class="brand" href="/" aria-label="Gyemoim overview">
@@ -27,20 +28,19 @@
         <button class="nav-item" type="button" data-page="users"><span class="nav-icon" aria-hidden="true">◍</span>Users</button>
       </nav>
       <div class="sidebar-bottom">
-        <span class="status-dot" aria-hidden="true"></span>
-        <span>Running locally</span>
+        <span class="status-dot idle" id="sidebar-status-dot" aria-hidden="true"></span>
+        <span id="sidebar-status-text">Checking status</span>
       </div>
     </aside>
 
-    <main class="main-content">
+    <main class="main-content" id="main-content" tabindex="-1">
       <header class="topbar">
         <div>
-          <p class="eyebrow">GYEMOIM / <span id="breadcrumb">OVERVIEW</span></p>
           <h1 id="page-title">Overview</h1>
         </div>
         <div class="topbar-actions">
           <button class="button quiet small" id="logout-button" type="button">Log out</button>
-          <div class="local-badge"><span class="status-dot" aria-hidden="true"></span>Local instance</div>
+          <div class="local-badge"><span class="status-dot idle" id="local-status-dot" aria-hidden="true"></span><span class="local-badge-text" id="local-status-text">Checking status</span></div>
         </div>
       </header>
 
@@ -50,8 +50,15 @@
             <h2 id="overview-heading">Gateway status</h2>
             <p class="muted">Runtime information for this local instance.</p>
           </div>
-          <span class="ready-badge"><span class="status-dot" aria-hidden="true"></span><span id="status-label">Checking status</span></span>
+          <div class="welcome-actions">
+            <span class="ready-badge"><span class="status-dot" aria-hidden="true"></span><span id="status-label">Checking status</span></span>
+            <button class="button quiet small" type="button" data-refresh="overview">Refresh</button>
+          </div>
         </div>
+        <section class="panel setup-panel" id="overview-setup" aria-labelledby="overview-setup-heading" hidden>
+          <div class="panel-heading"><div><h2 id="overview-setup-heading">Setup</h2><p class="muted" id="overview-setup-subtitle">Checking what is wired up…</p></div></div>
+          <div id="overview-setup-body"></div>
+        </section>
         <div class="status-card">
           <div class="card-heading">
             <div class="card-icon" aria-hidden="true">⌘</div>
@@ -69,16 +76,16 @@
           <p class="inline-error" id="status-error" role="status" hidden></p>
         </div>
         <section class="panel overview-history" aria-labelledby="overview-history-heading">
-          <div class="panel-heading"><div><h2 id="overview-history-heading">Usage and outcomes</h2><p class="muted">Token usage and request outcomes cover all history that can be read.</p></div><button class="button quiet small" type="button" data-refresh="overview">Refresh</button></div>
+          <div class="panel-heading"><div><h2 id="overview-history-heading">Usage and outcomes</h2><p class="muted">All readable history; unknown token counts stay separate from zero. Auto-refreshes every 30 s.</p></div></div>
           <p class="form-message" id="overview-history-message" role="status" aria-live="polite">Loading history…</p>
           <div id="overview-history-summary" class="usage-summary"></div>
           <div class="overview-analysis-grid">
-            <section class="overview-subsection" aria-labelledby="overview-outcomes-heading"><h3 id="overview-outcomes-heading">Outcomes</h3><div id="overview-outcomes"></div></section>
-            <section class="overview-subsection" aria-labelledby="overview-usage-heading"><div class="panel-heading compact-heading"><div><h3 id="overview-usage-heading">Usage breakdown</h3><p class="muted">Cached input and reasoning output are subsets.</p></div><label class="inline-select" for="overview-group-by">Group by <select id="overview-group-by"><option value="">All history</option><option value="account">Service account</option><option value="model">Requested Model</option><option value="provider">Actual provider</option><option value="upstream_model">Upstream model</option></select></label></div><div class="table-scroll"><table class="data-table"><thead><tr><th>Group</th><th>Requests</th><th>Input</th><th>Output</th><th>Cached input</th><th>Reasoning output</th><th>Cache ratio</th></tr></thead><tbody id="overview-usage-groups"></tbody></table></div></section>
+            <section class="overview-subsection" aria-labelledby="overview-outcomes-heading"><h3 id="overview-outcomes-heading">Outcomes</h3><p class="muted">Outcomes always cover all history, regardless of the Group by selection.</p><div id="overview-outcomes"></div></section>
+            <section class="overview-subsection" aria-labelledby="overview-usage-heading"><div class="panel-heading compact-heading"><div><h3 id="overview-usage-heading">Usage breakdown</h3><p class="muted">Cached input and reasoning output are subsets.</p></div><label class="inline-select" for="overview-group-by">Group by <select id="overview-group-by"><option value="">All history</option><option value="account">Service account</option><option value="model">Requested Model (the alias agents request)</option><option value="provider">Actual provider</option><option value="upstream_model">Upstream model</option></select></label></div><div class="table-scroll"><table class="data-table"><thead><tr><th id="overview-usage-group-column">Group</th><th>Requests</th><th>Input</th><th>Output</th><th>Cached input</th><th>Reasoning output</th><th>Cache ratio</th></tr></thead><tbody id="overview-usage-groups"></tbody></table></div></section>
           </div>
         </section>
         <section class="panel overview-performance" aria-labelledby="overview-performance-heading">
-          <div class="panel-heading"><div><h2 id="overview-performance-heading">Recent performance</h2><p class="muted">Timing sample from the most recent 100 requests. Missing offsets stay unknown.</p></div></div>
+          <div class="panel-heading"><div><h2 id="overview-performance-heading">Recent performance</h2><p class="muted">Timing sample from the most recent 100 requests. Missing offsets stay unknown. Auto-refreshes every 30 s.</p></div></div>
           <p class="form-message" id="overview-performance-message" role="status" aria-live="polite">Loading recent requests…</p>
           <div id="overview-performance-summary" class="usage-summary"></div>
           <div class="table-scroll"><table class="data-table"><thead><tr><th>Started</th><th>Service account</th><th>Model</th><th>Outcome</th><th>Duration</th><th>First output</th><th></th></tr></thead><tbody id="overview-recent-requests"></tbody></table></div>

@@ -56,9 +56,65 @@ export function identityCell(primary, id) {
   return cell;
 }
 
+// Outcome enums are internal values (review B7); these shared helpers give
+// them human labels and one-line definitions so Overview and Requests render
+// the same words and can attach the same legend.
+const outcomeLabels = {
+  active: "Active",
+  interrupted: "Interrupted",
+  completed: "Completed",
+  failed: "Failed",
+  cancelled: "Cancelled",
+  incomplete: "Incomplete",
+};
+
+const outcomeDescriptions = {
+  active: "The request was admitted and is still being recorded.",
+  interrupted: "The connection ended before the request finished; the partial record is kept.",
+  completed: "The request finished and a full response was recorded.",
+  failed: "The request ended with an upstream or provider error.",
+  cancelled: "The client cancelled the request before completion.",
+  incomplete: "The request ended without a complete response.",
+};
+
+export function outcomeLabel(outcome) {
+  return outcomeLabels[outcome] || "Unknown";
+}
+
+export function outcomeDescription(outcome) {
+  return outcomeDescriptions[outcome] || "The outcome of this request could not be determined.";
+}
+
 export function outcomeTag(outcome) {
-  const kind = outcome === "completed" ? "tag-success" : ["failed", "cancelled", "incomplete", "interrupted"].includes(outcome) ? "tag-muted" : "";
-  return element("span", `tag ${kind}`, outcome || "unknown");
+  const kind = outcome === "completed"
+    ? "tag-success"
+    : ["failed", "interrupted"].includes(outcome)
+      ? "tag-danger"
+      : ["cancelled", "incomplete"].includes(outcome)
+        ? "tag-muted"
+        : "";
+  const tag = element("span", `tag ${kind}`, outcomeLabel(outcome));
+  tag.title = outcomeDescription(outcome);
+  return tag;
+}
+
+// Collapsed legend for the outcome enums; attach wherever outcomes are listed
+// so the definitions are one click away (review B7).
+export function outcomeLegend() {
+  const details = element("details", "outcome-legend");
+  details.append(element("summary", "", "What the outcomes mean"));
+  const list = element("dl");
+  for (const name of Object.keys(outcomeLabels)) {
+    list.append(element("dt", "", outcomeLabels[name]), element("dd", "", outcomeDescriptions[name]));
+  }
+  details.append(list);
+  return details;
+}
+
+// Freshness stamp for status-line slots (review B3 / decision 4): the load
+// success feedback, e.g. "Updated 14:03:27 UTC".
+export function updatedStamp() {
+  return `Updated ${new Date().toISOString().slice(11, 19)} UTC`;
 }
 
 export function historyErrorMessage(error) {

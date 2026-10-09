@@ -4,6 +4,17 @@ import { api } from "./api.js";
 import { byId, showMessage } from "./dom.js";
 import { navigate, renderRoute } from "./nav.js";
 
+// Review A6: the skip link jumps straight to <main>. The click is intercepted
+// because letting the browser follow "#main-content" would feed a non-page
+// hash to the SPA router, which would normalize it to #/overview and drop the
+// current page.
+byId("skip-link").addEventListener("click", (event) => {
+  event.preventDefault();
+  const main = byId("main-content");
+  main.focus();
+  main.scrollIntoView({ block: "start" });
+});
+
 byId("logout-button").addEventListener("click", async () => {
   try {
     await api("/api/auth/logout", { method: "POST", body: JSON.stringify({}) });

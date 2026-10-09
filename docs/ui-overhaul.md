@@ -396,3 +396,107 @@ unlabeled rows unchanged; browser console clean. Deviations: the GET
 `/api/rejections` response is a bare newest-first array (consistent with the
 other management list endpoints rather than an envelope object), and the
 login response body's `lastLoginAt` is the pre-login snapshot (see (b) above).
+
+### Step 4 — Shell + Overview (2026-10-09)
+
+Shell (`index.html` + `nav.js` + `site.css` + `app.js`): the eyebrow breadcrumb is
+gone (A2) — the topbar is now h1 + section h2 only, and the `.eyebrow` CSS rules
+were removed (zero occurrences remain in any HTML/CSS). Both shell status dots
+are real signals now (A4): the topbar badge (`#local-status-dot` +
+`#local-status-text`) and the sidebar footer (`#sidebar-status-dot` +
+`#sidebar-status-text`) start neutral gray (`.status-dot.idle`) and are driven by
+the most recent `/api/status` result inside `loadStatus` — green "Local
+instance"/"Running locally" when ready, red (`.status-dot.down`) with "Local
+instance · degraded"/"Degraded" on a degraded state, and red
+"Instance unreachable"/"Unavailable" when the endpoint itself fails. The sidebar
+footer is kept (it is hidden ≤760px where the topbar badge covers the need).
+Choice documented: dots update only when `/api/status` is fetched (every
+Overview visit and manual refresh); no other page polls status, so off-Overview
+they show the last known state. The ≤760px `font-size: 0` hack is gone (A5) —
+the badge text lives in `#local-status-text` and is visually hidden (clipped)
+at narrow widths, keeping the accessible name while the badge collapses to a
+small dot pill. A visually-hidden skip link (A6) is the first tab stop and
+jumps to `<main id="main-content" tabindex="-1">`; its click is intercepted in
+`app.js` because letting the browser follow `#main-content` would feed a
+non-page hash to the SPA router (which would normalize to `#/overview` and drop
+the current page).
+
+Overview: a Setup section (`#overview-setup`, between the welcome row and the
+Runtime card) answers "is anything wired up?" (B1). Counts come from
+`/api/providers`, `/api/models`, and `/api/service-accounts` fetched in
+parallel. The compact strip ("Providers 0 of 2 connected · Models 1 · Service
+accounts 2") renders with `tag-danger` when 0 connected, `tag-success` when all
+connected, and every fragment navigates. The three-step first-run checklist
+(Connect a provider → Add a Model → Issue a key and grant a Model) carries live
+checkmarks: step 2 flips on `models.length > 0`; step 3 is honestly derived by
+fetching each account's `/keys` + `/grants` (the grants GET returns
+`{"modelIds": [...]}`, which `accountIsWired` handles); step 1 on a connected
+provider. Deviation (deliberate): while setup is incomplete the strip stays
+visible *above* the checklist (the brief said "replacing/above"), so the danger
+"0 of 2 connected" remains on screen during first-run; the checklist collapses
+to the strip alone once ≥1 provider is connected and ≥1 Model exists. The four
+history empty states are consolidated into one actionable empty state (B2) with
+inline links to Providers and Models; the per-subsection empty rows (outcomes
+inline, usage-groups row, performance's duplicate "No recent timing sample."
+metric) no longer render when the base report has no groups. Status lines now
+carry load feedback only (B4): success shows "Updated HH:MM:SS UTC"
+(`updatedStamp()` in `format.js`), failure the explicit fetch error; the
+explainer sentences moved into the panel subtitles. Refresh is unified (B3): a
+single page-level Refresh button in the welcome row reloads status + setup +
+usage + performance (the panel-level button was removed) — documented choice.
+Decision 8: the usage/performance panels auto-refresh every 30 s via a module
+timer started/stopped by `showPage`, gated on `document.hidden` and
+`state.page`; a `visibilitychange` handler refetches immediately when the tab
+becomes visible again; every tick goes through `beginHistoryFetch` (stale loads
+aborted) so ticks cannot pile up; the subtitles state "Auto-refreshes every 30
+s." The runtime "Request history" dot-chain is split into two labeled rows —
+"Request history" and "In-flight requests" — with the lost/recovered and
+written-bytes detail as muted sub-lines (B6). Outcomes render human labels with
+per-row title definitions plus a collapsed "What the outcomes mean" legend, and
+the Recent-performance Outcome cells use the shared `outcomeTag` with
+failed/interrupted rows tinted (`.row-outcome-bad`, `tag-danger`) (B7/B8). The
+usage-table first column header now names the active dimension ("Service
+account", "Requested Model", "Actual provider", "Upstream model"; "Group" when
+ungrouped), the Requested-Model option gained the suffix "(the alias agents
+request)", and a note states Outcomes are always global (B5). All of
+`outcomeLabel`/`outcomeDescription`/`outcomeTag`/`outcomeLegend` live in
+`format.js` so step 9's Requests page can reuse them (`outcomeTag` already
+flows to the Requests table).
+
+Verification: `node --check` on all 13 modules OK (as `.mjs` copies); `go vet
+./...` OK; `CGO_ENABLED=0 go build -trimpath` OK; `./scripts/build-release.sh`
+builds all four targets; no Go files changed. Browser pass on a private
+instance (port 9965, XDG-isolated data dir, seeded 2 disconnected providers, 2
+service accounts, 1 user; then a Model + key + grant created via API):
+strip shows "Providers 0 of 2 connected · Models 0 · Service accounts 2" with
+the danger tag (computed rgb(156,65,65) on rgb(255,241,241)); the three
+checklist steps render unchecked and their links navigate to
+`#/providers`, `#/models`, `#/service-accounts`; the usage empty-state links
+navigate too. After creating a Model the checklist's step 2 flips to done; after
+issuing a key and a grant step 3 flips (initially unchecked until the
+`modelIds` shape was handled — caught by this test). With `/api/providers`
+stubbed to a connected provider, the checklist collapses to the strip-only
+state with `tag-success` "1 of 1 connected" (rgb(40,117,82) on
+rgb(233,247,239)); stubs removed afterwards. With `/api/requests?limit=100`
+stubbed, failed and interrupted rows are tinted rgb(253,247,247) with
+`tag-danger` outcome tags and definition tooltips, completed stays
+`tag-success`; with `/api/usage` stubbed, the outcome list renders human labels
+and the legend opens with all six definitions. Group-by renames the column
+header to "Requested Model" and "Upstream model" as the dimension changes.
+"Updated 09:26:58 UTC" stamps appear after loads. Auto-refresh: in-page fetch
+instrumentation shows tick pairs exactly 29 999 ms apart (2 fetches per tick
+with a group-by dimension selected); with `document.hidden` overridden true
+(`Object.defineProperty`), a 35 s window produced zero usage fetches; a single
+synthetic `visibilitychange` produced exactly one load (no feedback loop, no
+pileup); navigating to Users for 35 s produced zero usage fetches (timer
+stopped on page leave). Dots: both turn `.status-dot.down` rgb(185,83,83) with
+"Instance unreachable"/"Unavailable" after the server is stopped and Refresh is
+clicked, and recover to green after restart. Skip link: first Tab stop reveals
+it (top −52px → 12px), Enter moves focus to `#main-content` with the hash
+unchanged. Narrow windows 620px and 390px: no page overflow
+(`scrollWidth == clientWidth`), strip and checklist stack cleanly, badge text
+visually hidden (computed clip). Browser console buffer empty at end of
+session. Deviations: strip-above-checklist as described; dots reflect the last
+`/api/status` observation (no polling on other pages); the legend renders
+wherever the outcome list renders (with zero history the consolidated empty
+state takes that slot).
