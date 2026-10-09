@@ -242,9 +242,13 @@
             <div class="panel-heading"><div><h3 id="user-create-heading">Add a user</h3><p class="muted">The new user must change the temporary password before using the interface.</p></div></div>
             <form id="user-create-form" class="stack-form">
               <label for="user-create-username">Username</label>
-              <input id="user-create-username" name="username" type="text" maxlength="64" autocomplete="off" required placeholder="e.g. bob">
+              <input id="user-create-username" name="username" type="text" maxlength="64" autocomplete="off" required placeholder="e.g. bob" aria-describedby="user-create-username-hint">
+              <p class="muted" id="user-create-username-hint">Up to 64 characters.</p>
               <label for="user-create-password">Temporary password</label>
-              <input id="user-create-password" name="password" type="password" autocomplete="new-password" required>
+              <div class="password-field">
+                <input id="user-create-password" name="password" type="password" autocomplete="new-password" required>
+                <button class="button quiet small" type="button" id="user-create-password-toggle" aria-label="Show password" aria-pressed="false">Show</button>
+              </div>
               <button class="button primary" type="submit">Add user</button>
               <p class="form-message" id="user-create-message" aria-live="polite"></p>
             </form>

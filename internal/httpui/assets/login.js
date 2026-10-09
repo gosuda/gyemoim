@@ -26,7 +26,16 @@
     return { ok: response.ok, status: response.status, data };
   }
 
-  const showMessage = (node, message) => { node.textContent = message; };
+  // Review C1: failures must carry the .form-message.error styling from the
+  // shared stylesheet, not the neutral gray default.
+  const showMessage = (node, message, kind = "") => {
+    node.textContent = message;
+    node.className = kind ? `form-message ${kind}` : "form-message";
+  };
+
+  // C1: wrap the server's raw message in a consistent sentence ("Sign-in
+  // failed: invalid credentials."), adding the period the server omits.
+  const failedSentence = (prefix, detail) => `${prefix}${detail}${/[.!?…]$/.test(detail) ? "" : "."}`;
 
   const loginForm = document.getElementById("login-form");
   if (loginForm) {
@@ -45,7 +54,8 @@
           window.location.assign("/");
           return;
         }
-        showMessage(message, result.data?.error?.message || `Sign-in failed (${result.status})`);
+        const detail = result.data?.error?.message || `request failed (${result.status})`;
+        showMessage(message, failedSentence("Sign-in failed: ", detail), "error");
       } finally {
         submit.disabled = false;
       }
@@ -72,10 +82,10 @@
       event.preventDefault();
       const newPassword = document.getElementById("change-new-password").value;
       if (newPassword !== document.getElementById("change-confirm-password").value) {
-        showMessage(message, "New password entries do not match.");
+        showMessage(message, "New password entries do not match.", "error");
         return;
       }
-      showMessage(message, "Changing password…");
+      showMessage(message, "Setting the new password…");
       const result = await postJSON("/api/auth/password", {
         currentPassword: document.getElementById("change-current-password").value,
         newPassword,
@@ -84,7 +94,28 @@
         window.location.assign("/");
         return;
       }
-      showMessage(message, result.data?.error?.message || `Password change failed (${result.status})`);
+      // Review C2: a wrong current password is the expected failure here (the
+      // temporary password mistyped), so it gets a recovery hint instead of
+      // the generic server message.
+      if (result.status === 401 && result.data?.error?.code === "invalid_credentials") {
+        showMessage(message, "The current password is incorrect. Use the temporary password from your admin.", "error");
+        return;
+      }
+      const detail = result.data?.error?.message || `request failed (${result.status})`;
+      showMessage(message, failedSentence("Password change failed: ", detail), "error");
+    });
+  }
+
+  // Review C3: the forced-change page must not be a trap — sign out clears
+  // the session and lands on /login. The logout endpoint accepts stale
+  // sessions, and landing on /login is correct even if the call fails.
+  const signOut = document.getElementById("change-password-signout");
+  if (signOut) {
+    signOut.addEventListener("click", async () => {
+      try {
+        await postJSON("/api/auth/logout", {});
+      } catch { /* The sign-in page is the right destination regardless. */ }
+      window.location.assign("/login");
     });
   }
 })();

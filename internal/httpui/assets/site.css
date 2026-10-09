@@ -153,6 +153,15 @@ h5 { margin: 0; color: #3b4654; font-size: 11px; font-weight: 680; }
 .key-value { display: block; overflow-wrap: anywhere; padding: 10px; border: 1px solid #eadfbe; border-radius: 5px; color: #4e4022; background: #fff; font-size: 11px; user-select: all; }
 .key-cleared { border-color: #dce2e8; background: #f8f9fa; }
 .key-cleared p { margin: 0; }
+
+/* Step 8 (Users U1/U2): the create form's password field with its show/hide
+   toggle, the temporary-password handoff row (key-reveal reuse), and the
+   full-width one-line hint inside the inline reset form. */
+.password-field { display: flex; gap: 7px; }
+.password-field input { flex: 1 1 auto; min-width: 0; }
+.handoff-row { display: flex; align-items: center; gap: 7px; }
+.handoff-row .key-value { flex: 1 1 auto; margin: 0; }
+.inline-form .inline-hint { flex-basis: 100%; margin: 0; }
 /* Revoked keys have no server-side delete, so they stay listed as history but
    visually muted (review S7). */
 .key-row-revoked { opacity: .6; }

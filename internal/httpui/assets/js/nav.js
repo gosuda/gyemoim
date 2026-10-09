@@ -91,6 +91,11 @@ function showPage(page, params = new URLSearchParams()) {
   if (state.page === "service-accounts" && page !== state.page) {
     for (const clear of [...state.sensitiveCleanup]) clear();
   }
+  // Step 8 (U1): undismissed temporary-password handoffs are page-local
+  // sensitive values; leaving Users clears them, like the key reveals above.
+  if (state.page === "users" && page !== state.page) {
+    state.userHandoffs.clear();
+  }
   if (page === "requests") {
     state.selectedRequestID = "";
     byId("request-detail-panel").hidden = true;

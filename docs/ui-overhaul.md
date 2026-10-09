@@ -849,3 +849,136 @@ calls are the documented S3 choice (summary line over header dot, for
 lazy loading), grammatical "1 of 1 Model granted", revoked keys staying
 listed but muted (no server endpoint), and the S5 single-choke-point
 rework after the double-confirm bug was caught in testing.
+
+### Step 8 — Users page + login/change-password (2026-10-09)
+
+Changes in `internal/httpui/assets/js/pages/users.js`, `js/nav.js`,
+`js/state.js`, `assets/index.html`, `assets/site.css`, `assets/login.js`,
+and `assets/change-password.html`; no Go changes.
+
+**Users (U1–U6).**
+
+- **U1 (temp-password handoff).** The create form's password field gained a
+  show/hide toggle (index.html:248-251, `.password-field` layout in
+  site.css:160-161): a real button wired in users.js:197-207 (no inline JS),
+  flipping `input.type`, visible text Show/Hide, `aria-label`
+  "Show/Hide password", and `aria-pressed`; focus returns to the input.
+  On create success the password is captured **before** anything clears the
+  field, stored in `state.userHandoffs` (a `Map` keyed by user id,
+  state.js:14 — the documented choice: a page-local map like the
+  service-accounts reveal state, so the block survives every list re-render,
+  including manual Refresh, until dismissed; the entry is removed on dismiss,
+  on that user's delete, and when the Users page is left via a cleanup in
+  nav.js `showPage` (nav.js:95-98), mirroring the key-reveal `sensitiveCleanup`
+  sweep), and the form then resets. The new card (cards now carry
+  `data-user-id`) renders a one-time handoff block (`buildPasswordHandoff`,
+  users.js:83-110) reusing the show-once visual pattern (`.key-reveal`/
+  `.key-value`, role="alert" warning): "Temporary password for <username>:"
+  + the code in a copyable `<code>` + Copy (clipboard with the standard
+  fallback message) + "Hand this to the user; they must change it at first
+  sign-in." + "Dismiss and clear", which empties the code and leaves the
+  established `.key-cleared` "cleared from this page" line. Create success
+  message: "User added. Hand over the temporary password shown on their
+  card — they must change it at first sign-in." plus `scrollCardIntoView`.
+- **U2 (reset feedback).** The reset form (users.js:126-166) now carries a
+  full-width pre-submit hint "Signing them out everywhere; they must change
+  it at next sign-in." (`.inline-hint`, site.css:164) and submits through
+  `withBusy`. Success keeps the form open: the message ("Password set. All
+  their sessions were signed out; they must change it at next sign-in.")
+  rides a module-level `pendingResetMessages` map consumed once by
+  `buildPasswordResetForm` while rendering the fresh card after `loadUsers()`
+  (the re-render rebuilds every form, so the pending message both re-opens
+  the form and announces via `announceSuccess`), the input is cleared, and
+  the card is scrolled into view. `clearMessageOnInput` is wired on the
+  reset form too (decision 4).
+- **U5 (Disable confirm).** `setUserEnabled` (users.js:171-172) confirms with
+  `Disable “X”? Their sessions are signed out immediately.` (curly quotes
+  matching the existing delete confirm); Enable stays instant.
+- **U3 (duplicate username).** The create handler (users.js:239-245) reports
+  through `formErrorText(error, {kind: "user", action: "create", name})`, so
+  a 409 renders `Username “X” is already taken.`; the username field gets
+  `aria-invalid="true"` and focus, both cleared on the next input.
+- **U6.** `clearMessageOnInput` on the create form (users.js:212); "Up to 64
+  characters." hint under the username (index.html:246 with
+  `aria-describedby`); the "You" card gains the muted line "You are signed
+  in with this account." (users.js:69); "Password change pending" → "Must
+  change password at next sign-in" (badge kept, users.js:48).
+- **U4 polish.** Created + last-sign-in are one muted line:
+  `Created <date> · Last signed in <UTC>` or `· Never signed in`
+  (users.js:64-66).
+
+**login/change-password (C1–C4).** Both standalone pages already use
+`site.css` (so `.form-message.error` applies); `showMessage` in login.js now
+takes a kind and sets the class (login.js:31-34).
+
+- **C1:** the login failure path renders `Sign-in failed: <message>.` with
+  the error styling — `failedSentence` (login.js:38) appends the period only
+  when the server message lacks terminal punctuation, so the generic 401
+  reads exactly "Sign-in failed: invalid credentials."
+- **C2:** hint under Current password: "This is the temporary password you
+  were given." (change-password.html:22, linked via `aria-describedby`); a
+  401 `invalid_credentials` from `/api/auth/password` (login.js:100-102)
+  renders "The current password is incorrect. Use the temporary password
+  from your admin." instead of the server's generic message; other failures
+  are wrapped as "Password change failed: <message>." Both error-styled.
+- **C3:** "Wrong account? Sign out" below the form
+  (change-password.html:31) POSTs `/api/auth/logout` through the page's
+  existing fetch helper (which already sends the template-injected CSRF
+  header) and lands on `/login` regardless of the call's outcome
+  (login.js:109-118; the endpoint accepts stale sessions server-side).
+- **C4:** the verb is "Set a new password" everywhere — `<title>`, h1, and
+  submit button (change-password.html:7,16,28); the sessions note moved out
+  of the heading subtitle into a muted line directly above the submit
+  button (change-password.html:27).
+
+Verification: `node --check` on users.js, nav.js, state.js, login.js OK (as
+`.mjs` copies); `go vet ./...` OK; `CGO_ENABLED=0 go build -trimpath` OK
+(binary `/tmp/opencode/step8-bin`); `./scripts/build-release.sh` builds all
+four targets. Browser pass on a private instance (port 9970, XDG-isolated
+data dir `/tmp/opencode/step8-data`, seeded via API: user "olduser"; admin
+password changed through the forced gate). Evidence: toggle flips
+password↔text with aria-label Show password→Hide password and
+aria-pressed false→true and refocuses the input; create "uix-alpha" with
+the toggle open → handoff block on the new card with the exact code
+`temp-alpha-secret-1`, Copy showed "Copied to clipboard." (`writeText`
+resolved; headless harness denies read-back, so content equality is by the
+resolved-write path), success message on the create form, fields cleared
+only after the block was stored; creating "uix-beta" re-rendered the list
+and alpha's block survived with the same code; manual Refresh kept the
+undismissed block; "Dismiss and clear" emptied the code to the
+".key-cleared" line and a subsequent Refresh confirmed the dismissed block
+stays gone while beta's survives; navigating Overview→Users cleared the
+remaining handoff (0 `.key-reveal` after the round trip); duplicate create
+"uix-beta" rendered `Username “uix-beta” is already taken.` with
+`aria-invalid="true"`, focus on the username field, and both cleared on the
+first input; empty password submit was natively blocked
+(`validity.valueMissing`, no new card, no POST) and a seeded stale error
+cleared on the first real keystroke; reset on uix-alpha showed the
+pre-submit hint before any submit and after success kept the form open with
+"Password set. All their sessions were signed out; they must change it at
+next sign-in." (`.form-message.success`, aria-live polite, input cleared,
+button restored, badge now "Must change password at next sign-in"); Disable
+confirm read back verbatim `Disable “olduser”? Their sessions are signed
+out immediately.`, dismiss cancelled (still Active), accept flipped to
+Disabled, Enable round-tripped with no dialog; admin card shows
+"Created … · Last signed in … UTC" plus "You are signed in with this
+account." and no action buttons; other users show "· Never signed in";
+delete confirm/flow unchanged and exercised. Second browser session:
+login as uix-alpha (reset password) → forced `/change-password` with title
+"Set a new password · Gyemoim", h1/button "Set a new password", subtitle
+without the sessions sentence, the temp-password hint under Current
+password, the sessions note as a muted line above the submit; wrong current
+password rendered "The current password is incorrect. Use the temporary
+password from your admin." in `rgb(164, 63, 63)`; Sign out landed on
+`/login`; a full successful change as uix-beta landed on `#/overview`;
+login failure rendered "Sign-in failed: invalid credentials." in
+`.form-message.error`; 390px viewport on Users (screenshot) and /login:
+`scrollWidth == clientWidth`, password field + Hide toggle fit on one row,
+"Up to 64 characters." hint visible; browser console and page-error buffers
+empty on both sessions at end. Deviations: `state.userHandoffs` + nav.js
+cleanup (documented above) instead of reusing `state.sensitiveCleanup`, so
+the users handoff deliberately gets no beforeunload/in-app leave confirm
+(not in the brief, and the S5 guard text is key-specific); the reset-form
+toggle from the review's U1 prose was not added — the brief's scope asks
+for the toggle on the create form only; one throwaway user ("fresh-name")
+was created by a mistyped test step and deleted again via the UI.

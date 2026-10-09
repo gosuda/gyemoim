@@ -7,6 +7,11 @@ export const state = {
   models: [],
   users: [],
   currentUserID: "",
+  // Step 8 (U1): temporary passwords awaiting handoff, keyed by user id.
+  // Entries render a copyable handoff block on the user's card and survive
+  // list re-renders until dismissed or the Users page is left (cleared in
+  // nav.js showPage, like the service-accounts key-reveal cleanup).
+  userHandoffs: new Map(),
   editingModel: null,
   catalogRequest: 0,
   usersRequest: 0,
