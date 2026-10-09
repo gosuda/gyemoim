@@ -509,12 +509,70 @@ func translateChatResponseFormat(raw json.RawMessage) (json.RawMessage, error) {
 	}
 }
 
+// ChatOutputAccumulator observes Responses SSE events and records the output
+// they carry. The live SIWC backend sends a terminal response object with an
+// empty output array — the actual output only appears in the per-item
+// response.output_item.done and response.output_text.delta events — so the
+// non-streaming chat translation recovers the output from those events when
+// the terminal object omits it.
+type ChatOutputAccumulator struct {
+	text      strings.Builder
+	toolCalls []map[string]any
+}
+
+// Observe records one parsed Responses event. It is tolerant of unexpected
+// shapes: anything it cannot parse is ignored, and the terminal response
+// object remains the primary source when it does carry output.
+func (a *ChatOutputAccumulator) Observe(event SSEEvent) {
+	if !event.Complete {
+		return
+	}
+	switch event.Type {
+	case "response.output_text.delta":
+		var payload struct {
+			Delta string `json:"delta"`
+		}
+		if json.Unmarshal(event.DataJSON, &payload) == nil {
+			a.text.WriteString(payload.Delta)
+		}
+	case "response.output_item.done":
+		var payload struct {
+			Item struct {
+				Type    string `json:"type"`
+				Content []struct {
+					Type string `json:"type"`
+					Text string `json:"text"`
+				} `json:"content"`
+				CallID    string `json:"call_id"`
+				Name      string `json:"name"`
+				Arguments string `json:"arguments"`
+			} `json:"item"`
+		}
+		if json.Unmarshal(event.DataJSON, &payload) != nil {
+			return
+		}
+		switch payload.Item.Type {
+		case "function_call":
+			a.toolCalls = append(a.toolCalls, map[string]any{
+				"id":   payload.Item.CallID,
+				"type": "function",
+				"function": map[string]any{
+					"name":      payload.Item.Name,
+					"arguments": payload.Item.Arguments,
+				},
+			})
+		}
+	}
+}
+
 // TranslateChatCompletionResponse converts the collected terminal Responses
 // object into one chat.completion JSON body. content is concatenated from
 // output_text parts; function_call items become message.tool_calls in order.
-// The chat format cannot represent reasoning items, so they are omitted
-// (documented loss; usage still reports reasoning tokens).
-func TranslateChatCompletionResponse(gatewayRequestID, modelAlias string, createdUnix int64, responseJSON json.RawMessage) (json.RawMessage, error) {
+// When the terminal object omits the output array (live SIWC behavior with
+// store:false), accumulated falls back to the output recovered from the
+// recorded events. The chat format cannot represent reasoning items, so they
+// are omitted (documented loss; usage still reports reasoning tokens).
+func TranslateChatCompletionResponse(gatewayRequestID, modelAlias string, createdUnix int64, responseJSON json.RawMessage, accumulated *ChatOutputAccumulator) (json.RawMessage, error) {
 	var response struct {
 		Status            string `json:"status"`
 		IncompleteDetails *struct {
@@ -528,37 +586,44 @@ func TranslateChatCompletionResponse(gatewayRequestID, modelAlias string, create
 	}
 	var content strings.Builder
 	var toolCalls []map[string]any
-	for _, item := range response.Output {
-		var typed struct {
-			Type    string `json:"type"`
-			Content []struct {
-				Type string `json:"type"`
-				Text string `json:"text"`
-			} `json:"content"`
-			CallID    string `json:"call_id"`
-			Name      string `json:"name"`
-			Arguments string `json:"arguments"`
-		}
-		if json.Unmarshal(item, &typed) != nil {
-			continue
-		}
-		switch typed.Type {
-		case "message":
-			for _, part := range typed.Content {
-				if part.Type == "output_text" {
-					content.WriteString(part.Text)
-				}
+	if len(response.Output) > 0 {
+		for _, item := range response.Output {
+			var typed struct {
+				Type    string `json:"type"`
+				Content []struct {
+					Type string `json:"type"`
+					Text string `json:"text"`
+				} `json:"content"`
+				CallID    string `json:"call_id"`
+				Name      string `json:"name"`
+				Arguments string `json:"arguments"`
 			}
-		case "function_call":
-			toolCalls = append(toolCalls, map[string]any{
-				"id":   typed.CallID,
-				"type": "function",
-				"function": map[string]any{
-					"name":      typed.Name,
-					"arguments": typed.Arguments,
-				},
-			})
+			if json.Unmarshal(item, &typed) != nil {
+				continue
+			}
+			switch typed.Type {
+			case "message":
+				for _, part := range typed.Content {
+					if part.Type == "output_text" {
+						content.WriteString(part.Text)
+					}
+				}
+			case "function_call":
+				toolCalls = append(toolCalls, map[string]any{
+					"id":   typed.CallID,
+					"type": "function",
+					"function": map[string]any{
+						"name":      typed.Name,
+						"arguments": typed.Arguments,
+					},
+				})
+			}
 		}
+	} else if accumulated != nil {
+		// The terminal response object carries no output (live SIWC behavior);
+		// use the output recovered from the per-item stream events instead.
+		content.WriteString(accumulated.text.String())
+		toolCalls = accumulated.toolCalls
 	}
 	contentValue := any(content.String())
 	if contentValue == "" && len(toolCalls) > 0 {

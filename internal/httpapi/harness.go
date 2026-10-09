@@ -547,6 +547,12 @@ func (api *harnessAPI) serveNonStreamingResponse(
 ) {
 	controller := http.NewResponseController(w)
 	var usage *history.Usage
+	// The chat delivery accumulates the streamed output because the live SIWC
+	// backend sends a terminal response object with an empty output array.
+	var chatOutput *provider.ChatOutputAccumulator
+	if format == formatChat {
+		chatOutput = &provider.ChatOutputAccumulator{}
+	}
 
 	writeErrorAndFinish := func(outcome string, status int, message, errorType, code string) {
 		var deliveryNS *int64
@@ -582,6 +588,9 @@ func (api *harnessAPI) serveNonStreamingResponse(
 		// Record each raw frame before interpreting it. The loop keeps no event
 		// history in memory, so long non-streaming responses remain bounded.
 		_ = handle.Event(event.Raw, event.Name)
+		if chatOutput != nil {
+			chatOutput.Observe(event)
+		}
 		if event.Terminal && event.Usage != nil {
 			usage = usageToHistory(event.Usage)
 		}
@@ -608,7 +617,7 @@ func (api *harnessAPI) serveNonStreamingResponse(
 		// is already bounded by the provider reader's per-frame limit.
 		responseBody := event.ResponseJSON
 		if format == formatChat {
-			translated, translateErr := provider.TranslateChatCompletionResponse(handle.ID(), modelAlias, time.Now().Unix(), event.ResponseJSON)
+			translated, translateErr := provider.TranslateChatCompletionResponse(handle.ID(), modelAlias, time.Now().Unix(), event.ResponseJSON, chatOutput)
 			if translateErr != nil {
 				writeErrorAndFinish("failed", http.StatusBadGateway,
 					"the provider response could not be translated to the chat format", "server_error", "upstream_protocol_error")
