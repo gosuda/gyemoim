@@ -58,7 +58,9 @@ func (api *harnessAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case "/v1/models":
 		api.serveModels(w, r)
 	case "/v1/responses":
-		api.serveResponses(w, r)
+		api.serveInference(w, r, formatResponses)
+	case "/v1/chat/completions":
+		api.serveInference(w, r, formatChat)
 	default:
 		writeHarnessError(w, http.StatusNotFound, "the requested endpoint was not found", "invalid_request_error", "not_found")
 	}
@@ -145,7 +147,26 @@ func (api *harnessAPI) authenticate(w http.ResponseWriter, r *http.Request) (gat
 	return identity, true
 }
 
+// inferenceFormat selects the harness-facing request/response format served on
+// top of the single Responses upstream path. Both formats share routing,
+// admission, recording, limits, and the classified drop policy; only the
+// request parsing and the downstream delivery differ.
+type inferenceFormat int
+
+const (
+	formatResponses inferenceFormat = iota
+	formatChat
+)
+
 func (api *harnessAPI) serveResponses(w http.ResponseWriter, r *http.Request) {
+	api.serveInference(w, r, formatResponses)
+}
+
+func (api *harnessAPI) serveChatCompletions(w http.ResponseWriter, r *http.Request) {
+	api.serveInference(w, r, formatChat)
+}
+
+func (api *harnessAPI) serveInference(w http.ResponseWriter, r *http.Request, format inferenceFormat) {
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", http.MethodPost)
 		writeHarnessError(w, http.StatusMethodNotAllowed, "method not allowed", "invalid_request_error", "method_not_allowed")
@@ -200,6 +221,30 @@ func (api *harnessAPI) serveResponses(w http.ResponseWriter, r *http.Request) {
 		api.noteRejection(r, "invalid_json", "", identity)
 		return
 	}
+	// The chat format is translated up front so the rest of the pipeline —
+	// routing, recording, preparation, delivery — runs on one code path. The
+	// recorded incoming_request stays the chat body exactly as received.
+	var prepareInput json.RawMessage
+	var includeChatUsage bool
+	if format == formatChat {
+		translated, includeUsage, translateErr := provider.TranslateChatCompletions(body)
+		if translateErr != nil {
+			var capability *provider.CapabilityError
+			if errors.As(translateErr, &capability) {
+				writeHarnessCapabilityError(w, capability)
+				api.noteRejection(r, capability.Code, "", identity)
+				return
+			}
+			writeHarnessError(w, http.StatusBadRequest, "the request could not be translated to the provider request format", "invalid_request_error", "invalid_request")
+			api.noteRejection(r, "invalid_request", "", identity)
+			return
+		}
+		prepareInput = translated
+		includeChatUsage = includeUsage
+	}
+	// includeChatUsage is consumed by chat streaming synthesis; non-streaming
+	// responses always carry usage.
+	_ = includeChatUsage
 	var modelName string
 	if modelRaw, exists := fields["model"]; !exists || json.Unmarshal(modelRaw, &modelName) != nil || strings.TrimSpace(modelName) == "" {
 		writeHarnessError(w, http.StatusBadRequest, "the request must include a non-empty model", "invalid_request_error", "model_required")
@@ -276,7 +321,11 @@ func (api *harnessAPI) serveResponses(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	prepared, err := api.adapter.Prepare(selectedTarget.UpstreamModel, body)
+	prepareSource := body
+	if format == formatChat {
+		prepareSource = prepareInput
+	}
+	prepared, err := api.adapter.Prepare(selectedTarget.UpstreamModel, prepareSource)
 	if err != nil {
 		releasePreparation()
 		var capability *provider.CapabilityError
@@ -290,6 +339,16 @@ func (api *harnessAPI) serveResponses(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	droppedFields = prepared.DroppedFields
+	if prepared.ClientStream && format == formatChat {
+		// Chat streaming synthesis is implemented with the chat delivery work;
+		// until then the stream request is rejected explicitly instead of
+		// returning Responses-format events a chat client cannot parse. The
+		// rejection happens before provider authentication and I/O.
+		authNS := handle.ElapsedNS()
+		finish("failed", 0, "chat completions streaming is not supported yet", nil, history.Timings{AuthenticationPreparationNS: &authNS}, history.EndDetails{})
+		writeHarnessError(w, http.StatusBadRequest, "chat completions streaming is not supported yet; use stream:false", "invalid_request_error", "unsupported_value")
+		return
+	}
 	managedToken, err := preparation.AccessToken(r.Context())
 	authPreparationNS := handle.ElapsedNS()
 	timings := history.Timings{AuthenticationPreparationNS: &authPreparationNS}
@@ -388,8 +447,17 @@ func (api *harnessAPI) serveResponses(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if prepared.ClientStream && format == formatChat {
+		// Chat streaming synthesis is implemented with the chat delivery work;
+		// until then the stream request is rejected explicitly instead of
+		// returning Responses-format events a chat client cannot parse.
+		timings = providerTimings(authPreparationNS, trace.Snapshot(), nil)
+		finish("failed", 0, "chat completions streaming is not supported yet", nil, timings, endDetails)
+		writeHarnessError(w, http.StatusBadRequest, "chat completions streaming is not supported yet; use stream:false", "invalid_request_error", "unsupported_value")
+		return
+	}
 	if !prepared.ClientStream {
-		api.serveNonStreamingResponse(w, r, handle, upstream, trace, authPreparationNS, endDetails, finish)
+		api.serveNonStreamingResponse(w, r, handle, upstream, trace, authPreparationNS, endDetails, finish, format, route.Model.Name)
 		return
 	}
 
@@ -484,6 +552,8 @@ func (api *harnessAPI) serveNonStreamingResponse(
 	authPreparationNS int64,
 	endDetails history.EndDetails,
 	finish func(string, int, string, *history.Usage, history.Timings, history.EndDetails),
+	format inferenceFormat,
+	modelAlias string,
 ) {
 	controller := http.NewResponseController(w)
 	var usage *history.Usage
@@ -546,8 +616,18 @@ func (api *harnessAPI) serveNonStreamingResponse(
 
 		// ResponseJSON is the only retained terminal payload. Its enclosing frame
 		// is already bounded by the provider reader's per-frame limit.
+		responseBody := event.ResponseJSON
+		if format == formatChat {
+			translated, translateErr := provider.TranslateChatCompletionResponse(handle.ID(), modelAlias, time.Now().Unix(), event.ResponseJSON)
+			if translateErr != nil {
+				writeErrorAndFinish("failed", http.StatusBadGateway,
+					"the provider response could not be translated to the chat format", "server_error", "upstream_protocol_error")
+				return
+			}
+			responseBody = translated
+		}
 		controller = http.NewResponseController(w)
-		if err := writeBoundedResponse(controller, w, http.StatusOK, "application/json; charset=utf-8", event.ResponseJSON); err != nil {
+		if err := writeBoundedResponse(controller, w, http.StatusOK, "application/json; charset=utf-8", responseBody); err != nil {
 			timings := providerTimings(authPreparationNS, trace.Snapshot(), nil)
 			finish("cancelled", upstream.StatusCode, "downstream client disconnected before the response was delivered", usage, timings, endDetails)
 			return
