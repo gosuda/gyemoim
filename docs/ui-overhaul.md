@@ -217,3 +217,91 @@ highlights the row, and an Overview Inspect row click lands on
 `navigate(page, params)` path); logout → `/login`, re-login → `#/overview`; a nav
 click on the current page is a no-op; one navigation triggers exactly one page load
 (single `/api/users`+`/api/auth/me` pair per Users render). Deviations: none.
+
+### Step 2 — Module split (pure refactor) (2026-10-09)
+
+`internal/httpui/assets/site.js` (2,242 lines) is deleted and its IIFE body moved
+verbatim into ES modules under `internal/httpui/assets/js/`, loaded from index.html
+via `<script type="module" src="/assets/js/app.js"></script>` (replacing the old
+`<script src="/assets/site.js" defer>` tag; modules are deferred by default, so the
+form wiring that used to run at `defer` time still runs after the DOM is ready).
+Final layout (line counts):
+
+- `js/state.js` (22) — `state` and the history fetch-control `historyState` objects,
+  exported and mutated by property.
+- `js/dom.js` (21) — `byId`, `element`, `button`, `showMessage`.
+- `js/format.js` (67) — `formatUTC/formatBytes/formatNumber/formatOffsetNS/
+  formatDurationNS/formatDate` plus the shared presentational builders
+  `identity/identityCell/outcomeTag` and `historyErrorMessage` (used by Overview and
+  Requests; placed here rather than in a page module to keep them shared).
+- `js/api.js` (101) — `api()` (CSRF header, error unwrapping, forced-change and
+  session-expiry redirects), `addQuery`, and the bounded-history abort-token
+  machinery (`beginHistoryFetch`, `beginHistoryChild`, `finishHistoryChild`,
+  `historyFetchIsCurrent`, `historyChildIsCurrent`, `cancelHistoryFetches`,
+  `abortHistoryChildren`).
+- `js/nav.js` (109) — `titles`, `buildHash/parseHash/renderRoute/applyHash/showPage/
+  navigate/refreshPage`, the `renderedHash` double-render guard, and the
+  `data-page`/`data-refresh` button wiring.
+- `js/pages/{overview,providers,service-accounts,models,requests,storage,users}.js`
+  (193/331/369/231/588/126/137) — the page loaders/renderers, each owning its
+  page-scoped form wiring exactly as it appeared in the monolith (e.g. the Storage
+  module owns the `history-delete-form` submit handler, Requests owns the filter/
+  paging/detail-close wiring).
+- `js/app.js` (32) — entry point: logout wiring, `oauth_result` handling, initial
+  `renderRoute()`, and the `hashchange` listener registered last, matching the
+  original boot order.
+
+Cycle/registry choice: one deliberate cycle — `nav.js` imports the seven page
+loaders for `refreshPage` while page modules import `navigate` back from `nav.js`.
+This is safe because both sides export only hoisted function declarations called at
+runtime, never during module evaluation; no registry was needed. No other cycles
+exist (`state`→none; `dom`→none; `format`→`dom`; `api`→`state`; pages→
+`api/dom/format/state/nav` as needed; `app`→`nav/api/dom`). Only Overview and
+Requests import `navigate` (the other pages never navigate), so the cycle is
+narrow. Boundary adjustments from the plan's sketch: `addQuery` and the
+abort-token machinery live in `api.js` rather than a page module (shared by
+Overview + Requests + nav's `showPage`); `historyState` lives in `state.js` beside
+`state`; `identity/identityCell/outcomeTag/historyErrorMessage` live in `format.js`
+(Overview + Requests share them); `providerName` stayed in the service-accounts
+page module (its only user).
+
+Pure-move proof: the concatenation of all modules with `import` statements and
+`export` keywords stripped was compared line-for-line (sorted diff, comment lines
+excluded) against `git show HEAD:site.js` with the IIFE wrapper removed and
+dedented — identical code lines, i.e. zero behavior change by construction (the
+only diff initially caught was a transcription typo, `0x80` vs `0xc0` in
+`utf8Preview`'s continuation-byte mask, fixed before verification). Strict mode: the
+monolith already declared `"use strict"`, so module strictness changes nothing; no
+sloppy-mode fixes were needed. `window` leakage: none introduced —
+`Object.keys(window)` on the SPA is identical to the unchanged `/login` page
+baseline; the pre-existing DOM-node expandands (`panel.connectStop`,
+`details.loading`, `slot.historyChildController`, …) are unchanged.
+
+Verification: `node --check` on every module in module syntax (each copied to
+`/tmp/opencode/modcheck/*.mjs`; 13/13 OK); `go vet ./...` OK;
+`CGO_ENABLED=0 go build -trimpath` OK and `./scripts/build-release.sh` builds all
+four targets; the built binary serves `/assets/js/app.js` (and all sibling modules)
+with `Content-Type: text/javascript; charset=utf-8` (`go:embed assets/*` picks up
+the subdirectory without Go changes) and `/assets/site.js` is 404. Full browser
+walk on a private instance (port 9962, XDG-isolated data dir, seeded 2 providers +
+2 service accounts + 1 model + users, admin password changed via the forced gate):
+login error path shows the inline error; temp-password login redirects to
+`/change-password` and after the change lands on `#/overview`; all 7 pages render
+with correct hash/title/`aria-current`/h1/breadcrumb and exactly one visible view;
+Back/Forward restore page+title+`aria-current`; reload on `#/users` stays on Users;
+`#/bogus` normalizes to `#/overview`; `#/requests?select=bogus-id` auto-opens the
+detail with its explicit load error and keeps the param in the hash; with
+`/api/requests*` stubbed, a fresh load of `#/requests?select=synthetic-1`
+auto-opens the detail (16 summary items, 2 event cards, highlighted row) and an
+Overview Inspect click lands on the same deep link; provider create shows its
+success message, the connect panel opens with the single-use code and a ticking
+countdown (9:59 → 9:56 observed), and the panel survives navigation away/back and
+the manual Refresh button; service-account expand loads keys/grants/Pi sections and
+the issue-key show-once reveal + "Dismiss and clear" work; Model form's provider
+dropdown lists all seeded providers; Requests filter validation ("must include a
+UTC suffix"), valid apply, and Reset all behave; Storage renders 4 tiles + 14
+detail rows; Users cards show the "You"/"Password change pending" badges, the
+reset-password form expands with its aria-label, and user creation adds a card;
+logout → `/login`, re-login → `#/overview`; a nav click on the current page adds no
+history entry; one Users render issues exactly one `/api/users`+`/api/auth/me`
+pair; browser console is clean across the entire session. Deviations: none.
