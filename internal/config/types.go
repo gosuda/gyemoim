@@ -97,7 +97,10 @@ type ModelGrant struct {
 // password string (argon2id arrives in a later step); plaintext passwords never
 // enter this package, and the hash is excluded from JSON serialization.
 // LastLoginAt is stamped transactionally with session creation at successful
-// login and is nil when the user has never signed in.
+// login and is nil when the user has never signed in. ActiveSessionCount is not
+// a stored column: the read queries compute it from the sessions table at read
+// time (sessions expire lazily, so expiry is re-checked, not row existence) and
+// it is never written back.
 type User struct {
 	ID                 string     `json:"id"`
 	Username           string     `json:"username"`
@@ -105,6 +108,7 @@ type User struct {
 	MustChangePassword bool       `json:"mustChangePassword"`
 	DisabledAt         *time.Time `json:"disabledAt,omitempty"`
 	LastLoginAt        *time.Time `json:"lastLoginAt"`
+	ActiveSessionCount int        `json:"activeSessionCount"`
 	CreatedAt          time.Time  `json:"createdAt"`
 	UpdatedAt          time.Time  `json:"updatedAt"`
 }

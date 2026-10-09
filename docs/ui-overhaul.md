@@ -1375,3 +1375,66 @@ it first.` on the card; after unchecking the grant on the Service accounts
 page ("Model access saved."), Delete → confirm → the card disappeared
 ("No Models configured…" empty state); browser console clean. Deviations:
 none.
+
+### Item 5 — Active session counts on the Users page (2026-10-09)
+
+Review U4: the Users page showed Created and Last signed in, but before a
+Disable/Delete an admin could not tell whether the person is currently signed
+in. The data already existed — the `sessions` table tracks per-user sessions
+with absolute expiry — it just was not exposed. Count only; no session
+listing or revocation (that stays out of scope):
+
+- **Store.** `internal/config/users.go` gained one shared correlated scalar
+  subquery, `activeSessionCountSelect = (SELECT COUNT(*) FROM sessions WHERE
+  sessions.user_id = users.id AND sessions.expires_at > ?)`, appended to the
+  column list of `GetUser`, `GetUserByUsername`, and `ListUsers` with the
+  current `nowText()` bound as the parameter. One SQL round trip per query —
+  the subquery runs inside SQLite per row, riding the existing
+  `sessions_by_user(user_id, expires_at)` index — so there is no N+1, and no
+  GROUP BY/JOIN that would duplicate user columns or risk disturbing the
+  stable `ORDER BY created_at, id`. The expiry re-check at read time is
+  essential: sessions expire lazily (DeleteExpiredSessions runs on its own
+  schedule), so an expired-but-undeleted row must not count. The `>` filter is
+  the exact complement of the prune's `expires_at <= ?` delete and rests on
+  the same verified invariant — timestamps are fixed-width RFC3339Nano UTC
+  TEXT, so lexicographic comparison matches time order. `User` gains
+  `ActiveSessionCount int` (`types.go`), documented as read-time-only and
+  never written back; scans/fillUser thread it through. GetUser and
+  GetUserByUsername run on the login/auth paths; the added cost there is one
+  indexed COUNT over the small sessions table, accepted so that every
+  serialized User — login reply, `/api/auth/me`, enable/disable/reset replies,
+  and the management list — carries the same field. No schema change (the
+  sessions table already existed; schema version untouched), no new writes on
+  the auth path, session semantics untouched (no sliding renewal, no
+  extension).
+- **HTTP layer.** No change: handlers serialize `config.User` directly, so
+  `/api/users` and `/api/users/{id}` (via the enable/disable/reset replies)
+  both carry `activeSessionCount`. One known, pre-existing staleness shape:
+  the login reply reflects the user row read *before* the new session is
+  committed, so its count excludes the session being created — exactly how
+  `lastLoginAt` already behaved in that reply; the list and `/api/auth/me`
+  views are live.
+- **UI.** `pages/users.js` appends the count to each card's existing muted
+  fact row: `Created … · Last signed in … · 1 active session` /
+  `… · 2 active sessions` / `… · No active sessions` (also after
+  "Never signed in"). Singular/plural handled; the "You" card shows it too —
+  the admin's own current session honestly counts. Disable/Delete confirms
+  already state the sign-out consequence and are unchanged.
+
+Verification: `gofmt -l` clean on the changed Go files; `go vet ./...` OK;
+`CGO_ENABLED=0 go build -trimpath` OK; `./scripts/build-release.sh` builds
+all four targets; `node --check` on pages/users.js OK. curl pass on a private
+instance (port 9982, fresh XDG-isolated data dir): fresh bootstrap → forced
+password change → `/api/users` shows admin `activeSessionCount: 1` (own
+session); created bob (never logged in) → 0; bob logged in from a second
+cookie jar → 1 (and `/api/auth/me` for bob also 1); a throwaway `go run`
+probe (created inside the module tree, deleted after) inserted an
+already-expired session row directly into config.db → bob still counted 1;
+bob's second login pruned the expired row and bob counted 2 (two live
+sessions); `DELETE /api/users/{bob}` → 204, bob gone from the list and both
+of his cookie jars 401 on `/api/auth/me` (sessions cascaded). Browser pass
+(same instance): admin "You" card read `… · 2 active sessions` while a second
+admin session existed, `… · 1 active session` (singular) after that session
+logged out; a UI-created never-signed-in user read
+`Created … · Never signed in · No active sessions`; UI Delete confirm text
+unchanged and still works; browser console clean. Deviations: none.

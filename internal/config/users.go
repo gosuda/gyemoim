@@ -38,9 +38,27 @@ func (s *Store) CreateUser(ctx context.Context, user User) (User, error) {
 	return user, nil
 }
 
+// activeSessionCountSelect is the correlated scalar subquery the user read
+// queries append to count the user's sessions whose expiry is still in the
+// future. Sessions expire lazily (DeleteExpiredSessions runs on its own
+// schedule), so the count must re-check expiry at read time — an
+// expired-but-undeleted row exists but must not count. The stored timestamps
+// are fixed-width RFC3339Nano UTC TEXT (nowText/nullableTime), so the
+// lexicographic `expires_at > ?` comparison is exact; it is the exact
+// complement of the prune's `expires_at <= ?` delete. One subquery per query
+// keeps every read a single SQL round trip (no N+1): the list pays it once per
+// row inside SQLite, riding the sessions_by_user(user_id, expires_at) index,
+// and no GROUP BY is needed that would duplicate the user columns. GetUser and
+// GetUserByUsername run on the login/auth paths, but the added cost there is
+// one indexed COUNT over the small sessions table, and it keeps every
+// serialized User consistent — login and /api/auth/me replies carry the same
+// count as the management list.
+const activeSessionCountSelect = `(SELECT COUNT(*) FROM sessions WHERE sessions.user_id = users.id AND sessions.expires_at > ?)`
+
 // GetUser returns one User including its password hash for login verification.
 func (s *Store) GetUser(ctx context.Context, id string) (User, error) {
-	user, err := scanUser(s.db.QueryRowContext(ctx, `SELECT id, username, password_hash, must_change_password, disabled_at, last_login_at, created_at, updated_at FROM users WHERE id = ?`, id))
+	_, now := nowText()
+	user, err := scanUser(s.db.QueryRowContext(ctx, `SELECT id, username, password_hash, must_change_password, disabled_at, last_login_at, created_at, updated_at, `+activeSessionCountSelect+` FROM users WHERE id = ?`, now, id))
 	if errors.Is(err, sql.ErrNoRows) {
 		return User{}, notFound("user", id)
 	}
@@ -53,7 +71,8 @@ func (s *Store) GetUser(ctx context.Context, id string) (User, error) {
 // GetUserByUsername returns one User including its password hash for login
 // verification. Usernames are compared as stored; normalization belongs to callers.
 func (s *Store) GetUserByUsername(ctx context.Context, username string) (User, error) {
-	user, err := scanUser(s.db.QueryRowContext(ctx, `SELECT id, username, password_hash, must_change_password, disabled_at, last_login_at, created_at, updated_at FROM users WHERE username = ?`, username))
+	_, now := nowText()
+	user, err := scanUser(s.db.QueryRowContext(ctx, `SELECT id, username, password_hash, must_change_password, disabled_at, last_login_at, created_at, updated_at, `+activeSessionCountSelect+` FROM users WHERE username = ?`, now, username))
 	if errors.Is(err, sql.ErrNoRows) {
 		return User{}, notFound("user", username)
 	}
@@ -64,9 +83,11 @@ func (s *Store) GetUserByUsername(ctx context.Context, username string) (User, e
 }
 
 // ListUsers returns all Users in stable creation order. It never returns password
-// hashes; login verification reads them through the individual getters.
+// hashes; login verification reads them through the individual getters. Each
+// User carries its read-time active session count (activeSessionCountSelect).
 func (s *Store) ListUsers(ctx context.Context) ([]User, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, username, must_change_password, disabled_at, last_login_at, created_at, updated_at FROM users ORDER BY created_at, id`)
+	_, now := nowText()
+	rows, err := s.db.QueryContext(ctx, `SELECT id, username, must_change_password, disabled_at, last_login_at, created_at, updated_at, `+activeSessionCountSelect+` FROM users ORDER BY created_at, id`, now)
 	if err != nil {
 		return nil, fmt.Errorf("list users: %w", err)
 	}
@@ -293,11 +314,12 @@ func scanUser(row scanner) (User, error) {
 	var mustChange int
 	var disabledAt, lastLoginAt sql.NullString
 	var createdAt, updatedAt string
-	err := row.Scan(&user.ID, &user.Username, &user.PasswordHash, &mustChange, &disabledAt, &lastLoginAt, &createdAt, &updatedAt)
+	var activeSessions int
+	err := row.Scan(&user.ID, &user.Username, &user.PasswordHash, &mustChange, &disabledAt, &lastLoginAt, &createdAt, &updatedAt, &activeSessions)
 	if err != nil {
 		return User{}, err
 	}
-	if err := fillUser(&user, mustChange, disabledAt, lastLoginAt, createdAt, updatedAt); err != nil {
+	if err := fillUser(&user, mustChange, disabledAt, lastLoginAt, createdAt, updatedAt, activeSessions); err != nil {
 		return User{}, err
 	}
 	return user, nil
@@ -308,18 +330,20 @@ func scanUserWithoutHash(row scanner) (User, error) {
 	var mustChange int
 	var disabledAt, lastLoginAt sql.NullString
 	var createdAt, updatedAt string
-	err := row.Scan(&user.ID, &user.Username, &mustChange, &disabledAt, &lastLoginAt, &createdAt, &updatedAt)
+	var activeSessions int
+	err := row.Scan(&user.ID, &user.Username, &mustChange, &disabledAt, &lastLoginAt, &createdAt, &updatedAt, &activeSessions)
 	if err != nil {
 		return User{}, err
 	}
-	if err := fillUser(&user, mustChange, disabledAt, lastLoginAt, createdAt, updatedAt); err != nil {
+	if err := fillUser(&user, mustChange, disabledAt, lastLoginAt, createdAt, updatedAt, activeSessions); err != nil {
 		return User{}, err
 	}
 	return user, nil
 }
 
-func fillUser(user *User, mustChange int, disabledAt, lastLoginAt sql.NullString, createdAt, updatedAt string) error {
+func fillUser(user *User, mustChange int, disabledAt, lastLoginAt sql.NullString, createdAt, updatedAt string, activeSessions int) error {
 	user.MustChangePassword = mustChange != 0
+	user.ActiveSessionCount = activeSessions
 	if disabledAt.Valid {
 		t, err := readTime(disabledAt.String)
 		if err != nil {

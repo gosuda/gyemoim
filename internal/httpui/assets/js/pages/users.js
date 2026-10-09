@@ -62,9 +62,14 @@ function renderUser(user) {
   header.append(titleBlock, controls);
   card.append(header);
   // U4/U6: created + last-sign-in share one muted line so the card reads as
-  // one fact row; "Never signed in" covers the null lastLoginAt.
+  // one fact row; "Never signed in" covers the null lastLoginAt. The active
+  // session count (review U4) rides the same line — read-time data from the
+  // API (expired sessions never count), singular/plural handled, and the
+  // "You" card shows it too because the admin's own session honestly counts.
+  const count = Number(user.activeSessionCount ?? 0);
+  const sessionText = count === 1 ? "1 active session" : count > 1 ? `${count} active sessions` : "No active sessions";
   card.append(element("p", "resource-copy",
-    `Created ${formatDate(user.createdAt)} · ${user.lastLoginAt ? `Last signed in ${formatUTC(user.lastLoginAt)}` : "Never signed in"}`));
+    `Created ${formatDate(user.createdAt)} · ${user.lastLoginAt ? `Last signed in ${formatUTC(user.lastLoginAt)}` : "Never signed in"} · ${sessionText}`));
   if (user.id === state.currentUserID) {
     card.append(element("p", "muted", "You are signed in with this account."));
   }
