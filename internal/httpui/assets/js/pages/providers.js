@@ -4,7 +4,7 @@ import { api } from "../api.js";
 import { state } from "../state.js";
 import { button, byId, element, showMessage } from "../dom.js";
 import { formErrorText } from "../errors.js";
-import { announceSuccess, clearMessageOnInput, withBusy } from "../feedback.js";
+import { announceSuccess, clearMessageOnInput, scrollCardIntoView, withBusy } from "../feedback.js";
 
 export async function loadProviders() {
   const list = byId("provider-list");
@@ -31,6 +31,13 @@ function collectConnectPanels(list) {
     if (data && data.expiresAt > Date.now()) open.set(data.providerID, data);
   });
   return open;
+}
+
+// findProviderCard locates a provider's card after a list re-render (cards
+// carry their provider id as a data attribute) so outcomes and confirmations
+// can be placed on the fresh card.
+function findProviderCard(providerID) {
+  return byId("provider-list").querySelector(`.resource-card[data-provider-id="${CSS.escape(providerID)}"]`);
 }
 
 function renderProviders(open = new Map()) {
@@ -105,21 +112,39 @@ function buildConnectPanel(provider, enrollment) {
     const card = panel.closest(".resource-card");
     stop();
     panel.remove();
-    if (card) card.replaceWith(renderProvider(updated));
+    let finished = null;
+    if (card) {
+      finished = renderProvider(updated);
+      card.replaceWith(finished);
+    }
+    const kind = updated.status === "connected" ? "success" : "error";
+    const text = updated.status === "connected"
+      ? "OpenAI account connected. Direct inference access is ready."
+      : (() => {
+          const label = providerStatusLabel(updated.status);
+          const description = providerStatusDescription(updated.status);
+          return `Connection attempt finished: ${description.startsWith(label) ? description : `${label}. ${description}`}`;
+        })();
     const notice = byId("provider-oauth-message");
     notice.hidden = false;
-    if (updated.status === "connected") {
-      showMessage(notice, "OpenAI account connected. Direct inference access is ready.", "success");
-    } else {
-      const label = providerStatusLabel(updated.status);
-      const description = providerStatusDescription(updated.status);
-      showMessage(notice, `Connection attempt finished: ${description.startsWith(label) ? description : `${label}. ${description}`}`, "error");
+    showMessage(notice, text, kind);
+    // The page-level notice sits above the card grid and is off-screen for
+    // cards at the end of the list, so the outcome also lands on the
+    // finished card's own message and the card scrolls into view.
+    if (finished) {
+      showMessage(finished.providerMessage, text, kind);
+      scrollCardIntoView(finished);
     }
   };
   const finishExpired = () => {
     if (stopped) return;
     stop();
-    showMessage(panelMessage, "The enrollment code expired without a completed connection. Connect again to issue a new code.", "error");
+    // A dead code must not invite copying: dim it and disable the copy
+    // affordance, keeping the recovery message.
+    code.classList.add("connect-code-expired");
+    code.setAttribute("aria-disabled", "true");
+    copyCommand.disabled = true;
+    showMessage(panelMessage, "The enrollment code expired without a completed connection. Close this panel and run Connect again to issue a new code.", "error");
   };
 
   const poll = async () => {
@@ -140,7 +165,7 @@ function buildConnectPanel(provider, enrollment) {
   };
 
   const heading = element("h5", "", "Connect with the enrollment script");
-  const instructions = element("p", "muted", "Run the script on the machine with your web browser — where you sign in to ChatGPT. The script opens the browser; after signing in, return here and this card updates automatically.");
+  const instructions = element("p", "muted", "Run the script on the machine with your web browser — where you sign in to ChatGPT. The script opens the browser; after signing in, return here and this card updates automatically. Requires python3.");
   const codeRow = element("div", "connect-code-row");
   const countdown = element("span", "muted", "");
   codeRow.append(element("strong", "connect-label", "Enrollment code (single use)"), countdown);
@@ -158,20 +183,21 @@ function buildConnectPanel(provider, enrollment) {
   download.href = enrollment.scriptUrl || "/api/connect/script";
   download.download = "gyemoim-connect.py";
   const copyMessage = element("span", "muted", "");
+  const copyCommand = button("Copy command", "quiet small", async () => {
+    if (!command) {
+      copyMessage.textContent = "No enrollment command is available to copy.";
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(command);
+      copyMessage.textContent = "Command copied.";
+    } catch {
+      copyMessage.textContent = "Clipboard access is unavailable. Select and copy the command below.";
+    }
+  });
   actions.append(
     download,
-    button("Copy command", "quiet small", async () => {
-      if (!command) {
-        copyMessage.textContent = "No enrollment command is available to copy.";
-        return;
-      }
-      try {
-        await navigator.clipboard.writeText(command);
-        copyMessage.textContent = "Command copied.";
-      } catch {
-        copyMessage.textContent = "Clipboard access is unavailable. Select and copy the command below.";
-      }
-    }),
+    copyCommand,
     button("Close", "quiet small", () => { stop(); panel.remove(); }),
     copyMessage,
   );
@@ -183,7 +209,7 @@ function buildConnectPanel(provider, enrollment) {
       : "Code expired";
   };
   renderCountdown();
-  showMessage(panelMessage, "Waiting for the connection to complete on the other machine…");
+  showMessage(panelMessage, "Waiting for the sign-in to finish… If the script printed an error in your terminal, close this panel and run Connect again — nothing is saved until the flow completes.");
 
   ticker = window.setInterval(() => {
     if (stopped) return;
@@ -199,6 +225,7 @@ function buildConnectPanel(provider, enrollment) {
 
 function renderProvider(provider) {
   const card = element("article", "resource-card");
+  card.dataset.providerId = provider.id;
   const header = element("div", "resource-header");
   const titleBlock = element("div", "resource-title");
   titleBlock.append(element("h4", "", provider.name));
@@ -217,24 +244,27 @@ function renderProvider(provider) {
 
   const info = element("p", "resource-copy", providerStatusDescription(provider.status));
   const connect = button(provider.status === "disconnected" ? "Connect with enrollment script" : "Reconnect with enrollment script", "primary small", async () => {
-    connect.disabled = true;
+    // An open panel means a code was already issued (live or recently
+    // expired). Clicking again must reveal that panel instead of silently
+    // invalidating its code with a new issue — there is deliberately no
+    // reissue path from this button; the panel keeps its own Close, after
+    // which Connect can issue a fresh code.
+    const existing = card.querySelector(".connect-panel");
+    if (existing) {
+      scrollCardIntoView(card);
+      return;
+    }
     byId("provider-oauth-message").hidden = true;
     showMessage(byId("provider-oauth-message"));
     showMessage(actionMessage);
-    // A previous panel's enrollment code is dead once a new one is issued.
-    const existing = card.querySelector(".connect-panel");
-    if (existing) existing.connectStop?.();
-    existing?.remove();
-    try {
+    await withBusy(connect, async () => {
       const enrollment = await api(`/api/providers/${encodeURIComponent(provider.id)}/connect/start`, {
         method: "POST", body: JSON.stringify({}),
       });
       card.append(buildConnectPanel(provider, enrollment));
-    } catch (error) {
+    }).catch((error) => {
       showMessage(actionMessage, error.message, "error");
-    } finally {
-      connect.disabled = false;
-    }
+    });
   });
   const actionMessage = element("p", "form-message");
   actionMessage.setAttribute("aria-live", "polite");
@@ -264,6 +294,9 @@ function renderProvider(provider) {
     card.append(disconnect);
   }
   actionMessage.setAttribute("aria-live", "polite");
+  // The re-rendered replacement card (finishWithStatus, rename) exposes its
+  // message slot so outcomes can be placed on the fresh card.
+  card.providerMessage = actionMessage;
   card.append(actionMessage);
 
   const renameForm = element("form", "inline-form");
@@ -281,41 +314,42 @@ function renderProvider(provider) {
   const renameMessage = element("p", "form-message");
   renameMessage.setAttribute("aria-live", "polite");
   renameForm.append(renameInput, renameSave, renameCancel, renameMessage);
-  renameForm.addEventListener("submit", async (event) => {
+  clearMessageOnInput(renameForm, renameMessage);
+  renameForm.addEventListener("submit", (event) => {
     event.preventDefault();
-    renameSave.disabled = true;
-    showMessage(renameMessage);
-    try {
+    withBusy(renameSave, async () => {
+      showMessage(renameMessage);
       await api(`/api/providers/${encodeURIComponent(provider.id)}`, {
         method: "PUT", body: JSON.stringify({ name: renameInput.value }),
       });
       await loadProviders();
-    } catch (error) {
-      showMessage(renameMessage, error.message, "error");
-    } finally {
-      renameSave.disabled = false;
-    }
+      // The card was rebuilt by the reload, so the confirmation lands on the
+      // fresh card's message slot.
+      const fresh = findProviderCard(provider.id);
+      if (fresh?.providerMessage) announceSuccess(fresh.providerMessage, "Name saved.");
+    }).catch((error) => {
+      showMessage(renameMessage, formErrorText(error, { kind: "provider", action: "rename", name: renameInput.value }), "error");
+    });
   });
   card.append(renameForm);
   return card;
 }
 
 async function deleteProvider(provider) {
-  if (!window.confirm(`Delete provider “${provider.name}”?`)) return;
+  if (!window.confirm(`Delete provider “${provider.name}”? Models targeting it must be removed first.`)) return;
   try {
     await api(`/api/providers/${encodeURIComponent(provider.id)}`, { method: "DELETE" });
     await loadProviders();
   } catch (error) {
-    const card = [...byId("provider-list").children].find((item) => item.querySelector("h4")?.textContent === provider.name);
-    const message = element("p", "inline-error", error.message);
+    const card = findProviderCard(provider.id);
+    const message = element("p", "inline-error", formErrorText(error, { kind: "provider", action: "delete", name: provider.name }));
     message.setAttribute("role", "alert");
     if (card) card.append(message);
   }
 }
 
-// Representative application of the step-5 shared layer (duplicate-name 409
-// humanization + withBusy). Other forms keep today's behavior until their own
-// page steps wire them.
+// Provider create form (step-6): withBusy + a message slot cleared on input,
+// success announcing the next step, and errors humanized through errors.js.
 const providerCreateForm = byId("provider-create-form");
 const providerCreateMessage = byId("provider-create-message");
 clearMessageOnInput(providerCreateForm, providerCreateMessage);
@@ -325,10 +359,12 @@ providerCreateForm.addEventListener("submit", (event) => {
   const submit = form.querySelector('[type="submit"]');
   withBusy(submit, async () => {
     showMessage(providerCreateMessage);
-    await api("/api/providers", { method: "POST", body: JSON.stringify({ name: form.elements.name.value, type: "openai" }) });
+    const created = await api("/api/providers", { method: "POST", body: JSON.stringify({ name: form.elements.name.value, type: "openai" }) });
     form.reset();
-    announceSuccess(providerCreateMessage, "Provider added. Sign in when ready.");
+    announceSuccess(providerCreateMessage, "Provider added. Open its card and run the enrollment script to connect — Models can target it once it shows Connected.");
     await loadProviders();
+    // The new card is at the end of the list; bring it into view.
+    scrollCardIntoView(findProviderCard(created?.id));
   }).catch((error) => {
     showMessage(providerCreateMessage, formErrorText(error, { kind: "provider", action: "create", name: form.elements.name.value }), "error");
   });

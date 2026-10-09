@@ -596,3 +596,114 @@ stated `js/**` ownership, required by the brief); the 500-stub used a CDP
 fetch wrapper instead of `network route` (which cannot set status codes);
 the `contextWindow`/`maxTokens` leak patterns are covered in the table but
 not yet wired to the Models page's client-side validator (later step).
+
+### Step 6 — Providers page (2026-10-09)
+
+All changes in `internal/httpui/assets/js/pages/providers.js` plus two
+additions to `internal/httpui/assets/site.css`; no Go changes,
+`index.html` untouched.
+
+- **P2 (reveal, not reissue):** the Connect/Reconnect handler
+  (providers.js:246) now returns early when the card already has a
+  `.connect-panel`: it calls `scrollCardIntoView(card)` and issues
+  nothing — no POST `/connect/start`, no panel replacement, so the live
+  code and its countdown keep running. There is deliberately no reissue
+  path from the button; the panel's own Close (providers.js:201) is the
+  way out, after which Connect issues a fresh code. The old
+  kill-and-reissue branch (`existing.connectStop?.(); existing?.remove()`)
+  is gone. The issue path now goes through `withBusy` instead of manual
+  disable/restore.
+- **P1/P8:** the panel waiting line (providers.js:212) is now "Waiting
+  for the sign-in to finish… If the script printed an error in your
+  terminal, close this panel and run Connect again — nothing is saved
+  until the flow completes." The old "on the other machine…" wording is
+  gone (the instruction line above already says "machine with your web
+  browser"), and the guidance's recovery instruction matches the new P2
+  button behavior (Close, then Connect).
+- **P10:** the panel instruction ends with "Requires python3."
+  (providers.js:168). `finishExpired` (providers.js:139) now dims the
+  code display (`.connect-code-expired`, site.css:130), sets
+  `aria-disabled="true"`, and disables the Copy command button; the
+  recovery message stays. Its text was adjusted to "Close this panel and
+  run Connect again to issue a new code" so it matches the P2 rule that
+  re-clicking an open (even expired) panel never reissues.
+- **P4:** `finishWithStatus` (providers.js:111) now renders the
+  replacement card into a variable and, besides the page-level
+  `#provider-oauth-message` notice, writes the same outcome text (success
+  or error kind) into the fresh card's own action message
+  (`card.providerMessage`, set in `renderProvider`, providers.js:299) and
+  calls `scrollCardIntoView(finished)`. Cards carry `data-provider-id`
+  (providers.js:228); `findProviderCard` (providers.js:39) locates cards
+  after re-renders. Panel survival of other cards is untouched (per-card
+  swap, same `collectConnectPanels` snapshot path).
+- **P6:** provider-create success (providers.js:365) now reads "Provider
+  added. Open its card and run the enrollment script to connect — Models
+  can target it once it shows Connected." and after the reload
+  `scrollCardIntoView` runs on the new card (found via the POST response
+  id). The step-5 wiring (withBusy, clearMessageOnInput, formErrorText)
+  is unchanged.
+- **P3:** the delete confirm (providers.js:339) is now
+  `Delete provider "X"? Models targeting it must be removed first.` and
+  the error path uses `formErrorText(error, {kind: "provider",
+  action: "delete", …})`, so a 409 renders "This provider is still in
+  use. Remove the items that point to it first." instead of the raw
+  conflict text (the card lookup now uses `data-provider-id` instead of
+  an h4 text match).
+- **P7 + rename feedback:** the rename submit handler (providers.js:318)
+  goes through `withBusy` and `formErrorText` ({kind: "provider",
+  action: "rename"}), so a duplicate name renders `A provider named "X"
+  already exists. Choose another name.`; success reloads the list and
+  places `Name saved.` (announceSuccess) on the fresh card's message slot
+  (providers.js:329). `clearMessageOnInput` is wired on the rename form.
+- **P5:** `.connect-command` gains `white-space: pre-wrap` (site.css:131).
+- **P9 — skipped, no client-side data:** `GET /api/providers` returns the
+  `config.Provider` JSON (id/name/type/baseUrl/status/createdAt/updatedAt,
+  internal/config/types.go:18) — no last-attempt timestamp or reason
+  exists anywhere client-side (a failed connect is not even persisted
+  server-side: `CompleteConnectFlow` returns "failed" without writing
+  provider status). Surfacing a last attempt would require a backend
+  change, which this step forbids. Not implemented.
+
+Verification: `node --check` on all 13 modules OK (as `.mjs` copies);
+`go vet ./...` OK; `CGO_ENABLED=0 go build -trimpath` OK (binary
+`/tmp/opencode/step6-bin`). Browser pass on a private instance (port
+9967, XDG-isolated data dir; seeded via curl: 2 providers + 1 service
+account + 1 Model `gpt-x` targeting `work-main`; admin password changed
+through the forced gate). Evidence: create "work-third" showed the new
+next-step message and the new card carried `card-highlight` with
+`animationName: card-highlight`; duplicate create still humanized; open
+panel on `work-main`, click Connect again → same panel object, same code
+`l-r-7CIQ…`, countdown still ticking (9:50 → 9:39), `card-highlight`
+applied, and the `connect/start` request count stayed at 1 (network log:
+6 start POSTs total, each accounted for by a distinct real open; the
+re-clicks fired none); panel waiting line, python3 mention, and the
+absence of "other machine" verified by reading the panel DOM; with
+`/api/providers` stubbed to status changes (stub unrouted after each
+check), `finishWithStatus` produced the page notice AND the card's own
+message ("OpenAI account connected…" as `.form-message.success`;
+"Connection attempt finished: Re-authentication required…" and "…
+Connection failed…" as `.form-message.error`) with `card-highlight`
+observed mid-animation on the finished card, while the other card's open
+panel survived with the same code and a ticking countdown; expired panel
+via a stubbed `connect/start` with `expiresInSeconds: 0` (unrouted
+afterwards): countdown "Code expired", code got
+`.connect-code-expired` (computed opacity 0.72) with
+`aria-disabled="true"`, Copy disabled, recovery message present;
+re-clicking Connect on the expired panel revealed the same dimmed panel
+(no POST), Close then Connect issued a fresh real code (9:59); delete
+confirm dialog text read back verbatim as `Delete provider "work-third"?
+Models targeting it must be removed first.`; deleting `work-main`
+(targeted by the Model) produced the role="alert" sentence "This provider
+is still in use. Remove the items that point to it first."; deleting
+`work-third` succeeded; rename to a fresh name showed "Name saved." on
+the fresh card (`.form-message.success`) with the button restored, and a
+duplicate rename showed the humanized already-exists sentence; 400 px
+viewport with a panel open: `scrollWidth == clientWidth == 400`, command
+`white-space: pre-wrap` wrapping at 280 px; panel survival across
+navigation to Overview and back plus manual Refresh (same code, countdown
+ticking); browser console clean across the whole session. API-level
+failed-connect path re-verified with curl (start → claim on port 9767 →
+complete with a bogus authorization code → `{"status":"failed"}`,
+provider status stays `disconnected`), which is why the P4 browser check
+stubs the poll response. Deviations: none beyond the P9 skip documented
+above.

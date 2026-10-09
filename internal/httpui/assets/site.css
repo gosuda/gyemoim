@@ -127,7 +127,8 @@ h4 { min-width: 0; overflow-wrap: anywhere; margin: 0; color: #2e3948; font-size
 .connect-code-row { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 4px 10px; }
 .connect-label { color: #4f5a68; font-size: 11px; font-weight: 650; }
 .connect-code { overflow-wrap: anywhere; padding: 9px 10px; border: 1px solid #e9cf91; border-radius: 5px; color: #4e4022; background: #fffaf0; font: 13px ui-monospace, SFMono-Regular, Menlo, monospace; user-select: all; }
-.connect-command { overflow-wrap: anywhere; margin: 0; padding: 8px 10px; border-radius: 5px; color: #455161; background: #f2f4f7; font: 10px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
+.connect-code-expired { border-color: #d9dbe0; color: #8a8f98; background: #f4f5f7; opacity: 0.72; }
+.connect-command { overflow-wrap: anywhere; white-space: pre-wrap; margin: 0; padding: 8px 10px; border-radius: 5px; color: #455161; background: #f2f4f7; font: 10px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
 .card-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 5px; }
 .resource-copy { margin: 11px 0 5px; color: #7c8793; font-size: 11px; }
 .pending-button { color: #7c8793 !important; }
