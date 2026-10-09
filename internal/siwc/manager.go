@@ -109,6 +109,27 @@ func (m *Manager) Start(ctx context.Context, providerID string) (string, error) 
 	if m == nil || m.store == nil || m.port < 1 || m.port > 65535 || providerID == "" {
 		return "", errors.New("OAuth manager is not configured")
 	}
+	return m.startFlow(ctx, providerID, m.port)
+}
+
+// StartWithCallbackPort behaves exactly like Start but builds the loopback
+// redirect URI with the given port instead of the server's own listen port.
+// It serves the remote enrollment flow: the enrollment script runs a loopback
+// listener on the admin's browser machine, and Sign in with ChatGPT accepts
+// only http://127.0.0.1:<port>/auth/callback (fixed scheme, host, and path;
+// only the port may vary). A provider can have only one active flow; a later
+// start invalidates its earlier state.
+func (m *Manager) StartWithCallbackPort(ctx context.Context, providerID string, callbackPort int) (string, error) {
+	if callbackPort < 1 || callbackPort > 65535 {
+		return "", errors.New("callback port must be between 1 and 65535")
+	}
+	if m == nil || m.store == nil || providerID == "" {
+		return "", errors.New("OAuth manager is not configured")
+	}
+	return m.startFlow(ctx, providerID, callbackPort)
+}
+
+func (m *Manager) startFlow(ctx context.Context, providerID string, callbackPort int) (string, error) {
 	unlock, err := m.lockProvider(ctx, providerID)
 	if err != nil {
 		return "", err
@@ -170,7 +191,7 @@ func (m *Manager) Start(ctx context.Context, providerID string) (string, error) 
 		return "", err
 	}
 	challengeDigest := sha256.Sum256([]byte(verifier))
-	redirectURI := fmt.Sprintf("http://127.0.0.1:%d/auth/callback", m.port)
+	redirectURI := fmt.Sprintf("http://127.0.0.1:%d/auth/callback", callbackPort)
 	authorizationURL, err := buildAuthorizationURL(provider, clientID, hostID, redirectURI, state, nonce,
 		base64.RawURLEncoding.EncodeToString(challengeDigest[:]), newClientID, idTokenHint, loginHint)
 	if err != nil {
@@ -214,53 +235,86 @@ func (m *Manager) ServeCallback(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid or expired OAuth callback", http.StatusBadRequest)
 		return
 	}
-	flow, err := m.consumePending(state, time.Now())
+	// Provider errors take precedence over code processing, but are never echoed.
+	// The raw value is forwarded so CompleteConnectFlow can distinguish
+	// access_denied; a repeated error parameter is flattened to a generic
+	// failure exactly as before.
+	authorizationError := ""
+	if errorValues, hasError := query["error"]; hasError {
+		if len(errorValues) == 1 && errorValues[0] == "access_denied" {
+			authorizationError = errorValues[0]
+		} else {
+			authorizationError = "error"
+		}
+	}
+	// A repeated code or client_id parameter flattens to the empty value, which
+	// fails the completion path exactly like the previous explicit checks.
+	code, _ := exactlyOne(query, "code")
+	callbackClientID, _ := exactlyOne(query, "client_id")
+	_, clientIDPresent := query["client_id"]
+	status, err := m.CompleteConnectFlow(r.Context(), state, code, callbackClientID, clientIDPresent, authorizationError)
 	if err != nil {
 		http.Error(w, "invalid or expired OAuth callback", http.StatusBadRequest)
 		return
 	}
+	m.redirectResult(w, status)
+}
 
-	// Provider errors take precedence over code processing, but are never echoed.
-	if errorValues, hasError := query["error"]; hasError {
-		if len(errorValues) == 1 && errorValues[0] == "access_denied" {
-			m.redirectResult(w, "authorization_denied")
-		} else {
-			m.redirectResult(w, "failed")
-		}
-		return
+// CompleteConnectFlow runs the shared completion path for one pending flow:
+// single-use state consumption, provider lock and generation checks, token
+// exchange, ID-token verification, and atomic credential storage. It is the
+// post-callback core of ServeCallback and is also driven by the remote
+// enrollment endpoint, whose script forwards the provider redirect values.
+//
+// It returns the final connection status using the oauth_result vocabulary
+// (connected, plan_usage_disabled, require_reauthentication, authorization_denied,
+// failed). A non-empty authorizationError forwards a provider error redirect:
+// "access_denied" maps to the authorization_denied status, any other value fails
+// the flow. clientIDPresent reports whether the provider echoed a client_id
+// query parameter (required for first-time dynamic registration); a repeated
+// parameter arrives as present with an empty callbackClientID and fails.
+// errInvalidFlow — unknown, expired, or already consumed state — is the only
+// error; the status result is returned even for exchange or storage failures,
+// and callers decide how to present each outcome (browser redirect or JSON).
+func (m *Manager) CompleteConnectFlow(ctx context.Context, state, authorizationCode, callbackClientID string, clientIDPresent bool, authorizationError string) (status string, err error) {
+	if m == nil || m.store == nil || state == "" {
+		return "", errInvalidFlow
 	}
-	code, codeOK := exactlyOne(query, "code")
-	callbackClientID, clientIDOK := exactlyOne(query, "client_id")
-	if !codeOK || code == "" || !clientIDOK {
-		m.redirectResult(w, "failed")
-		return
+	flow, err := m.consumePending(state, time.Now())
+	if err != nil {
+		return "", err
+	}
+	if authorizationError != "" {
+		if authorizationError == "access_denied" {
+			return "authorization_denied", nil
+		}
+		return "failed", nil
+	}
+	if authorizationCode == "" {
+		return "failed", nil
 	}
 	if flow.newClientID {
-		if strings.TrimSpace(callbackClientID) == "" || callbackClientID == initialClientID {
-			m.redirectResult(w, "failed")
-			return
+		if !clientIDPresent || strings.TrimSpace(callbackClientID) == "" || callbackClientID == initialClientID {
+			return "failed", nil
 		}
 		flow.clientID = callbackClientID
-	} else if _, supplied := query["client_id"]; supplied && callbackClientID != flow.clientID {
-		m.redirectResult(w, "failed")
-		return
+	} else if clientIDPresent && callbackClientID != flow.clientID {
+		return "failed", nil
 	}
 
-	unlock, lockErr := m.lockProvider(r.Context(), flow.providerID)
+	unlock, lockErr := m.lockProvider(ctx, flow.providerID)
 	if lockErr != nil {
-		m.redirectResult(w, "failed")
-		return
+		return "failed", nil
 	}
 	defer unlock()
 	m.pendingMu.Lock()
 	isLatest := m.generation[flow.providerID] == flow.generation
 	m.pendingMu.Unlock()
 	if !isLatest {
-		m.redirectResult(w, "failed")
-		return
+		return "failed", nil
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	if flow.newClientID {
 		// Keep the provider-issued registration even when the subsequent exchange
@@ -268,35 +322,30 @@ func (m *Manager) ServeCallback(w http.ResponseWriter, r *http.Request) {
 		if err := m.store.SaveProviderRegistration(ctx, config.ProviderRegistration{
 			ProviderID: flow.providerID, IssuedClientID: flow.clientID,
 		}); err != nil {
-			m.redirectResult(w, "failed")
-			return
+			return "failed", nil
 		}
 	}
-	tokens, err := exchangeCode(ctx, flow.client, flow.provider, flow.clientID, flow.redirectURI, code, flow.verifier)
+	tokens, err := exchangeCode(ctx, flow.client, flow.provider, flow.clientID, flow.redirectURI, authorizationCode, flow.verifier)
 	if err != nil {
-		m.redirectResult(w, "failed")
-		return
+		return "failed", nil
 	}
 	identity, err := verifyIdentity(ctx, flow.provider, flow.clientID, flow.nonce, tokens.IDToken)
 	if err != nil {
-		m.redirectResult(w, "failed")
-		return
+		return "failed", nil
 	}
 	registration, err := m.store.GetProviderRegistration(ctx, flow.providerID)
 	if err != nil {
-		m.redirectResult(w, "failed")
-		return
+		return "failed", nil
 	}
 	if registration.VerifiedSubject != "" && registration.VerifiedSubject != identity.subject {
-		m.redirectResult(w, "failed")
-		return
+		return "failed", nil
 	}
 	verifiedEmail := identity.email
 	if verifiedEmail == "" {
 		// Keep a previously verified address if this validated token omits profile email.
 		verifiedEmail = registration.Email
 	}
-	status := connectionStatus(tokens)
+	status = connectionStatus(tokens)
 	credentials := config.ProviderCredentials{
 		ProviderID: flow.providerID, IssuedClientID: flow.clientID,
 		VerifiedSubject: identity.subject, Email: verifiedEmail,
@@ -305,10 +354,9 @@ func (m *Manager) ServeCallback(w http.ResponseWriter, r *http.Request) {
 		EarliestRefreshAt: tokens.EarliestRefreshAt, Scopes: tokens.Scopes,
 	}
 	if err := m.store.ReplaceProviderCredentialsWithStatus(ctx, credentials, status); err != nil {
-		m.redirectResult(w, "failed")
-		return
+		return "failed", nil
 	}
-	m.redirectResult(w, status)
+	return status, nil
 }
 
 func (m *Manager) consumePending(state string, now time.Time) (pendingFlow, error) {

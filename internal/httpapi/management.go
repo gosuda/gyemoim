@@ -15,6 +15,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/gosuda/gyemoim/internal/config"
+	"github.com/gosuda/gyemoim/internal/connect"
 	"github.com/gosuda/gyemoim/internal/gateway"
 	"github.com/gosuda/gyemoim/internal/history"
 	"github.com/gosuda/gyemoim/internal/siwc"
@@ -30,6 +31,7 @@ type managementAPI struct {
 	gateway  *gateway.Service
 	fallback http.Handler
 	oauth    *siwc.Manager
+	connect  *connect.Service
 	history  *history.QueryService
 	storage  *history.Recorder
 	backoff  loginBackoff
@@ -37,8 +39,8 @@ type managementAPI struct {
 
 // NewManagement creates the management API handler. Paths outside the JSON API
 // routes fall through to the embedded UI, which also owns /api/status.
-func NewManagement(store *config.Store, fallback http.Handler, oauthManager *siwc.Manager, recorder *history.Recorder) http.Handler {
-	return &managementAPI{store: store, gateway: gateway.New(store), fallback: fallback, oauth: oauthManager, history: history.NewQueryService(recorder), storage: recorder}
+func NewManagement(store *config.Store, fallback http.Handler, oauthManager *siwc.Manager, connectService *connect.Service, recorder *history.Recorder) http.Handler {
+	return &managementAPI{store: store, gateway: gateway.New(store), fallback: fallback, oauth: oauthManager, connect: connectService, history: history.NewQueryService(recorder), storage: recorder}
 }
 
 func (api *managementAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -79,6 +81,10 @@ func (api *managementAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		api.provider(w, r, parts[1])
 	case len(parts) == 4 && parts[0] == "providers" && parts[2] == "oauth" && parts[3] == "start":
 		api.startProviderOAuth(w, r, parts[1])
+	case len(parts) == 4 && parts[0] == "providers" && parts[2] == "connect" && parts[3] == "start":
+		api.startProviderConnect(w, r, parts[1])
+	case len(parts) == 2 && parts[0] == "connect" && parts[1] == "script":
+		api.connectScript(w, r)
 	case len(parts) == 3 && parts[0] == "providers" && parts[2] == "disconnect":
 		api.disconnectProvider(w, r, parts[1])
 	case len(parts) == 3 && parts[0] == "providers" && parts[2] == "models":
@@ -201,6 +207,59 @@ func (api *managementAPI) startProviderOAuth(w http.ResponseWriter, r *http.Requ
 	writeJSON(w, http.StatusOK, struct {
 		AuthorizationURL string `json:"authorizationUrl"`
 	}{AuthorizationURL: authorizationURL})
+}
+
+// startProviderConnect issues a single-use enrollment code for the
+// connect-script flow (docs/web-deployment.md decision 7). The UI layer (not
+// implemented in this step) turns the returned template into the exact command
+// line, because only the browser knows the server's real scheme and origin.
+func (api *managementAPI) startProviderConnect(w http.ResponseWriter, r *http.Request, id string) {
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w, http.MethodPost)
+		return
+	}
+	if !decodeOptionalEmptyJSON(w, r) {
+		return
+	}
+	if api.connect == nil {
+		writeManagementError(w, http.StatusServiceUnavailable, "Connect-script enrollment is unavailable", "service_unavailable")
+		return
+	}
+	enrollment, err := api.connect.StartEnrollment(r.Context(), id)
+	if errors.Is(err, connect.ErrNotSIWC) {
+		writeManagementError(w, http.StatusBadRequest, "This provider cannot use Sign in with ChatGPT.", "connect_unavailable")
+		return
+	}
+	if err != nil {
+		writeManagementFailure(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, struct {
+		Code             string `json:"code"`
+		ExpiresInSeconds int    `json:"expiresInSeconds"`
+		Command          string `json:"command"`
+		ScriptURL        string `json:"scriptUrl"`
+	}{
+		Code:             enrollment.Code,
+		ExpiresInSeconds: enrollment.ExpiresInSeconds,
+		Command:          "python3 gyemoim-connect.py SERVER_URL " + enrollment.Code,
+		ScriptURL:        "/api/connect/script",
+	})
+}
+
+// connectScript serves the embedded Python enrollment script as a download.
+// It sits behind the normal management session gate: the script itself is the
+// only artifact, and the enrollment code issued by startProviderConnect is the
+// actual capability for the connect flow.
+func (api *managementAPI) connectScript(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w, http.MethodGet)
+		return
+	}
+	w.Header().Set("Content-Type", "text/x-python; charset=utf-8")
+	w.Header().Set("Content-Disposition", "attachment; filename=\"gyemoim-connect.py\"")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(connect.Script())
 }
 
 func (api *managementAPI) disconnectProvider(w http.ResponseWriter, r *http.Request, id string) {

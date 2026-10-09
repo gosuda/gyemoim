@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/gosuda/gyemoim/internal/config"
+	"github.com/gosuda/gyemoim/internal/connect"
 	"github.com/gosuda/gyemoim/internal/datadir"
 	"github.com/gosuda/gyemoim/internal/gateway"
 	"github.com/gosuda/gyemoim/internal/history"
@@ -137,6 +138,7 @@ func run(args []string) error {
 
 	guard := websecurity.New(csrfToken)
 	oauthManager := siwc.NewManager(store, listenPort)
+	connectService := connect.NewService(store, oauthManager)
 	responsesAdapter := provider.NewOpenAIResponsesAdapter()
 	mux := http.NewServeMux()
 	// Browser-origin protections cover the UI and management JSON API; the
@@ -144,8 +146,20 @@ func run(args []string) error {
 	// session enforcement lives inside each handler: /api/ routes gate
 	// themselves in httpapi (login and logout opt out), while UI page requests
 	// redirect to /login. /auth/callback and /v1/ need no session.
-	mux.Handle("/api/", guard.Management(httpapi.NewManagement(store, uiHandler, oauthManager, historyRecorder)))
+	mux.Handle("/api/", guard.Management(httpapi.NewManagement(store, uiHandler, oauthManager, connectService, historyRecorder)))
 	mux.Handle("GET /auth/callback", guard.Callback(http.HandlerFunc(oauthManager.ServeCallback)))
+	// The connect endpoints sit deliberately OUTSIDE the session and CSRF
+	// guards, wrapped only in security headers: they serve the enrollment
+	// script running on the admin's browser machine, which is not a browser
+	// session and can carry neither the session cookie nor the CSRF token.
+	// The single-use enrollment code is the capability instead — 128 bits of
+	// randomness, a ~10-minute TTL, consumed at the first claim, bound to one
+	// provider. Both endpoints answer every failure with the same generic JSON
+	// error and never reveal whether a code existed, expired, or was already
+	// used; completing a flow additionally requires the single-use OAuth state
+	// recorded at claim time. See docs/web-deployment.md decision 7.
+	mux.Handle("POST /connect/claim", guard.Callback(http.HandlerFunc(connectService.ServeClaim)))
+	mux.Handle("POST /connect/complete", guard.Callback(http.HandlerFunc(connectService.ServeComplete)))
 	mux.Handle("/v1/", httpapi.NewHarness(gateway.New(store), historyRecorder, oauthManager, responsesAdapter))
 	mux.Handle("/", guard.Management(httpapi.RequireManagementSession(store, uiHandler)))
 

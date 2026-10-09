@@ -234,6 +234,23 @@ database must keep working.
   immediately, reset forces change, self/last-user rules, unauthenticated
   401); real-browser pass (login, Users panel add/delete, logout, redirect
   after logout).
+- **Step 7 — done (2026-10-09).** Remote enrollment flow (decision 7):
+  single-use enrollment codes in `internal/connect` (128-bit, ~10 min TTL,
+  consumed at claim, later start invalidates earlier unclaimed code);
+  `siwc.StartWithCallbackPort` builds the loopback redirect URI with the
+  script's port and `siwc.CompleteConnectFlow` extracts the post-callback core
+  so `ServeCallback` (browser, byte-identical behavior) and the script-facing
+  completion share one path. `POST /connect/claim` and `/connect/complete` are
+  mounted outside the session/CSRF guards by design (the script is not a
+  browser; the single-use code + single-use OAuth state are the capability;
+  every failure answers one generic error). The stdlib-only Python script
+  `internal/connect/gyemoim-connect.py` is embedded and served session-gated
+  at `GET /api/connect/script`. Verified: vet/build/py_compile clean; curl
+  pass (code lifecycle, generic-failure indistinguishability, attachment
+  headers); end-to-end script dry-run — claim → authorize URL with the
+  script's ephemeral port → simulated provider redirect → server attempts the
+  real exchange → `failed` → clean exit 1, provider stays disconnected;
+  loopback `oauth/start` unchanged; `/v1/` bearer-only unchanged.
 - **Step 6 — done (2026-10-09).** User management API under the session guard
   (every signed-in user has full rights): `GET /api/users` (hash-free),
   `POST /api/users` (username: trimmed, 1–64 Unicode characters, no whitespace
