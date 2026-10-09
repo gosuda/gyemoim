@@ -61,12 +61,16 @@ type ServiceAccount struct {
 
 // LocalKey contains only stored key metadata. The plaintext key is never persisted.
 // Label is an optional, human-chosen display name; an empty value means unlabeled.
+// LastUsedAt is flushed periodically from an in-memory tracker (never written on
+// the request path), so it lags successful authentications by up to one flush
+// interval, and nil means the key has never authenticated successfully.
 type LocalKey struct {
 	ID          string     `json:"id"`
 	AccountID   string     `json:"accountId"`
 	DisplayHint string     `json:"displayHint"`
 	Label       string     `json:"label,omitempty"`
 	CreatedAt   time.Time  `json:"createdAt"`
+	LastUsedAt  *time.Time `json:"lastUsedAt"`
 	RevokedAt   *time.Time `json:"revokedAt,omitempty"`
 }
 

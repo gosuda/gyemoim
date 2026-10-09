@@ -28,7 +28,10 @@ import (
 	"github.com/gosuda/gyemoim/internal/websecurity"
 )
 
-const shutdownTimeout = 30 * time.Second
+const (
+	shutdownTimeout       = 30 * time.Second
+	keyUsageFlushInterval = 30 * time.Second
+)
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -131,6 +134,10 @@ func run(args []string) error {
 		return fmt.Errorf("create management request token: %w", err)
 	}
 	startedAt := time.Now().UTC()
+	// Diagnostics-only in-memory tracker of successful local-key
+	// authentications; the gateway records into it on the request path and the
+	// periodic flusher below persists it to config.db off the request path.
+	keyUsage := gateway.NewKeyUsageTracker()
 	uiHandler, err := httpui.New(dataDirectory, listenPort, startedAt, csrfToken, store, historyRecorder)
 	if err != nil {
 		return err
@@ -163,8 +170,42 @@ func run(args []string) error {
 	// recorded at claim time. See docs/web-deployment.md decision 7.
 	mux.Handle("POST /connect/claim", guard.Callback(http.HandlerFunc(connectService.ServeClaim)))
 	mux.Handle("POST /connect/complete", guard.Callback(http.HandlerFunc(connectService.ServeComplete)))
-	mux.Handle("/v1/", httpapi.NewHarness(gateway.New(store), historyRecorder, oauthManager, responsesAdapter, rejectionLog))
+	mux.Handle("/v1/", httpapi.NewHarness(gateway.New(store, keyUsage), historyRecorder, oauthManager, responsesAdapter, rejectionLog))
 	mux.Handle("/", guard.Management(httpapi.RequireManagementSession(store, uiHandler)))
+
+	// Local-key last-used flusher. The gateway records successful local-key
+	// authentications only in memory (constant-time, process-local, like the
+	// rejection ring); this goroutine persists a snapshot every 30 s so the
+	// request path never writes to config.db. There is no other ticker worker
+	// in main to piggyback on — DeleteExpiredSessions runs opportunistically
+	// per login request instead — so the flusher owns a plain ticker like the
+	// history rotation checker does. Restart semantics: in-memory entries are
+	// lost at restart, so a key's stored last-used time can lag successful use
+	// by at most one flush interval; that staleness is accepted by design.
+	flushStop := make(chan struct{})
+	flushDone := make(chan struct{})
+	go func() {
+		defer close(flushDone)
+		ticker := time.NewTicker(keyUsageFlushInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				flushKeyUsage(store, keyUsage)
+			case <-flushStop:
+				return
+			}
+		}
+	}()
+	// Registered after store.Close's defer above, so it runs before it: the
+	// flusher stops and one final best-effort flush happens before the
+	// database connection closes. If this flush fails, up to one flush
+	// interval of last-used updates is lost — acceptable for diagnostics data.
+	defer func() {
+		close(flushStop)
+		<-flushDone
+		flushKeyUsage(store, keyUsage)
+	}()
 
 	serverBase, cancelServerBase := context.WithCancel(context.Background())
 	server := &http.Server{
@@ -235,4 +276,23 @@ func randomToken() (string, error) {
 		return "", err
 	}
 	return hex.EncodeToString(value[:]), nil
+}
+
+// flushKeyUsage persists one tracker snapshot off the request path. A failed
+// flush re-records its entries into the tracker (Record's forward-only rule
+// keeps any newer racing time) so the next interval retries instead of losing
+// them; the error is reported on stderr only.
+func flushKeyUsage(store *config.Store, keyUsage *gateway.KeyUsageTracker) {
+	entries := keyUsage.TakePending()
+	if len(entries) == 0 {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := store.UpdateKeysLastUsed(ctx, entries); err != nil {
+		for keyID, used := range entries {
+			keyUsage.Record(keyID, used)
+		}
+		fmt.Fprintln(os.Stderr, "gyemoim: flush local key last-used timestamps:", err)
+	}
 }

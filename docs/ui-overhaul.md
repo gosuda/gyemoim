@@ -1438,3 +1438,89 @@ admin session existed, `… · 1 active session` (singular) after that session
 logged out; a UI-created never-signed-in user read
 `Created … · Never signed in · No active sessions`; UI Delete confirm text
 unchanged and still works; browser console clean. Deviations: none.
+
+### Item 6 — Local key last-used timestamps (2026-10-09)
+
+Review S4 extension: with optional key labels in place, an admin rotating
+keys still could not tell which keys are in use — `local_keys` carried no
+usage trace and the auth path was a bare hash lookup. Fixed with the
+rejection ring's design philosophy: the request path only writes memory, a
+periodic flusher owns the one database write, and the data is explicitly
+stale-tolerant diagnostics.
+
+- **Schema v4** (`internal/config/sqlite.go`): one new migration block in the
+  existing `user_version` chain (`currentSchemaVersion = 4`) running
+  `ALTER TABLE local_keys ADD COLUMN last_used_at TEXT;` — nullable TEXT,
+  NULL = never used, RFC3339Nano UTC per the v1 convention, documented const
+  in the v3 block's style.
+- **Tracker** (new `internal/gateway/keyusage.go`): `KeyUsageTracker` is a
+  mutex-guarded `map[string]time.Time` recording the latest successful
+  authentication per key ID. `Record` is constant time with no allocation
+  beyond the map entry and only ever moves a key's time forward (a concurrent
+  out-of-order record cannot regress the in-memory value, so a flush can
+  never move the stored timestamp backwards). Hooked in
+  `gateway.Service.AuthenticateBearer` immediately after the successful
+  `LookupLocalKey` (gateway/service.go:131) — the same single hook point the
+  rejection ring uses on the failure side. Failures (malformed key, unknown
+  hash, disabled account, revoked key) return before the record. Nil-tracker
+  safe: `NewManagement`'s key-issuing-only gateway instance passes nil.
+- **Flush** (`store.UpdateKeysLastUsed`, internal/config/repository.go): takes
+  a tracker snapshot and runs one `UPDATE local_keys SET last_used_at = ?`
+  per entry inside a single transaction (entries for since-deleted keys
+  affect zero rows; this is the column's only writer). Scheduled from
+  `cmd/gyemoim/main.go` as a 30 s `time.Ticker` goroutine — noted there is no
+  other ticker worker in main to piggyback on (`DeleteExpiredSessions` runs
+  opportunistically per login request, not on a timer; the pattern followed
+  is the history recorder's own rotation ticker). A failed flush re-records
+  its entries into the tracker so the next interval retries instead of
+  dropping them. Take-and-clear snapshots mean each key is written once per
+  interval, not rewritten with its full history. Best-effort final flush on
+  graceful shutdown via a defer registered after `store.Close`'s defer (LIFO,
+  so it runs before the connection closes) — covers the signal path; a crash
+  loses up to one 30 s interval, which is the documented worst case.
+  Restart semantics: in-memory entries are lost at restart, so the stored
+  time can lag successful use by at most one flush interval — accepted and
+  documented in the code comments (main.go and keyusage.go).
+- **API**: `config.LocalKey` gains `LastUsedAt *time.Time`
+  (`"lastUsedAt": null` when never used); `ListLocalKeys` selects the column
+  and `scanLocalKey` decodes it, so the key list in account details carries
+  it. `LookupLocalKey` deliberately does not read it — no extra work on the
+  auth path. `lastUsedAt` survives revocation by design (historical fact;
+  revocation writes only `revoked_at`).
+- **UI** (`pages/service-accounts.js`, one line): each key row's muted info
+  line now ends with `· Last used <formatUTC>` (explicit UTC) or `· Never
+  used`; revoked rows keep their `.key-row-revoked` muting.
+
+Constraints held: no `config.db` write on the request path (the only writer
+is the flusher/shutdown flush), recording and the admission semaphore are
+untouched, and the tracker is process-local like the rejection ring.
+
+Verification: `gofmt -l` clean on all changed Go files; `go vet ./...` OK;
+`CGO_ENABLED=0 go build -trimpath` OK; `./scripts/build-release.sh` builds
+all four targets; `node --check` on pages/service-accounts.js OK. Migration:
+fresh-dir start writes `user_version = 4` with `last_used_at` present in
+`local_keys` (throwaway `go run` probe reading `PRAGMA user_version` +
+`pragma_table_info`, deleted afterwards); the upgrade path was exercised for
+real by building the committed HEAD binary from a `git archive` extract in
+/tmp (no worktree/branch), seeding a v3 database (admin + service account +
+issued key), then starting the new binary on the same data directory:
+version 3 → 4, key still authenticates on `/v1/models` with 200, and its
+`lastUsedAt` flushed correctly afterwards — no re-bootstrap. curl pass on a
+fresh instance: 50 parallel `/v1/models` calls with one key → 50×200, one
+tracker entry by construction (single key ID), one flush UPDATE, and the
+account key list shows that key `lastUsedAt` set after the 30 s tick, a
+never-used key `"lastUsedAt": null`, and a used-then-revoked key keeps its
+`lastUsedAt` (401 after revoke, timestamp unchanged). Later use advances the
+stored time across flushes (13:56:59 → 13:58:00) with no regression.
+Shutdown flush proven by discriminator: a `/v1/models` call at 13:58:00
+followed immediately by SIGTERM still persisted
+`lastUsedAt 13:58:00.337Z` (the previous periodic flush had been ~30 s
+earlier, so without the shutdown flush the value would have stayed at the
+older timestamp). Browser pass (same instance): expanded account detail
+shows "Last used Oct 9, 2026, 1:58:00 PM UTC" on the used key, "Never used"
+on the unused key, and the revoked row stays `.key-row-revoked`-muted with
+its historical "Last used" text; browser console clean. Deviations: the
+upgrade-path seeding reused the admin bootstrap rather than a second user
+(equivalent coverage), and the pre-existing `issued <toLocaleString>`
+rendering in the same line was left untouched (established pre-overhaul
+behavior, not in this item's scope).

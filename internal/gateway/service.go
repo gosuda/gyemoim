@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/gosuda/gyemoim/internal/config"
 )
@@ -98,10 +99,14 @@ type ResolvedRoute struct {
 type Service struct {
 	store    *config.Store
 	strategy RoutingStrategy
+	// usage records successful local-key authentications in memory for the
+	// periodic last-used flush. Optional and nil-safe; recording here is a
+	// constant-time in-memory write and never blocks or touches the database.
+	usage *KeyUsageTracker
 }
 
-func New(store *config.Store) *Service {
-	return &Service{store: store, strategy: SingleTargetStrategy{}}
+func New(store *config.Store, usage *KeyUsageTracker) *Service {
+	return &Service{store: store, strategy: SingleTargetStrategy{}, usage: usage}
 }
 
 // AuthenticateBearer accepts exactly an Authorization value of the form
@@ -122,6 +127,9 @@ func (s *Service) AuthenticateBearer(ctx context.Context, authorization string) 
 	if err != nil {
 		return Identity{}, fmt.Errorf("authenticate local ServiceAccount key: %w", err)
 	}
+	// Successful authentication only; failures above return before this
+	// constant-time in-memory record (see KeyUsageTracker).
+	s.usage.Record(key.ID, time.Now().UTC())
 	return Identity{Account: account, KeyID: key.ID}, nil
 }
 

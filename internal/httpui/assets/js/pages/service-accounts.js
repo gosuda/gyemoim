@@ -217,7 +217,7 @@ function renderAccountDetails(account, details, panel, keys, modelIds) {
       } else {
         keyInfo.append(element("strong", "", key.displayHint));
       }
-      keyInfo.append(element("span", "muted", `${revoked ? "Revoked" : "Active"} · issued ${new Date(key.createdAt).toLocaleString()}`));
+      keyInfo.append(element("span", "muted", `${revoked ? "Revoked" : "Active"} · issued ${new Date(key.createdAt).toLocaleString()} · ${key.lastUsedAt ? `Last used ${formatUTC(key.lastUsedAt)}` : "Never used"}`));
       row.append(keyInfo);
       if (!revoked) {
         const revokeButton = button("Revoke", "danger quiet small", () => {

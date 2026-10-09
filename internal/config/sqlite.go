@@ -14,7 +14,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const currentSchemaVersion = 3
+const currentSchemaVersion = 4
 
 // Store owns the configuration database. A single connection makes connection-local
 // SQLite settings consistent, while the DSN reapplies them if database/sql reconnects.
@@ -131,6 +131,14 @@ func (s *Store) migrate(ctx context.Context) error {
 			return fmt.Errorf("set configuration schema version: %w", err)
 		}
 	}
+	if version <= 3 {
+		if _, err := tx.ExecContext(ctx, keyLastUsedSchema); err != nil {
+			return fmt.Errorf("create key last-used schema: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, "PRAGMA user_version = 4"); err != nil {
+			return fmt.Errorf("set configuration schema version: %w", err)
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit configuration schema migration: %w", err)
 	}
@@ -235,6 +243,15 @@ CREATE INDEX sessions_by_user ON sessions(user_id, expires_at);
 const keyLabelAndLastLoginSchema = `
 ALTER TABLE local_keys ADD COLUMN label TEXT;
 ALTER TABLE users ADD COLUMN last_login_at TEXT;
+`
+
+// keyLastUsedSchema adds the local-key last-used timestamp (schema v4). The
+// column is nullable TEXT: existing rows keep NULL, meaning "never used". No
+// timestamp convention changes — new values use the v1 RFC3339Nano UTC TEXT
+// format. Values are written only by the periodic in-memory-tracker flush
+// (gateway.KeyUsageTracker), never on the request path.
+const keyLastUsedSchema = `
+ALTER TABLE local_keys ADD COLUMN last_used_at TEXT;
 `
 
 func nowText() (time.Time, string) {

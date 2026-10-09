@@ -45,7 +45,7 @@ type managementAPI struct {
 // routes fall through to the embedded UI, which also owns /api/status. The
 // rejection ring is the same instance the harness records into.
 func NewManagement(store *config.Store, fallback http.Handler, oauthManager *siwc.Manager, connectService *connect.Service, recorder *history.Recorder, rejections *RejectionLog) http.Handler {
-	return &managementAPI{store: store, gateway: gateway.New(store), fallback: fallback, oauth: oauthManager, connect: connectService, history: history.NewQueryService(recorder), storage: recorder, rejections: rejections}
+	return &managementAPI{store: store, gateway: gateway.New(store, nil), fallback: fallback, oauth: oauthManager, connect: connectService, history: history.NewQueryService(recorder), storage: recorder, rejections: rejections}
 }
 
 func (api *managementAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {

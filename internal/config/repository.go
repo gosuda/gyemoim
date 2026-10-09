@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 )
 
 type scanner interface {
@@ -451,7 +452,7 @@ func (s *Store) CreateLocalKey(ctx context.Context, accountID string, hash []byt
 
 // ListLocalKeys returns key metadata for one account without returning any key hashes.
 func (s *Store) ListLocalKeys(ctx context.Context, accountID string) ([]LocalKey, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, account_id, display_hint, label, created_at, revoked_at FROM local_keys WHERE account_id = ? ORDER BY created_at, id`, accountID)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, account_id, display_hint, label, created_at, last_used_at, revoked_at FROM local_keys WHERE account_id = ? ORDER BY created_at, id`, accountID)
 	if err != nil {
 		return nil, fmt.Errorf("list local keys: %w", err)
 	}
@@ -514,6 +515,33 @@ func (s *Store) RevokeLocalKey(ctx context.Context, keyID string) error {
 	return requireAffected(result, "local key", keyID)
 }
 
+// UpdateKeysLastUsed persists successful-authentication timestamps collected by
+// gateway.KeyUsageTracker, one UPDATE per entry inside a single transaction.
+// Entries for keys that no longer exist (deleted accounts cascade their keys
+// away) simply affect zero rows. Callers snapshot the tracker before calling,
+// so each entry is that key's latest in-memory time and repeated flushes never
+// move a key's stored time backwards; this is the only writer of the column.
+// This runs on the periodic flush and shutdown, never on the request path.
+func (s *Store) UpdateKeysLastUsed(ctx context.Context, lastUsed map[string]time.Time) error {
+	if len(lastUsed) == 0 {
+		return nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin local key last-used update: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	for keyID, used := range lastUsed {
+		if _, err := tx.ExecContext(ctx, `UPDATE local_keys SET last_used_at = ? WHERE id = ?`, nullableTime(used), keyID); err != nil {
+			return fmt.Errorf("update local key last-used time: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit local key last-used update: %w", err)
+	}
+	return nil
+}
+
 func scanServiceAccount(row scanner) (ServiceAccount, error) {
 	var account ServiceAccount
 	var enabled int
@@ -535,8 +563,8 @@ func scanServiceAccount(row scanner) (ServiceAccount, error) {
 func scanLocalKey(row scanner) (LocalKey, error) {
 	var key LocalKey
 	var createdAt string
-	var label, revokedAt sql.NullString
-	if err := row.Scan(&key.ID, &key.AccountID, &key.DisplayHint, &label, &createdAt, &revokedAt); err != nil {
+	var label, lastUsedAt, revokedAt sql.NullString
+	if err := row.Scan(&key.ID, &key.AccountID, &key.DisplayHint, &label, &createdAt, &lastUsedAt, &revokedAt); err != nil {
 		return LocalKey{}, err
 	}
 	if label.Valid {
@@ -545,6 +573,13 @@ func scanLocalKey(row scanner) (LocalKey, error) {
 	var err error
 	if key.CreatedAt, err = readTime(createdAt); err != nil {
 		return LocalKey{}, err
+	}
+	used, err := readNullableTime(lastUsedAt)
+	if err != nil {
+		return LocalKey{}, err
+	}
+	if !used.IsZero() {
+		key.LastUsedAt = &used
 	}
 	if revokedAt.Valid {
 		t, err := readTime(revokedAt.String)
