@@ -134,6 +134,12 @@ per frame, not per stream. Event records are synced by the next durable fence or
   written by schema 2 so attribution scans can read end records without joining request
   starts or transmissions. `provider` is absent only when no attempt was transmitted.
 - `upstream_request_id`: safe provider request ID, separate from the gateway `request_id`.
+- `dropped_fields`: optional list of the known-unsupported request fields and tool
+  entries the gateway removed while preparing the effective upstream request —
+  field names (`temperature`, `connectors`, …) plus `<container>.<tool-type>` entries
+  (`tools.mcp`, `additional_tools.image_generation`) for removed tool definitions.
+  Absent when nothing was dropped; the raw incoming and effective request bodies in
+  `request_start`/`upstream_transmission` remain the full evidence.
 - `timings`: offsets `authentication_preparation_ns`, `connection_requested_ns`,
   `connection_established_ns`, `request_transmission_ns`, `first_event_ns`,
   `first_output_ns`, `stream_completion_ns`, `downstream_delivery_ns`, and the optional

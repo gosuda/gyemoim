@@ -23,21 +23,30 @@ it is `false`. `store:true` is accepted and normalized to false. The incoming
 stream value is retained in `PreparedRequest.ClientStream` for downstream delivery.
 
 `input` must be an array containing the complete conversation. Input strings are
-rejected instead of being rewritten. Message items with `role:"system"` are
-rejected; `instructions` and developer messages are allowed. The adapter rejects
-these fields whenever they are present: `background`, `conversation`,
-`max_output_tokens`, `max_tool_calls`, `metadata`, `moderation`, `multi_agent`,
-`prompt`, `prompt_cache_retention`, `previous_response_id`, `safety_identifier`,
-`temperature`, `top_logprobs`, `top_p`, `truncation`, `user`, and
-`programmatic_tool_calling`.
+rejected instead of being rewritten. Message items with `role:"system"` are rewritten
+to `developer` items in place, preserving order; `instructions` and developer messages
+are allowed. Known-unsupported fields are silently removed from the effective upstream
+request whenever they are present — `background`, `connectors`, `max_output_tokens`,
+`max_tool_calls`, `metadata`, `moderation`, `multi_agent`, `prompt`,
+`prompt_cache_retention`, `safety_identifier`, `temperature`, `top_logprobs`, `top_p`,
+`truncation`, `user`, and `programmatic_tool_calling` — and the removals are reported
+in `PreparedRequest.DroppedFields` so the executor can record them in history
+(`request_end.dropped_fields`). Two stateful references are never dropped:
+`previous_response_id` and `conversation` produce explicit 400 errors, because the
+SIWC backend forbids server-side response storage and a silent drop would lose
+conversation context without diagnostics.
 
-Known unsupported tool types are rejected in `tools`, `additional_tools`, and
-nested namespace definitions: `image_generation`, `file_search`, `code_interpreter`,
-`computer`, `computer_use`, `computer_use_preview`, MCP/hosted-MCP, connector, and
-`tool_search` tools. Audio and video input item types are rejected. File and image
-inputs, including references to existing files, are not rejected here; this adapter
-does not call the Files API. Other tool types and unknown request fields are left to
-the upstream API to validate.
+Known unsupported tool types are removed from `tools`, `additional_tools`, and nested
+namespace definitions instead of being rejected: `image_generation`, `file_search`,
+`code_interpreter`, `computer`, `computer_use`, `computer_use_preview`,
+MCP/hosted-MCP, connector, and `tool_search` tools. Remaining tools are forwarded; if
+every entry is removed the container field is dropped entirely and the request is
+forwarded without tools. Each removal is recorded in `DroppedFields` as
+`tools.<type>` or `additional_tools.<type>`. Audio and video input item types are
+still rejected explicitly. File and image inputs, including references to existing
+files, are not rejected here; this adapter does not call the Files API. Other tool
+types and unknown request fields are left to the upstream API to validate — only
+known-unsupported entries are removed, so an unknown field is never silently dropped.
 
 ## HTTP and response lifecycle
 

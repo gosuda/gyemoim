@@ -248,9 +248,15 @@ func (api *harnessAPI) serveResponses(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Request-ID", handle.ID())
 
 	ended := false
+	var droppedFields []string
 	finish := func(outcome string, status int, safeError string, usage *history.Usage, timings history.Timings, details history.EndDetails) {
 		if ended {
 			return
+		}
+		// Classified drops from request preparation are recorded on every end
+		// outcome; sites pass provider details and the merge keeps them intact.
+		if len(droppedFields) > 0 {
+			details.DroppedFields = droppedFields
 		}
 		_ = handle.EndWithDetails(outcome, status, safeError, usage, timings, details)
 		ended = true
@@ -283,6 +289,7 @@ func (api *harnessAPI) serveResponses(w http.ResponseWriter, r *http.Request) {
 		writeHarnessError(w, http.StatusBadRequest, "request could not be prepared for the provider", "invalid_request_error", "invalid_request")
 		return
 	}
+	droppedFields = prepared.DroppedFields
 	managedToken, err := preparation.AccessToken(r.Context())
 	authPreparationNS := handle.ElapsedNS()
 	timings := history.Timings{AuthenticationPreparationNS: &authPreparationNS}

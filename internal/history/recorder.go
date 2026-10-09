@@ -835,9 +835,27 @@ func (h *Request) Event(frame []byte, eventName string) error {
 }
 
 // EndDetails contains small, safe upstream metadata for one request summary.
-// Error bodies belong in an upstream_response record instead.
+// Error bodies belong in an upstream_response record instead. DroppedFields is
+// the classified drop list from request preparation: removed field names plus
+// "<container>.<tool-type>" entries for removed tool definitions.
 type EndDetails struct {
 	UpstreamRequestID string
+	DroppedFields     []string
+}
+
+// validDroppedFields bounds the drop list: a small number of short field names.
+// The list is gateway-generated; the bounds keep a hostile end record from
+// inflating the file, and empty entries carry no information.
+func validDroppedFields(fields []string) bool {
+	if len(fields) > 64 {
+		return false
+	}
+	for _, field := range fields {
+		if len(field) == 0 || len(field) > 128 || !utf8.ValidString(field) {
+			return false
+		}
+	}
+	return true
 }
 
 // End records a final request outcome and always unregisters the handle. Outcomes
@@ -859,7 +877,7 @@ func (h *Request) EndWithDetails(outcome string, httpStatus int, safeError strin
 	if h.ended {
 		return nil
 	}
-	if !validUpstreamRequestID(details.UpstreamRequestID) || !validOutcome(outcome) || httpStatus < 0 || httpStatus > 599 || len(safeError) > maxSafeError || !utf8.ValidString(safeError) || !validTimings(timings) || !validUsage(usage) {
+	if !validUpstreamRequestID(details.UpstreamRequestID) || !validOutcome(outcome) || httpStatus < 0 || httpStatus > 599 || len(safeError) > maxSafeError || !utf8.ValidString(safeError) || !validTimings(timings) || !validUsage(usage) || !validDroppedFields(details.DroppedFields) {
 		writeErr := r.writeEndLocked(h, "incomplete", 0, "request ended with invalid final details", nil, Timings{}, EndDetails{})
 		h.ended = true
 		delete(r.active, h.id)
@@ -902,6 +920,7 @@ func (r *Recorder) writeEndLocked(h *Request, outcome string, httpStatus int, sa
 		Model:             h.model,
 		Provider:          h.lastProvider,
 		UpstreamRequestID: details.UpstreamRequestID,
+		DroppedFields:     details.DroppedFields,
 	}
 	return r.writeLocked(line, true)
 }
@@ -1165,6 +1184,7 @@ type endLine struct {
 	Model             ModelSnapshot          `json:"model"`
 	Provider          *ProviderSnapshot      `json:"provider,omitempty"`
 	UpstreamRequestID string                 `json:"upstream_request_id,omitempty"`
+	DroppedFields     []string               `json:"dropped_fields,omitempty"`
 }
 
 func validRequestID(id string) bool {

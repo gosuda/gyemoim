@@ -67,6 +67,7 @@ type RequestSummary struct {
 	UpstreamRequestID string                 `json:"upstreamRequestId,omitempty"`
 	Attempts          int                    `json:"upstreamAttempts"`
 	SafeError         string                 `json:"safeError,omitempty"`
+	DroppedFields     []string               `json:"droppedFields,omitempty"`
 	Usage             *Usage                 `json:"usage"`
 	Timings           Timings                `json:"timings"`
 	Active            bool                   `json:"active"`
@@ -78,7 +79,7 @@ func summaryFromEnd(record Record) RequestSummary {
 		RequestID: record.RequestID, StartedAt: record.StartedAt, Outcome: record.Outcome,
 		DurationNS: record.ElapsedNS,
 		HTTPStatus: record.HTTPStatus, UpstreamRequestID: record.UpstreamRequestID,
-		Attempts: record.Attempt, SafeError: record.SafeError, Usage: record.Usage, Timings: record.Timings,
+		Attempts: record.Attempt, SafeError: record.SafeError, DroppedFields: record.DroppedFields, Usage: record.Usage, Timings: record.Timings,
 	}
 	if record.ServiceAccount != nil {
 		summary.ServiceAccount = *record.ServiceAccount
@@ -525,7 +526,7 @@ func (q *QueryService) Detail(ctx context.Context, requestID string) (RequestDet
 			detail.ResponseCount++
 			if len(detail.Responses) < MaxDetailResponses {
 				detail.Responses = append(detail.Responses, ResponseDetail{Attempt: record.Attempt, HTTPStatus: record.HTTPStatus,
-					ContentType: record.UpstreamContentType,
+					ContentType:       record.UpstreamContentType,
 					UpstreamRequestID: record.UpstreamRequestID, BodyBytes: int64(len(record.UpstreamResponseBody)),
 					BodyTruncated: record.UpstreamResponseBodyTruncated, BodyReadFailed: record.UpstreamResponseBodyReadFailed,
 					BodyURL: fmt.Sprintf("/api/requests/%s/body?kind=http_response&attempt=%d", requestID, record.Attempt)})
@@ -590,16 +591,16 @@ type EventPage struct {
 }
 
 type EventItem struct {
-	Sequence          uint64 `json:"sequence"`
-	ElapsedNS         int64  `json:"elapsedNs"`
-	Attempt           int    `json:"attempt"`
-	EventName         string `json:"eventName,omitempty"`
-	EventNameBytes    int    `json:"eventNameBytes"`
-	EventNameTruncated bool  `json:"eventNameTruncated"`
-	RawBytes          int    `json:"rawBytes"`
-	RawBase64         string `json:"rawBase64,omitempty"`
-	RawOmitted        string `json:"rawOmitted,omitempty"`
-	RawURL            string `json:"rawUrl"`
+	Sequence           uint64 `json:"sequence"`
+	ElapsedNS          int64  `json:"elapsedNs"`
+	Attempt            int    `json:"attempt"`
+	EventName          string `json:"eventName,omitempty"`
+	EventNameBytes     int    `json:"eventNameBytes"`
+	EventNameTruncated bool   `json:"eventNameTruncated"`
+	RawBytes           int    `json:"rawBytes"`
+	RawBase64          string `json:"rawBase64,omitempty"`
+	RawOmitted         string `json:"rawOmitted,omitempty"`
+	RawURL             string `json:"rawUrl"`
 }
 
 func eventLess(a, b EventItem) bool {
@@ -796,25 +797,25 @@ type UsageCount struct {
 }
 
 type UsageGroup struct {
-	AccountID         string           `json:"accountId,omitempty"`
-	AccountName       string           `json:"accountName,omitempty"`
-	ModelID           string           `json:"modelId,omitempty"`
-	ModelName         string           `json:"modelName,omitempty"`
-	ProviderID        string           `json:"providerId,omitempty"`
-	ProviderName      string           `json:"providerName,omitempty"`
-	UpstreamModel     string           `json:"upstreamModel,omitempty"`
-	ClientRequests    int64            `json:"clientRequests"`
-	UpstreamAttempts  int64            `json:"upstreamAttempts"`
-	Outcomes          map[string]int64 `json:"outcomes"`
-	InputTokens       UsageCount       `json:"inputTokens"`
-	OutputTokens      UsageCount       `json:"outputTokens"`
-	CachedInputTokens UsageCount       `json:"cachedInputTokens"`
-	ReasoningTokens   UsageCount       `json:"reasoningOutputTokens"`
-	CacheRatio        *float64         `json:"cacheRatio"`
-	CacheRatioUnavailableReason string `json:"cacheRatioUnavailableReason,omitempty"`
-	cacheEligible     int64
-	cacheUnavailable  int64
-	cacheSubsetInvalid int64
+	AccountID                   string           `json:"accountId,omitempty"`
+	AccountName                 string           `json:"accountName,omitempty"`
+	ModelID                     string           `json:"modelId,omitempty"`
+	ModelName                   string           `json:"modelName,omitempty"`
+	ProviderID                  string           `json:"providerId,omitempty"`
+	ProviderName                string           `json:"providerName,omitempty"`
+	UpstreamModel               string           `json:"upstreamModel,omitempty"`
+	ClientRequests              int64            `json:"clientRequests"`
+	UpstreamAttempts            int64            `json:"upstreamAttempts"`
+	Outcomes                    map[string]int64 `json:"outcomes"`
+	InputTokens                 UsageCount       `json:"inputTokens"`
+	OutputTokens                UsageCount       `json:"outputTokens"`
+	CachedInputTokens           UsageCount       `json:"cachedInputTokens"`
+	ReasoningTokens             UsageCount       `json:"reasoningOutputTokens"`
+	CacheRatio                  *float64         `json:"cacheRatio"`
+	CacheRatioUnavailableReason string           `json:"cacheRatioUnavailableReason,omitempty"`
+	cacheEligible               int64
+	cacheUnavailable            int64
+	cacheSubsetInvalid          int64
 }
 
 type UsageReport struct {

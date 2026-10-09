@@ -14,7 +14,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptrace"
-	"sort"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -53,9 +53,14 @@ type Adapter interface {
 // PreparedRequest records the client streaming preference and the complete,
 // normalized request sent upstream. EffectiveJSON is JSON object data and is safe
 // for the history transmission record; it contains no HTTP authorization header.
+// DroppedFields lists the known-unsupported request fields and tool entries that
+// were removed from the effective request (field names, plus "tools.<type>" /
+// "additional_tools.<type>" for removed tool entries) so the executor can record
+// the classified drops in history.
 type PreparedRequest struct {
 	EffectiveJSON json.RawMessage
 	ClientStream  bool
+	DroppedFields []string
 }
 
 // CapabilityError is a client-facing incompatibility in the SIWC Responses
@@ -135,15 +140,27 @@ func (a *OpenAIResponsesAdapter) Prepare(upstreamModel string, incoming json.Raw
 		}
 	}
 
-	if raw, exists := fields["input"]; !exists {
+	if _, exists := fields["previous_response_id"]; exists {
+		return PreparedRequest{}, capability("previous_response_id", "unsupported_parameter", "The request uses previous_response_id, but server-side response storage is unavailable; include the complete conversation in input instead.")
+	}
+	if _, exists := fields["conversation"]; exists {
+		return PreparedRequest{}, capability("conversation", "unsupported_parameter", "The request uses conversation, but server-side conversation state is unavailable; include the complete conversation in input instead.")
+	}
+
+	var dropped []string
+	inputRaw, exists := fields["input"]
+	if !exists {
 		return PreparedRequest{}, capability("input", "missing_required_parameter", "Input must be a complete array of conversation items.")
-	} else {
-		trimmed := bytes.TrimSpace(raw)
+	}
+	inputJSON := inputRaw
+	inputChanged := false
+	{
+		trimmed := bytes.TrimSpace(inputRaw)
 		if len(trimmed) == 0 || trimmed[0] != '[' {
 			return PreparedRequest{}, capability("input", "input_must_be_array", "Input must be a complete array of conversation items.")
 		}
 		var items []json.RawMessage
-		if err := json.Unmarshal(raw, &items); err != nil || items == nil {
+		if err := json.Unmarshal(inputRaw, &items); err != nil || items == nil {
 			return PreparedRequest{}, capability("input", "input_must_be_array", "Input must be a complete array of conversation items.")
 		}
 		for index, item := range items {
@@ -151,48 +168,83 @@ func (a *OpenAIResponsesAdapter) Prepare(upstreamModel string, incoming json.Raw
 			if json.Unmarshal(item, &message) != nil || message == nil {
 				continue // The upstream API owns validation of other item shapes.
 			}
-			if role, ok := message["role"]; ok {
-				var roleName string
-				if json.Unmarshal(role, &roleName) == nil && roleName == "system" {
-					return PreparedRequest{}, capability("input", "unsupported_value", "System role message items are not supported; use instructions or developer messages.")
-				}
-			}
 			if inputUsesAudioOrVideo(message) {
 				return PreparedRequest{}, capability("input", "unsupported_value", "Audio and video input are not supported by this provider adapter.")
 			}
+			if role, ok := message["role"]; ok {
+				var roleName string
+				if json.Unmarshal(role, &roleName) == nil && roleName == "system" {
+					// The SIWC backend rejects explicit system items; the rewrite to
+					// developer is the standard lossless adaptation.
+					message["role"] = json.RawMessage(`"developer"`)
+					rewritten, err := json.Marshal(message)
+					if err != nil {
+						return PreparedRequest{}, capability("input", "invalid_json", "The request body could not be prepared.")
+					}
+					items[index] = rewritten
+					inputChanged = true
+				}
+			}
 			var itemType string
 			if rawType, ok := message["type"]; ok && json.Unmarshal(rawType, &itemType) == nil && itemType == "additional_tools" {
-				if err := checkToolDefinitions(item, "input["+itoa(index)+"].additional_tools"); err != nil {
-					return PreparedRequest{}, err
+				forward, removeContainer := stripUnsupportedTools(message["additional_tools"], "additional_tools", &dropped)
+				if removeContainer || forward != nil {
+					if removeContainer {
+						delete(message, "additional_tools")
+						dropped = append(dropped, "additional_tools")
+					} else {
+						message["additional_tools"] = forward
+					}
+					rewritten, err := json.Marshal(message)
+					if err != nil {
+						return PreparedRequest{}, capability("input", "invalid_json", "The request body could not be prepared.")
+					}
+					items[index] = rewritten
+					inputChanged = true
 				}
 			}
 		}
-	}
-
-	for _, field := range deniedFields {
-		if _, exists := fields[field]; exists {
-			return PreparedRequest{}, capability(field, "unsupported_parameter", "The request uses a parameter that is unavailable with Sign in with ChatGPT.")
-		}
-	}
-	if _, exists := fields["connectors"]; exists {
-		return PreparedRequest{}, capability("connectors", "unsupported_tool", "Connector tools are not supported by this provider adapter.")
-	}
-	if raw, exists := fields["tools"]; exists {
-		if err := checkToolDefinitions(raw, "tools"); err != nil {
-			return PreparedRequest{}, err
-		}
-	}
-	if raw, exists := fields["additional_tools"]; exists {
-		if err := checkToolDefinitions(raw, "additional_tools"); err != nil {
-			return PreparedRequest{}, err
+		if inputChanged {
+			rewritten, err := json.Marshal(items)
+			if err != nil {
+				return PreparedRequest{}, capability("input", "invalid_json", "The request body could not be prepared.")
+			}
+			inputJSON = rewritten
 		}
 	}
 
 	// Copy the raw values so unknown fields, nested data, and flat function/custom
-	// tools pass through unchanged. Only the documented endpoint adaptations apply.
+	// tools pass through unchanged. Known-unsupported fields and tool entries are
+	// removed here; everything else stays upstream-owned.
 	effective := make(map[string]json.RawMessage, len(fields)+1)
 	for key, value := range fields {
 		effective[key] = value
+	}
+	effective["input"] = inputJSON
+	for _, field := range droppedFields {
+		if _, exists := effective[field]; exists {
+			delete(effective, field)
+			dropped = append(dropped, field)
+		}
+	}
+	if _, exists := effective["connectors"]; exists {
+		delete(effective, "connectors")
+		dropped = append(dropped, "connectors")
+	}
+	for _, container := range []string{"tools", "additional_tools"} {
+		raw, exists := effective[container]
+		if !exists {
+			continue
+		}
+		forward, removeContainer := stripUnsupportedTools(raw, container, &dropped)
+		if removeContainer {
+			delete(effective, container)
+			dropped = append(dropped, container)
+			continue
+		}
+		if forward != nil {
+			effective[container] = forward
+		}
 	}
 	upstreamModelJSON, _ := json.Marshal(upstreamModel)
 	effective["model"] = upstreamModelJSON
@@ -202,7 +254,7 @@ func (a *OpenAIResponsesAdapter) Prepare(upstreamModel string, incoming json.Raw
 	if err != nil {
 		return PreparedRequest{}, capability("", "invalid_json", "The request body could not be prepared.")
 	}
-	return PreparedRequest{EffectiveJSON: payload, ClientStream: clientStream}, nil
+	return PreparedRequest{EffectiveJSON: payload, ClientStream: clientStream, DroppedFields: dropped}, nil
 }
 
 // Send returns response metadata for every received HTTP status. For an unexpected
@@ -319,11 +371,128 @@ func (a *OpenAIResponsesAdapter) Send(ctx context.Context, managedToken, gateway
 	return result, nil
 }
 
-var deniedFields = []string{
-	"background", "conversation", "max_output_tokens", "max_tool_calls", "metadata",
-	"moderation", "multi_agent", "prompt", "prompt_cache_retention", "previous_response_id",
-	"safety_identifier", "temperature", "top_logprobs", "top_p", "truncation", "user",
-	"programmatic_tool_calling",
+// droppedFields are known-unsupported request fields that are silently removed
+// from the effective upstream request and recorded in history
+// (request_end.dropped_fields). They affect quality, attribution, or
+// server-side bookkeeping only. Stateful references (previous_response_id,
+// conversation) are intentionally absent: they produce explicit errors because
+// a silent drop would lose conversation context without diagnostics.
+var droppedFields = []string{
+	"background", "max_output_tokens", "max_tool_calls", "metadata",
+	"moderation", "multi_agent", "prompt", "prompt_cache_retention",
+	"programmatic_tool_calling", "safety_identifier", "temperature",
+	"top_logprobs", "top_p", "truncation", "user",
+}
+
+// stripUnsupportedTools removes tool entries whose type is in
+// unsupportedToolTypes from a tools container (array, namespace map, or nested
+// definitions). It returns the value to forward — nil when nothing changed and
+// the original raw value must be kept — and whether every entry was dropped so
+// the whole container field must be removed. Removed tool types are recorded in
+// dropped as "<field>.<type>", deduplicated in first-seen order.
+func stripUnsupportedTools(raw json.RawMessage, fieldName string, dropped *[]string) (forward json.RawMessage, removeContainer bool) {
+	if len(raw) == 0 {
+		return nil, false
+	}
+	var value any
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return nil, false // The upstream API owns validation of malformed shapes.
+	}
+	seen := make(map[string]struct{})
+	result, removed, changed := stripToolValue(value, fieldName, dropped, seen)
+	if removed {
+		return nil, true
+	}
+	if !changed {
+		return nil, false
+	}
+	forward, err := json.Marshal(result)
+	if err != nil {
+		return nil, false // Fall back to the raw value; upstream owns validation.
+	}
+	return forward, false
+}
+
+// stripToolValue filters unsupported tool entries recursively. It returns the
+// filtered value, whether the caller must drop this entry from its parent
+// container, and whether the value changed at all. Non-container values,
+// unsupported tool entries, and untouched containers pass through unchanged so
+// unknown tool shapes stay upstream-owned.
+func stripToolValue(value any, fieldName string, dropped *[]string, seen map[string]struct{}) (result any, removed bool, changed bool) {
+	switch typed := value.(type) {
+	case []any:
+		kept := make([]any, 0, len(typed))
+		for _, child := range typed {
+			filtered, childRemoved, childChanged := stripToolValue(child, fieldName, dropped, seen)
+			if childRemoved {
+				changed = true
+				continue
+			}
+			if childChanged || !reflect.DeepEqual(filtered, child) {
+				changed = true
+			}
+			kept = append(kept, filtered)
+		}
+		if len(kept) == 0 && len(typed) > 0 {
+			return nil, true, true
+		}
+		if !changed {
+			return typed, false, false
+		}
+		return kept, false, true
+	case map[string]any:
+		if rawType, ok := typed["type"]; ok {
+			if toolType, isString := rawType.(string); isString {
+				normalized := strings.ToLower(toolType)
+				if _, unsupported := unsupportedToolTypes[normalized]; unsupported {
+					recordDroppedTool(fieldName, normalized, dropped, seen)
+					return nil, true, true
+				}
+			}
+		}
+		filtered := make(map[string]any, len(typed))
+		for key, child := range typed {
+			if _, isNested := nestedToolContainers[key]; isNested {
+				nested, nestedRemoved, nestedChanged := stripToolValue(child, fieldName, dropped, seen)
+				if nestedRemoved {
+					changed = true
+					continue
+				}
+				if nestedChanged || !reflect.DeepEqual(nested, child) {
+					changed = true
+				}
+				filtered[key] = nested
+				continue
+			}
+			filtered[key] = child
+		}
+		if len(filtered) == 0 && len(typed) > 0 {
+			// A namespace whose definitions were all dropped, or an otherwise
+			// emptied container, is removed from its parent.
+			return nil, true, true
+		}
+		if !changed {
+			return typed, false, false
+		}
+		return filtered, false, true
+	default:
+		return value, false, false
+	}
+}
+
+// nestedToolContainers are the keys inside a tool definition that can hold
+// further tool definitions.
+var nestedToolContainers = map[string]struct{}{
+	"namespace": {}, "additional_tools": {}, "tools": {}, "connectors": {},
+}
+
+func recordDroppedTool(fieldName, toolType string, dropped *[]string, seen map[string]struct{}) {
+	entry := fieldName + "." + toolType
+	if _, duplicate := seen[entry]; duplicate {
+		return
+	}
+	seen[entry] = struct{}{}
+	*dropped = append(*dropped, entry)
 }
 
 func capability(param, code, message string) *CapabilityError {
@@ -612,55 +781,6 @@ var unsupportedToolTypes = map[string]struct{}{
 	"image_generation": {}, "file_search": {}, "code_interpreter": {},
 	"computer": {}, "computer_use": {}, "computer_use_preview": {},
 	"mcp": {}, "hosted_mcp": {}, "hostedmcp": {}, "connector": {}, "connectors": {}, "tool_search": {},
-}
-
-func checkToolDefinitions(raw json.RawMessage, path string) *CapabilityError {
-	var value any
-	if json.Unmarshal(raw, &value) != nil {
-		return nil // Let the upstream API validate malformed tool container shapes.
-	}
-	return walkToolDefinition(value, path)
-}
-
-func walkToolDefinition(value any, path string) *CapabilityError {
-	switch item := value.(type) {
-	case []any:
-		for i, child := range item {
-			if err := walkToolDefinition(child, path+"["+itoa(i)+"]"); err != nil {
-				return err
-			}
-		}
-	case map[string]any:
-		rawType, typePresent := item["type"]
-		toolType, typeIsString := rawType.(string)
-		if typeIsString {
-			if _, unsupported := unsupportedToolTypes[strings.ToLower(toolType)]; unsupported {
-				return capability(path+".type", "unsupported_tool", "This tool type is not supported by the Sign in with ChatGPT Responses adapter.")
-			}
-		}
-		if !typePresent {
-			// A namespace may be represented as a map from names to definitions.
-			keys := make([]string, 0, len(item))
-			for key := range item {
-				keys = append(keys, key)
-			}
-			sort.Strings(keys)
-			for _, key := range keys {
-				if err := walkToolDefinition(item[key], path); err != nil {
-					return err
-				}
-			}
-			return nil
-		}
-		for _, key := range []string{"namespace", "additional_tools", "tools", "connectors"} {
-			if nested, ok := item[key]; ok {
-				if err := walkToolDefinition(nested, path+"."+key); err != nil {
-					return err
-				}
-			}
-		}
-	}
-	return nil
 }
 
 func itoa(value int) string {

@@ -50,6 +50,7 @@ type Record struct {
 	Outcome                        string
 	HTTPStatus                     int
 	SafeError                      string
+	DroppedFields                  []string
 	Usage                          *Usage
 	Timings                        Timings
 }
@@ -252,7 +253,7 @@ func decodeRecord(line []byte) (Record, error) {
 		}
 		if lineValue.Attempt < 0 || !validOutcome(lineValue.Outcome) || lineValue.HTTPStatus < 0 || lineValue.HTTPStatus > 599 ||
 			len(lineValue.SafeError) > maxSafeError || !utf8.ValidString(lineValue.SafeError) || !validTimings(lineValue.Timings) || !validUsage(lineValue.Usage) ||
-			!validUpstreamRequestID(lineValue.UpstreamRequestID) {
+			!validUpstreamRequestID(lineValue.UpstreamRequestID) || !validDroppedFields(lineValue.DroppedFields) {
 			return Record{}, errors.New("invalid request_end fields")
 		}
 		if envelope.SchemaVersion >= 2 && (strings.TrimSpace(lineValue.ServiceAccount.ID) == "" || strings.TrimSpace(lineValue.ServiceAccount.Name) == "" ||
@@ -265,6 +266,7 @@ func decodeRecord(line []byte) (Record, error) {
 		record.HTTPStatus = lineValue.HTTPStatus
 		record.SafeError = lineValue.SafeError
 		record.UpstreamRequestID = lineValue.UpstreamRequestID
+		record.DroppedFields = lineValue.DroppedFields
 		if envelope.SchemaVersion >= 2 {
 			account := lineValue.ServiceAccount
 			model := lineValue.Model
