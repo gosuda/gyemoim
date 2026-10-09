@@ -242,9 +242,6 @@ func (api *harnessAPI) serveInference(w http.ResponseWriter, r *http.Request, fo
 		prepareInput = translated
 		includeChatUsage = includeUsage
 	}
-	// includeChatUsage is consumed by chat streaming synthesis; non-streaming
-	// responses always carry usage.
-	_ = includeChatUsage
 	var modelName string
 	if modelRaw, exists := fields["model"]; !exists || json.Unmarshal(modelRaw, &modelName) != nil || strings.TrimSpace(modelName) == "" {
 		writeHarnessError(w, http.StatusBadRequest, "the request must include a non-empty model", "invalid_request_error", "model_required")
@@ -339,16 +336,6 @@ func (api *harnessAPI) serveInference(w http.ResponseWriter, r *http.Request, fo
 		return
 	}
 	droppedFields = prepared.DroppedFields
-	if prepared.ClientStream && format == formatChat {
-		// Chat streaming synthesis is implemented with the chat delivery work;
-		// until then the stream request is rejected explicitly instead of
-		// returning Responses-format events a chat client cannot parse. The
-		// rejection happens before provider authentication and I/O.
-		authNS := handle.ElapsedNS()
-		finish("failed", 0, "chat completions streaming is not supported yet", nil, history.Timings{AuthenticationPreparationNS: &authNS}, history.EndDetails{})
-		writeHarnessError(w, http.StatusBadRequest, "chat completions streaming is not supported yet; use stream:false", "invalid_request_error", "unsupported_value")
-		return
-	}
 	managedToken, err := preparation.AccessToken(r.Context())
 	authPreparationNS := handle.ElapsedNS()
 	timings := history.Timings{AuthenticationPreparationNS: &authPreparationNS}
@@ -458,6 +445,11 @@ func (api *harnessAPI) serveInference(w http.ResponseWriter, r *http.Request, fo
 	}
 	if !prepared.ClientStream {
 		api.serveNonStreamingResponse(w, r, handle, upstream, trace, authPreparationNS, endDetails, finish, format, route.Model.Name)
+		return
+	}
+
+	if format == formatChat {
+		api.serveChatStreamingResponse(w, r, handle, upstream, trace, authPreparationNS, endDetails, finish, route.Model.Name, includeChatUsage)
 		return
 	}
 
@@ -636,6 +628,137 @@ func (api *harnessAPI) serveNonStreamingResponse(
 		timings := providerTimings(authPreparationNS, trace.Snapshot(), &delivery)
 		finish(event.Outcome, upstream.StatusCode, terminalSafeError(event), usage, timings, endDetails)
 		return
+	}
+}
+
+// serveChatStreamingResponse delivers a chat completions stream by synthesizing
+// chat completion chunks from the upstream Responses event stream. Raw upstream
+// frames are still recorded in history; only the downstream chunks are
+// synthesized and they are never recorded.
+func (api *harnessAPI) serveChatStreamingResponse(
+	w http.ResponseWriter,
+	r *http.Request,
+	handle *history.Request,
+	upstream *provider.UpstreamResponse,
+	trace *provider.Trace,
+	authPreparationNS int64,
+	endDetails history.EndDetails,
+	finish func(string, int, string, *history.Usage, history.Timings, history.EndDetails),
+	modelAlias string,
+	includeUsage bool,
+) {
+	synthesizer := provider.NewChatStreamSynthesizer(handle.ID(), modelAlias, time.Now().Unix(), includeUsage)
+	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache, no-store")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.WriteHeader(http.StatusOK)
+	controller := http.NewResponseController(w)
+
+	var upstreamUsage *history.Usage
+	var downstreamDeliveryNS *int64
+	markDelivered := func() {
+		value := handle.ElapsedNS()
+		downstreamDeliveryNS = &value
+	}
+	// writeChatErrorChunks ends the stream with one chat-format error data
+	// frame followed by the [DONE] sentinel, mirroring the Responses path's
+	// safe error event for a stream that cannot continue.
+	writeChatErrorChunks := func(message string) bool {
+		data, _ := json.Marshal(map[string]any{
+			"error": openAIErrorDetail{Message: message, Type: "server_error", Code: "upstream_error"},
+		})
+		frame := append([]byte("data: "), data...)
+		frame = append(frame, '\n', '\n')
+		if err := writeDownstreamFrame(controller, w, frame); err != nil {
+			return false
+		}
+		if err := writeDownstreamFrame(controller, w, []byte("data: [DONE]\n\n")); err != nil {
+			return false
+		}
+		markDelivered()
+		return true
+	}
+	failCancelled := func(status int, usage *history.Usage) {
+		timings := providerTimings(authPreparationNS, trace.Snapshot(), downstreamDeliveryNS)
+		finish("cancelled", status, "downstream client disconnected before the response was delivered", usage, timings, endDetails)
+	}
+
+	for {
+		event, eventErr := upstream.NextEvent()
+		if eventErr != nil {
+			timings := providerTimings(authPreparationNS, trace.Snapshot(), downstreamDeliveryNS)
+			if errors.Is(r.Context().Err(), context.Canceled) || errors.Is(eventErr, context.Canceled) {
+				finish("cancelled", upstream.StatusCode, "downstream client cancelled the request", upstreamUsage, timings, endDetails)
+				return
+			}
+			if errors.Is(eventErr, io.EOF) {
+				message := "the provider stream ended without a terminal response event"
+				if !writeChatErrorChunks(message) {
+					failCancelled(upstream.StatusCode, upstreamUsage)
+					return
+				}
+				timings = providerTimings(authPreparationNS, trace.Snapshot(), downstreamDeliveryNS)
+				finish("incomplete", upstream.StatusCode, message, upstreamUsage, timings, endDetails)
+				return
+			}
+			message := safeStreamReadError(eventErr)
+			if !writeChatErrorChunks(message) {
+				failCancelled(upstream.StatusCode, upstreamUsage)
+				return
+			}
+			timings = providerTimings(authPreparationNS, trace.Snapshot(), downstreamDeliveryNS)
+			finish("failed", upstream.StatusCode, message, upstreamUsage, timings, endDetails)
+			return
+		}
+		// Record each raw upstream frame before interpreting it; response_event
+		// records stay upstream-native on the chat path.
+		_ = handle.Event(event.Raw, event.Name)
+		if event.Terminal && event.Usage != nil {
+			upstreamUsage = usageToHistory(event.Usage)
+		}
+		if terminalProtocolMismatch(event) {
+			message := "the provider stream contained a mismatched terminal response"
+			if !writeChatErrorChunks(message) {
+				failCancelled(upstream.StatusCode, upstreamUsage)
+				return
+			}
+			timings := providerTimings(authPreparationNS, trace.Snapshot(), downstreamDeliveryNS)
+			finish("failed", upstream.StatusCode, message, upstreamUsage, timings, endDetails)
+			return
+		}
+		if event.Terminal && event.Outcome == "failed" {
+			message := "the provider reported a failed response"
+			if !writeChatErrorChunks(message) {
+				failCancelled(upstream.StatusCode, upstreamUsage)
+				return
+			}
+			timings := providerTimings(authPreparationNS, trace.Snapshot(), downstreamDeliveryNS)
+			finish("failed", upstream.StatusCode, message, upstreamUsage, timings, endDetails)
+			return
+		}
+		if !event.Complete {
+			// A final unterminated frame stays in history but feeds no chunk.
+			continue
+		}
+		for _, chunk := range synthesizer.Feed(event) {
+			frame := append([]byte("data: "), chunk...)
+			frame = append(frame, '\n', '\n')
+			if err := writeDownstreamFrame(controller, w, frame); err != nil {
+				failCancelled(upstream.StatusCode, upstreamUsage)
+				return
+			}
+			markDelivered()
+		}
+		if event.Terminal {
+			if err := writeDownstreamFrame(controller, w, []byte("data: [DONE]\n\n")); err != nil {
+				failCancelled(upstream.StatusCode, upstreamUsage)
+				return
+			}
+			markDelivered()
+			timings := providerTimings(authPreparationNS, trace.Snapshot(), downstreamDeliveryNS)
+			finish(event.Outcome, upstream.StatusCode, terminalSafeError(event), upstreamUsage, timings, endDetails)
+			return
+		}
 	}
 }
 

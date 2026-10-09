@@ -575,6 +575,214 @@ func chatUsageJSON(usage *responsesUsageJSON) any {
 	return chatUsage
 }
 
+// chatUsageFromProviderUsage maps the adapter's parsed terminal usage into the
+// chat usage shape used by streaming usage chunks. Missing counts stay null.
+func chatUsageFromProviderUsage(usage *Usage) any {
+	if usage == nil {
+		return nil
+	}
+	chatUsage := map[string]any{
+		"prompt_tokens":     usage.InputTokens,
+		"completion_tokens": usage.OutputTokens,
+	}
+	if usage.InputTokens != nil && usage.OutputTokens != nil {
+		total := *usage.InputTokens + *usage.OutputTokens
+		chatUsage["total_tokens"] = &total
+	} else {
+		chatUsage["total_tokens"] = nil
+	}
+	if usage.CachedInputTokens != nil {
+		chatUsage["prompt_tokens_details"] = map[string]any{"cached_tokens": usage.CachedInputTokens}
+	}
+	if usage.ReasoningOutputTokens != nil {
+		chatUsage["completion_tokens_details"] = map[string]any{"reasoning_tokens": usage.ReasoningOutputTokens}
+	}
+	return chatUsage
+}
+
+// ChatStreamSynthesizer converts parsed Responses SSE events into Chat
+// Completions completion chunks. Reasoning deltas have no chat representation
+// and are not emitted (documented loss; usage still reports reasoning tokens).
+// Tool calls are accumulated from output_item.added — which carries the call
+// id and name and fixes the stable tool index — plus
+// function_call_arguments.delta; later chunks omit id and name, which is the
+// shape chat clients accumulate. Building tool calls only from the terminal
+// response would drop streamed tool calls entirely.
+type ChatStreamSynthesizer struct {
+	gatewayRequestID string
+	modelAlias       string
+	createdUnix      int64
+	includeUsage     bool
+
+	roleSent     bool
+	toolIndexes  map[string]int
+	toolCount    int
+	sawToolCalls bool
+}
+
+// NewChatStreamSynthesizer creates the per-request synthesizer. gatewayRequestID
+// and modelAlias back the chunk id/model fields; includeUsage controls whether
+// a final usage-only chunk is emitted for stream_options.include_usage.
+func NewChatStreamSynthesizer(gatewayRequestID, modelAlias string, createdUnix int64, includeUsage bool) *ChatStreamSynthesizer {
+	return &ChatStreamSynthesizer{
+		gatewayRequestID: gatewayRequestID,
+		modelAlias:       modelAlias,
+		createdUnix:      createdUnix,
+		includeUsage:     includeUsage,
+		toolIndexes:      map[string]int{},
+	}
+}
+
+// Feed consumes one parsed Responses event and returns the chat completion
+// chunk bodies to write downstream, in order. The caller owns SSE framing, the
+// data: [DONE] sentinel, and error chunks for failed terminal events.
+func (s *ChatStreamSynthesizer) Feed(event SSEEvent) []json.RawMessage {
+	switch event.Type {
+	case "response.created":
+		s.roleSent = true
+		return []json.RawMessage{s.chunk(map[string]any{"role": "assistant"}, nil)}
+	case "response.output_text.delta":
+		var payload struct {
+			Delta string `json:"delta"`
+		}
+		if json.Unmarshal(event.DataJSON, &payload) != nil || payload.Delta == "" {
+			return nil
+		}
+		return s.withRole([]json.RawMessage{s.chunk(map[string]any{"content": payload.Delta}, nil)})
+	case "response.output_item.added":
+		var payload struct {
+			Item struct {
+				Type   string `json:"type"`
+				ID     string `json:"id"`
+				CallID string `json:"call_id"`
+				Name   string `json:"name"`
+			} `json:"item"`
+		}
+		if json.Unmarshal(event.DataJSON, &payload) != nil || payload.Item.Type != "function_call" {
+			return nil
+		}
+		index := s.toolCount
+		s.toolCount++
+		s.sawToolCalls = true
+		key := payload.Item.ID
+		if key == "" {
+			key = payload.Item.CallID
+		}
+		if key != "" {
+			s.toolIndexes[key] = index
+		}
+		return s.withRole([]json.RawMessage{s.chunk(map[string]any{"tool_calls": []any{map[string]any{
+			"index": index,
+			"id":    payload.Item.CallID,
+			"type":  "function",
+			"function": map[string]any{
+				"name":      payload.Item.Name,
+				"arguments": "",
+			},
+		}}}, nil)})
+	case "response.function_call_arguments.delta":
+		var payload struct {
+			ItemID string `json:"item_id"`
+			Delta  string `json:"delta"`
+		}
+		if json.Unmarshal(event.DataJSON, &payload) != nil || payload.Delta == "" {
+			return nil
+		}
+		index, known := s.toolIndexes[payload.ItemID]
+		if !known {
+			return nil
+		}
+		return []json.RawMessage{s.chunk(map[string]any{"tool_calls": []any{map[string]any{
+			"index":    index,
+			"function": map[string]any{"arguments": payload.Delta},
+		}}}, nil)}
+	case "response.completed", "response.incomplete":
+		if !event.Terminal {
+			return nil
+		}
+		return s.finalChunks(event)
+	default:
+		// content_part bookkeeping, done events, and reasoning deltas are not
+		// represented in the chat streaming shape.
+		return nil
+	}
+}
+
+func (s *ChatStreamSynthesizer) withRole(chunks []json.RawMessage) []json.RawMessage {
+	if s.roleSent {
+		return chunks
+	}
+	s.roleSent = true
+	return append([]json.RawMessage{s.chunk(map[string]any{"role": "assistant"}, nil)}, chunks...)
+}
+
+// finalChunks emits the terminal content chunk — empty delta with
+// finish_reason — followed by the optional usage-only chunk. finish_reason is
+// tool_calls when function-call items were streamed, length when the response
+// stopped on the output-token cap, and stop otherwise.
+func (s *ChatStreamSynthesizer) finalChunks(event SSEEvent) []json.RawMessage {
+	finishReason := "stop"
+	if s.sawToolCalls {
+		finishReason = "tool_calls"
+	}
+	if event.Outcome == "incomplete" {
+		source := event.ResponseJSON
+		if len(source) == 0 {
+			// The terminal parser normally extracts the response object; fall
+			// back to its envelope when it did not.
+			var envelope struct {
+				Response json.RawMessage `json:"response"`
+			}
+			if json.Unmarshal(event.DataJSON, &envelope) == nil && len(envelope.Response) > 0 {
+				source = envelope.Response
+			} else {
+				source = event.DataJSON
+			}
+		}
+		if incompleteReason(source) == "max_output_tokens" {
+			finishReason = "length"
+		}
+	}
+	chunks := []json.RawMessage{s.chunk(map[string]any{}, finishReason)}
+	if s.includeUsage {
+		chunks = append(chunks, s.usageChunk(event.Usage))
+	}
+	return chunks
+}
+
+func (s *ChatStreamSynthesizer) chunk(delta map[string]any, finishReason any) json.RawMessage {
+	return mustMarshal(map[string]any{
+		"id":      "chatcmpl-" + s.gatewayRequestID,
+		"object":  "chat.completion.chunk",
+		"created": s.createdUnix,
+		"model":   s.modelAlias,
+		"choices": []any{map[string]any{"index": 0, "delta": delta, "finish_reason": finishReason}},
+	})
+}
+
+func (s *ChatStreamSynthesizer) usageChunk(usage *Usage) json.RawMessage {
+	return mustMarshal(map[string]any{
+		"id":      "chatcmpl-" + s.gatewayRequestID,
+		"object":  "chat.completion.chunk",
+		"created": s.createdUnix,
+		"model":   s.modelAlias,
+		"choices": []any{},
+		"usage":   chatUsageFromProviderUsage(usage),
+	})
+}
+
+func incompleteReason(raw json.RawMessage) string {
+	var response struct {
+		IncompleteDetails *struct {
+			Reason string `json:"reason"`
+		} `json:"incomplete_details"`
+	}
+	if !jsonObject(raw) || json.Unmarshal(raw, &response) != nil || response.IncompleteDetails == nil {
+		return ""
+	}
+	return response.IncompleteDetails.Reason
+}
+
 func mustMarshal(value any) json.RawMessage {
 	encoded, err := json.Marshal(value)
 	if err != nil {
