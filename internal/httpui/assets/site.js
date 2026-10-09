@@ -261,16 +261,132 @@
 
   function providerStatusLabel(status) {
     if (status === "connected") return "Connected";
-    if (status === "plan_usage_disabled") return "Direct access unavailable";
-    if (status === "require_reauthentication") return "Reconnect required";
+    if (status === "plan_usage_disabled") return "Plan usage disabled";
+    if (status === "require_reauthentication") return "Re-authentication required";
+    if (status === "failed") return "Connection failed";
     return "Disconnected";
   }
 
   function providerStatusDescription(status) {
     if (status === "connected") return "This OpenAI account is connected and ready for direct inference.";
-    if (status === "plan_usage_disabled") return "The account is linked, but direct inference access was not granted. Reconnect after enabling access for this account.";
-    if (status === "require_reauthentication") return "This account’s saved refresh grant can no longer renew access. Reconnect before using it.";
+    if (status === "plan_usage_disabled") return "Plan usage disabled — enable API access on the ChatGPT plan, then reconnect this account.";
+    if (status === "require_reauthentication") return "Re-authentication required. The saved refresh grant can no longer renew access; reconnect before using this account.";
+    if (status === "failed") return "The last connection attempt failed. Start the connect flow again.";
     return "Connect an OpenAI account with Sign in with ChatGPT.";
+  }
+
+  function providerStatusTagClass(status) {
+    if (status === "connected") return "tag-success";
+    if (["plan_usage_disabled", "require_reauthentication", "failed"].includes(status)) return "tag-danger";
+    return "tag-muted";
+  }
+
+  // buildConnectPanel renders the inline enrollment panel for one provider
+  // card: the single-use code with a live countdown, the script download, the
+  // exact command line with the browser's own origin substituted, and a poll
+  // of the provider list that closes the panel when the card leaves its
+  // starting status. Polling stops when the code expires, when the panel is
+  // removed, or when the user leaves the Providers page.
+  function buildConnectPanel(provider, enrollment) {
+    const panel = element("div", "connect-panel");
+    const panelMessage = element("p", "form-message");
+    panelMessage.setAttribute("aria-live", "polite");
+    const seconds = Number(enrollment.expiresInSeconds);
+    const expiryAt = Date.now() + (Number.isFinite(seconds) ? Math.max(0, seconds) : 0) * 1000;
+    let stopped = false;
+    let pollTimer = 0;
+    let ticker = 0;
+    const stop = () => {
+      stopped = true;
+      window.clearTimeout(pollTimer);
+      window.clearInterval(ticker);
+    };
+    panel.connectStop = stop;
+
+    const finishWithStatus = async (status) => {
+      stop();
+      panel.remove();
+      await loadProviders();
+      const notice = byId("provider-oauth-message");
+      notice.hidden = false;
+      if (status === "connected") {
+        showMessage(notice, "OpenAI account connected. Direct inference access is ready.", "success");
+      } else {
+        const label = providerStatusLabel(status);
+        const description = providerStatusDescription(status);
+        showMessage(notice, `Connection attempt finished: ${description.startsWith(label) ? description : `${label}. ${description}`}`, "error");
+      }
+    };
+    const finishExpired = () => {
+      if (stopped) return;
+      stop();
+      showMessage(panelMessage, "The enrollment code expired without a completed connection. Connect again to issue a new code.", "error");
+    };
+
+    const poll = async () => {
+      if (stopped || !panel.isConnected || state.page !== "providers") { stop(); return; }
+      try {
+        const providers = await api("/api/providers");
+        if (stopped || !panel.isConnected || state.page !== "providers") return;
+        const current = Array.isArray(providers) ? providers.find((item) => item.id === provider.id) : null;
+        if (current && current.status !== provider.status) {
+          await finishWithStatus(current.status);
+          return;
+        }
+      } catch { /* Transient errors are retried on the next tick. */ }
+      if (stopped || !panel.isConnected || state.page !== "providers") return;
+      if (Date.now() >= expiryAt) { finishExpired(); return; }
+      pollTimer = window.setTimeout(poll, 3000);
+    };
+
+    const heading = element("h5", "", "Connect with the enrollment script");
+    const instructions = element("p", "muted", "Run the script on the machine with your web browser — where you sign in to ChatGPT. The script opens the browser; after signing in, return here and this card updates automatically.");
+    const codeRow = element("div", "connect-code-row");
+    const countdown = element("span", "muted connect-expiry", "");
+    codeRow.append(element("strong", "connect-label", "Enrollment code (single use)"), countdown);
+    const code = element("code", "connect-code", enrollment.code);
+    code.tabIndex = 0;
+
+    const command = String(enrollment.command || "").replace("SERVER_URL", window.location.origin);
+    const commandLine = element("pre", "connect-command", command);
+    const actions = element("div", "card-actions");
+    const download = element("a", "button primary small", "Download script");
+    download.href = enrollment.scriptUrl || "/api/connect/script";
+    download.download = "gyemoim-connect.py";
+    const copyMessage = element("span", "muted", "");
+    actions.append(
+      download,
+      button("Copy command", "quiet small", async () => {
+        try {
+          await navigator.clipboard.writeText(command);
+          copyMessage.textContent = "Command copied.";
+        } catch {
+          copyMessage.textContent = "Clipboard access is unavailable. Select and copy the command below.";
+        }
+      }),
+      button("Close", "quiet small", () => { stop(); panel.remove(); }),
+      copyMessage,
+    );
+
+    const renderCountdown = () => {
+      const remaining = Math.max(0, Math.round((expiryAt - Date.now()) / 1000));
+      countdown.textContent = remaining > 0
+        ? `Expires in ${Math.floor(remaining / 60)}:${String(remaining % 60).padStart(2, "0")}`
+        : "Code expired";
+    };
+    renderCountdown();
+    showMessage(panelMessage, "Waiting for the connection to complete on the other machine…");
+
+    ticker = window.setInterval(() => {
+      if (stopped) return;
+      if (!panel.isConnected || state.page !== "providers") { stop(); return; }
+      renderCountdown();
+      if (Date.now() >= expiryAt) finishExpired();
+    }, 1000);
+    pollTimer = window.setTimeout(poll, 3000);
+
+    panel.append(heading, instructions, codeRow, code, actions, commandLine, panelMessage);
+    return panel;
   }
 
   function renderProvider(provider) {
@@ -280,7 +396,7 @@
     titleBlock.append(element("h4", "", provider.name));
     const badges = element("div", "badge-row");
     const statusLabel = providerStatusLabel(provider.status);
-    badges.append(element("span", "tag", provider.type), element("span", `tag ${provider.status === "connected" ? "tag-success" : "tag-muted"}`, statusLabel));
+    badges.append(element("span", "tag", provider.type), element("span", `tag ${providerStatusTagClass(provider.status)}`, statusLabel));
     titleBlock.append(badges);
     const controls = element("div", "card-actions");
     const edit = button("Rename", "quiet small", () => {
@@ -292,18 +408,23 @@
     card.append(header);
 
     const info = element("p", "resource-copy", providerStatusDescription(provider.status));
-    const connect = button(provider.status === "disconnected" ? "Connect OpenAI account" : "Reconnect", "primary small", async () => {
+    const connect = button(provider.status === "disconnected" ? "Connect with enrollment script" : "Reconnect with enrollment script", "primary small", async () => {
       connect.disabled = true;
       byId("provider-oauth-message").hidden = true;
       showMessage(byId("provider-oauth-message"));
       showMessage(actionMessage);
+      // A previous panel's enrollment code is dead once a new one is issued.
+      const existing = card.querySelector(".connect-panel");
+      if (existing) existing.connectStop?.();
+      existing?.remove();
       try {
-        const result = await api(`/api/providers/${encodeURIComponent(provider.id)}/oauth/start`, {
+        const enrollment = await api(`/api/providers/${encodeURIComponent(provider.id)}/connect/start`, {
           method: "POST", body: JSON.stringify({}),
         });
-        window.location.assign(result.authorizationUrl);
+        card.append(buildConnectPanel(provider, enrollment));
       } catch (error) {
         showMessage(actionMessage, error.message, "error");
+      } finally {
         connect.disabled = false;
       }
     });

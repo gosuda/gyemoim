@@ -98,6 +98,14 @@ h4 { min-width: 0; overflow-wrap: anywhere; margin: 0; color: #2e3948; font-size
 .tag { display: inline-flex; align-items: center; min-height: 21px; padding: 0 7px; border-radius: 20px; color: #526277; background: #f0f3f7; font-size: 9px; font-weight: 650; }
 .tag-success { color: #287552; background: #e9f7ef; }
 .tag-muted { color: #707b89; background: #f0f2f4; }
+.tag-danger { color: #9c4141; background: #fff1f1; }
+.connect-panel { display: grid; gap: 8px; margin-top: 12px; padding: 13px; border: 1px solid #dfe6ee; border-radius: 8px; background: #fbfcfe; }
+.connect-panel h5 { font-size: 12px; }
+.connect-panel .muted { margin: 0; font-size: 10px; }
+.connect-code-row { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 4px 10px; }
+.connect-label { color: #4f5a68; font-size: 11px; font-weight: 650; }
+.connect-code { overflow-wrap: anywhere; padding: 9px 10px; border: 1px solid #e9cf91; border-radius: 5px; color: #4e4022; background: #fffaf0; font: 13px ui-monospace, SFMono-Regular, Menlo, monospace; user-select: all; }
+.connect-command { overflow-wrap: anywhere; margin: 0; padding: 8px 10px; border-radius: 5px; color: #455161; background: #f2f4f7; font: 10px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
 .card-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 5px; }
 .resource-copy { margin: 11px 0 5px; color: #7c8793; font-size: 11px; }
 .pending-button { color: #7c8793 !important; }

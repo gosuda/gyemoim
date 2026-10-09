@@ -251,6 +251,21 @@ database must keep working.
   script's ephemeral port → simulated provider redirect → server attempts the
   real exchange → `failed` → clean exit 1, provider stays disconnected;
   loopback `oauth/start` unchanged; `/v1/` bearer-only unchanged.
+- **Step 7b — done (2026-10-09).** Provider cards carry the enrollment UI:
+  an inline connect panel (single-use code with live countdown, script
+  download link, command line with `SERVER_URL` filled from
+  `window.location.origin`, copy button) plus 3 s status polling that closes
+  the panel on any status change or code expiry and stops when the panel is
+  removed or the page is left. Status labels/badges improved
+  (`require_reauthentication` and `plan_usage_disabled` as danger states with
+  action-oriented descriptions, per decision 10). The card's Connect entry
+  point is now the enrollment flow only; the loopback in-server OAuth flow
+  remains intact server-side. Known limitation (documented): a failed
+  exchange leaves the provider `disconnected`, so the panel reports failure
+  only at code expiry — the script's terminal output is the immediate
+  feedback channel. Verified: vet/build/`node --check` clean; real-browser
+  pass (panel render, countdown, origin substitution, close) plus the
+  implementer's end-to-end enrollment dry-run and forced-status change test.
 - **Step 6 — done (2026-10-09).** User management API under the session guard
   (every signed-in user has full rights): `GET /api/users` (hash-free),
   `POST /api/users` (username: trimmed, 1–64 Unicode characters, no whitespace
