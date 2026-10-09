@@ -20,6 +20,10 @@ type piSetupModel struct {
 	UpstreamModel string   `json:"upstreamModel"`
 	Ready         bool     `json:"ready"`
 	Reasons       []string `json:"reasons"`
+	// MetadataSource is set only for ready Models: "custom" when every
+	// exported field was entered by the user, "known-catalog" when every
+	// field came from the built-in verified spec catalog, "mixed" otherwise.
+	MetadataSource string `json:"metadataSource,omitempty"`
 }
 
 type piSetupResponse struct {
@@ -86,10 +90,11 @@ func (api *managementAPI) piAccountConfig(w http.ResponseWriter, r *http.Request
 	}
 	piModels := make([]piModel, 0, len(models))
 	for _, model := range models {
-		piModel, reasons := piModelForConfig(model)
+		piModel, reasons, source := piModelForConfig(model)
 		response.Models = append(response.Models, piSetupModel{
 			ModelID: model.ID, Name: model.Name, ProviderID: model.ProviderID,
 			UpstreamModel: model.UpstreamModel, Ready: len(reasons) == 0, Reasons: reasons,
+			MetadataSource: source,
 		})
 		if len(reasons) == 0 {
 			piModels = append(piModels, piModel)
@@ -113,27 +118,55 @@ func (api *managementAPI) piAccountConfig(w http.ResponseWriter, r *http.Request
 	writeJSON(w, http.StatusOK, response)
 }
 
-func piModelForConfig(model config.Model) (piModel, []string) {
+// piModelForConfig resolves one granted Model into an exported pi entry. Each
+// metadata field comes from the user's saved metadata when present; missing
+// fields fall back to the built-in verified spec catalog for the upstream
+// model. Explicit user values are never silently replaced: a present but
+// invalid field is reported as a reason even when the catalog has a value.
+// The returned source is empty when the Model is not ready.
+func piModelForConfig(model config.Model) (piModel, []string, string) {
 	metadata := map[string]json.RawMessage{}
 	if len(model.MetadataJSON) != 0 {
 		if err := json.Unmarshal(model.MetadataJSON, &metadata); err != nil || metadata == nil {
-			return piModel{}, []string{"metadata is not a valid JSON object"}
+			return piModel{}, []string{"metadata is not a valid JSON object"}, ""
 		}
 	}
+	known, knownOK := lookupKnownModelSpec(model.UpstreamModel)
 
 	var reasons []string
+	userFields, catalogFields := 0, 0
+
 	contextWindow, contextWindowOK := positiveInteger(metadata["contextWindow"])
+	if _, explicit := metadata["contextWindow"]; explicit {
+		if contextWindowOK {
+			userFields++
+		}
+	} else if knownOK {
+		contextWindow, contextWindowOK = known.ContextWindow, true
+		catalogFields++
+	}
 	if !contextWindowOK {
 		reasons = append(reasons, "contextWindow must be a positive integer")
 	}
+
 	maxTokens, maxTokensOK := positiveInteger(metadata["maxTokens"])
+	if _, explicit := metadata["maxTokens"]; explicit {
+		if maxTokensOK {
+			userFields++
+		}
+	} else if knownOK {
+		maxTokens, maxTokensOK = known.MaxTokens, true
+		catalogFields++
+	}
 	if !maxTokensOK {
 		reasons = append(reasons, "maxTokens must be a positive integer")
 	}
 
 	var input []string
 	inputOK := false
-	if raw, exists := metadata["input"]; exists {
+	raw, explicit := metadata["input"]
+	switch {
+	case explicit:
 		inputOK = json.Unmarshal(raw, &input) == nil && len(input) > 0
 		if inputOK {
 			for _, modality := range input {
@@ -143,28 +176,48 @@ func piModelForConfig(model config.Model) (piModel, []string) {
 				}
 			}
 		}
-	}
-	if !inputOK {
+		if inputOK {
+			userFields++
+		} else {
+			reasons = append(reasons, "input must explicitly list supported text and/or image modalities")
+		}
+	case knownOK:
+		input, inputOK = known.Input, true
+		catalogFields++
+	default:
 		reasons = append(reasons, "input must explicitly list supported text and/or image modalities")
-	} else if !containsString(input, "text") {
+	}
+	if inputOK && !containsString(input, "text") {
+		inputOK = false
 		reasons = append(reasons, "input must include text")
 	}
 
 	var reasoning bool
 	reasoningOK := false
-	if raw, exists := metadata["reasoning"]; exists {
+	raw, explicit = metadata["reasoning"]
+	switch {
+	case explicit:
 		var decoded *bool
 		if json.Unmarshal(raw, &decoded) == nil && decoded != nil {
 			reasoning, reasoningOK = *decoded, true
+			userFields++
 		}
-	}
-	if !reasoningOK || !reasoning {
+		if !reasoningOK || !reasoning {
+			reasoningOK = false
+			reasons = append(reasons, "reasoning must be explicitly set to true")
+		}
+	case knownOK:
+		reasoning, reasoningOK = true, true
+		catalogFields++
+	default:
 		reasons = append(reasons, "reasoning must be explicitly set to true")
 	}
 
 	var efforts []string
 	effortsOK := false
-	if raw, exists := metadata["supportedReasoningEfforts"]; exists {
+	raw, explicit = metadata["supportedReasoningEfforts"]
+	switch {
+	case explicit:
 		effortsOK = json.Unmarshal(raw, &efforts) == nil && len(efforts) > 0
 		if effortsOK {
 			for _, effort := range efforts {
@@ -174,12 +227,29 @@ func piModelForConfig(model config.Model) (piModel, []string) {
 				}
 			}
 		}
-	}
-	if !effortsOK {
+		if effortsOK {
+			userFields++
+		} else {
+			reasons = append(reasons, "supportedReasoningEfforts must explicitly list at least one supported effort")
+		}
+	case knownOK:
+		efforts, effortsOK = known.SupportedReasoningEfforts, true
+		catalogFields++
+	default:
 		reasons = append(reasons, "supportedReasoningEfforts must explicitly list at least one supported effort")
 	}
 	if len(reasons) > 0 {
-		return piModel{}, reasons
+		return piModel{}, reasons, ""
+	}
+
+	var source string
+	switch {
+	case catalogFields == 0:
+		source = "custom"
+	case userFields == 0:
+		source = "known-catalog"
+	default:
+		source = "mixed"
 	}
 
 	return piModel{
@@ -187,7 +257,7 @@ func piModelForConfig(model config.Model) (piModel, []string) {
 		ContextWindow: contextWindow, MaxTokens: maxTokens,
 		ThinkingLevelMap: piThinkingLevelMap(efforts),
 		Compat:           piModelCompat{SupportsMaxOutputTokens: false, SupportsLongCacheRetention: false},
-	}, nil
+	}, nil, source
 }
 
 func piThinkingLevelMap(efforts []string) map[string]*string {

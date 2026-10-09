@@ -380,7 +380,13 @@ function renderPiSetupResult(account, content, result) {
     for (const model of result.models) {
       const row = element("div", "pi-model-readiness");
       row.append(element("strong", model.ready ? "pi-model-ready" : "pi-model-incomplete", `${model.name} · ${model.ready ? "ready" : "incomplete"}`));
-      if (!model.ready) row.append(element("p", "muted", model.reasons.join(" · ")));
+      if (!model.ready) {
+        row.append(element("p", "muted", model.reasons.join(" · ")));
+      } else if (model.metadataSource === "known-catalog") {
+        row.append(element("p", "muted", "Metadata was completed from the built-in verified GPT-6 catalog; enter your own values on the Models page to override it."));
+      } else if (model.metadataSource === "mixed") {
+        row.append(element("p", "muted", "Fields you left empty were completed from the built-in verified GPT-6 catalog."));
+      }
       content.append(row);
     }
   }
