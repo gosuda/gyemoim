@@ -166,6 +166,18 @@ database must keep working.
   arbitrary Host accepted (421 gone), forged Origin 403, matching Origin passes
   the guard, port mismatch 403, Origin-with-path 403, Sec-Fetch-Site kept,
   missing CSRF 403, `--listen :9092` reachable via loopback and LAN IP.
+- **Step 2 — done (2026-10-09).** Schema v2 (`users`, `sessions` + index
+  `sessions_by_user`) behind a stepwise `migrate()` chain (v0 → v1+v2 in one
+  transaction; v1 → v2 in place). Timestamps follow the v1 TEXT RFC3339Nano
+  convention (deviation from the plan's INTEGER sketch, justified by
+  lexicographic expiry comparison); foreign keys were already enabled in the
+  DSN so `ON DELETE CASCADE` works as declared. Typed accessors in
+  `internal/config/users.go` (hash-bearing getters for login, hash-free list,
+  explicit `mustChange` flag on password update, delete-other-sessions,
+  expired-prune). Verified: vet/build clean; fresh DB lands at v2; a real v1 DB
+  (seeded provider/service-account/key/model/grant) migrates with every row
+  preserved value-by-value; accessors exercised via a throwaway `go run`
+  probe (duplicate username → ErrConflict, cascade delete, prune count).
 
 ## Work breakdown
 

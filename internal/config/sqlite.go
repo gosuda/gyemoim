@@ -14,7 +14,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const currentSchemaVersion = 1
+const currentSchemaVersion = 2
 
 // Store owns the configuration database. A single connection makes connection-local
 // SQLite settings consistent, while the DSN reapplies them if database/sql reconnects.
@@ -114,8 +114,14 @@ func (s *Store) migrate(ctx context.Context) error {
 		if _, err := tx.ExecContext(ctx, "PRAGMA user_version = 1"); err != nil {
 			return fmt.Errorf("set configuration schema version: %w", err)
 		}
-	} else {
-		return fmt.Errorf("no migration path from configuration schema version %d", version)
+	}
+	if version <= 1 {
+		if _, err := tx.ExecContext(ctx, webLoginSchema); err != nil {
+			return fmt.Errorf("create web login schema: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, "PRAGMA user_version = 2"); err != nil {
+			return fmt.Errorf("set configuration schema version: %w", err)
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit configuration schema migration: %w", err)
@@ -189,6 +195,29 @@ CREATE TABLE settings_metadata (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+`
+
+// webLoginSchema adds management users and their login sessions (schema v2).
+// Timestamps keep the v1 convention of RFC3339Nano TEXT in UTC; fixed-width
+// formatting makes lexicographic comparison valid for expiry pruning.
+const webLoginSchema = `
+CREATE TABLE users (
+    id TEXT PRIMARY KEY,
+    username TEXT NOT NULL UNIQUE,
+    password_hash TEXT NOT NULL,
+    must_change_password INTEGER NOT NULL DEFAULT 0,
+    disabled_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE sessions (
+    id_hash BLOB PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    last_seen_at TEXT NOT NULL
+);
+CREATE INDEX sessions_by_user ON sessions(user_id, expires_at);
 `
 
 func nowText() (time.Time, string) {

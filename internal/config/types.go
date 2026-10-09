@@ -90,3 +90,27 @@ type ModelGrant struct {
 	ModelID   string    `json:"modelId"`
 	CreatedAt time.Time `json:"createdAt"`
 }
+
+// User is a management-login identity. PasswordHash holds an already-hashed
+// password string (argon2id arrives in a later step); plaintext passwords never
+// enter this package, and the hash is excluded from JSON serialization.
+type User struct {
+	ID                 string     `json:"id"`
+	Username           string     `json:"username"`
+	PasswordHash       string     `json:"-"`
+	MustChangePassword bool       `json:"mustChangePassword"`
+	DisabledAt         *time.Time `json:"disabledAt,omitempty"`
+	CreatedAt          time.Time  `json:"createdAt"`
+	UpdatedAt          time.Time  `json:"updatedAt"`
+}
+
+// Session is one management login. Like local_keys, only a cryptographic hash of
+// the session ID is stored — never the ID itself — so the hash is excluded from
+// JSON serialization.
+type Session struct {
+	IDHash     []byte    `json:"-"`
+	UserID     string    `json:"userId"`
+	CreatedAt  time.Time `json:"createdAt"`
+	ExpiresAt  time.Time `json:"expiresAt"`
+	LastSeenAt time.Time `json:"lastSeenAt"`
+}
