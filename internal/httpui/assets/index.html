@@ -118,7 +118,7 @@
       <section class="page-view" data-view="service-accounts" aria-labelledby="accounts-heading" hidden>
         <div class="page-intro">
           <h2 id="accounts-heading">Service accounts</h2>
-          <p class="muted">Issue local keys for harnesses and grant each account access to specific Models.</p>
+          <p class="muted">Create API keys for your agents and grant each account access to specific Models.</p>
         </div>
         <div class="section-grid">
           <section class="panel form-panel" aria-labelledby="account-create-heading">
@@ -135,6 +135,10 @@
             <div class="card-list" id="account-list" aria-live="polite"><p class="muted">Loading accounts…</p></div>
           </section>
         </div>
+        <section class="panel rejections-panel" aria-labelledby="rejections-heading">
+          <div class="panel-heading"><div><h3 id="rejections-heading">Recent rejections</h3><p class="muted">Harness calls that were refused before any request was recorded — a bad key, a missing grant, or an unknown Model. Loads with the page; refreshes only on demand.</p></div><button class="button quiet small" type="button" id="rejections-refresh">Refresh</button></div>
+          <div id="rejections-content"><p class="muted">Loading rejections…</p></div>
+        </section>
       </section>
 
       <section class="page-view" data-view="models" aria-labelledby="models-heading" hidden>

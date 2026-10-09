@@ -45,6 +45,36 @@ function parseHash() {
   return { page, params: new URLSearchParams(query) };
 }
 
+// Review S5: leaving the Service accounts page while a one-time key reveal is
+// still undismissed (state.sensitiveCleanup non-empty — dismissing the key
+// removes its cleanup from the set) asks for confirmation. The single
+// choke point is applyHash, which every render path goes through exactly
+// once per navigation: in-app links via navigate(), hashchange-driven
+// navigation (Back/Forward, manual hash edits, bookmarks), and the
+// unknown-hash normalization. On decline the hash moves back without adding
+// a history entry; on accept the navigation proceeds and showPage runs the
+// existing sensitiveCleanup.
+function declinedSensitiveLeave(targetPage) {
+  return state.page === "service-accounts"
+    && targetPage !== "service-accounts"
+    && state.sensitiveCleanup.size > 0
+    && !window.confirm("A just-issued key that has not been copied will be lost. Leave anyway?");
+}
+
+function revertHashAfterDecline() {
+  if (window.location.hash !== renderedHash) window.location.replace(renderedHash || "#/overview");
+}
+
+function applyHash(hash, page, params) {
+  if (hash === renderedHash) return;
+  if (declinedSensitiveLeave(page)) {
+    revertHashAfterDecline();
+    return;
+  }
+  renderedHash = hash;
+  showPage(page, params);
+}
+
 export function renderRoute() {
   const { page, params } = parseHash();
   if (!page) {
@@ -54,12 +84,6 @@ export function renderRoute() {
     return;
   }
   applyHash(window.location.hash, page, params);
-}
-
-function applyHash(hash, page, params) {
-  if (hash === renderedHash) return;
-  renderedHash = hash;
-  showPage(page, params);
 }
 
 function showPage(page, params = new URLSearchParams()) {

@@ -1,12 +1,24 @@
 // Service accounts page: account cards, the keys/grants detail (with the
-// show-once key pattern), the Pi setup export, and create/rename/enable/delete.
+// show-once key pattern and its leave-guard), the recent-rejections panel,
+// the Pi setup export, and create/rename/enable/delete.
 import { api } from "../api.js";
 import { state } from "../state.js";
 import { button, byId, element, showMessage } from "../dom.js";
+import { pageLink } from "../nav.js";
+import { formatUTC, rejectionCodeLabel } from "../format.js";
+import { announceSuccess, clearMessageOnInput, scrollCardIntoView, withBusy } from "../feedback.js";
+import { formErrorText } from "../errors.js";
+
+// Success messages that must survive a full list re-render (rename: the fresh
+// card is a new DOM subtree). renderAccount consumes and clears each entry.
+const pendingCardMessages = new Map();
 
 export async function loadAccounts() {
   const list = byId("account-list");
   list.replaceChildren(element("p", "muted", "Loading service accounts…"));
+  // The rejections panel loads with the page but never auto-polls; it owns its
+  // own error/retry state, so it runs detached from the accounts fetch.
+  loadRejections();
   try {
     const [accounts, models, providers] = await Promise.all([
       api("/api/service-accounts"), api("/api/models"), api("/api/providers"),
@@ -24,7 +36,7 @@ function renderAccounts() {
   const list = byId("account-list");
   list.replaceChildren();
   if (state.accounts.length === 0) {
-    list.append(element("div", "empty-state", "No service accounts yet. Add one to issue a harness key."));
+    list.append(element("div", "empty-state", "No service accounts yet. Add one to create an API key for your agents."));
     return;
   }
   for (const account of state.accounts) list.append(renderAccount(account));
@@ -32,20 +44,12 @@ function renderAccounts() {
 
 function renderAccount(account) {
   const card = element("article", "resource-card account-card");
+  card.dataset.accountId = account.id;
   const header = element("div", "resource-header");
   const titleBlock = element("div", "resource-title");
   titleBlock.append(element("h4", "", account.name));
   titleBlock.append(element("span", `tag ${account.enabled ? "tag-success" : "tag-muted"}`, account.enabled ? "Enabled" : "Disabled"));
-  const controls = element("div", "card-actions");
-  controls.append(button(account.enabled ? "Disable" : "Enable", "quiet small", () => setAccountEnabled(account, !account.enabled)));
-  controls.append(button("Delete", "danger quiet small", () => deleteAccount(account)));
-  header.append(titleBlock, controls);
-  card.append(header);
 
-  const editToggle = button("Rename", "quiet small", () => {
-    editForm.hidden = !editForm.hidden;
-    if (!editForm.hidden) editInput.focus();
-  });
   const editForm = element("form", "inline-form account-edit-form");
   editForm.hidden = true;
   const editInput = element("input");
@@ -58,27 +62,52 @@ function renderAccount(account) {
   const save = element("button", "button primary small", "Save name");
   save.type = "submit";
   const cancel = button("Cancel", "quiet small", () => { editForm.hidden = true; });
-  const message = element("p", "form-message");
-  message.setAttribute("aria-live", "polite");
-  editForm.append(editInput, save, cancel, message);
-  editForm.addEventListener("submit", async (event) => {
-    event.preventDefault();
-    save.disabled = true;
-    showMessage(message);
-    try {
-      await api(`/api/service-accounts/${encodeURIComponent(account.id)}`, {
-        method: "PUT", body: JSON.stringify({ name: editInput.value, enabled: account.enabled }),
-      });
-      await loadAccounts();
-    } catch (error) {
-      showMessage(message, error.message, "error");
-    } finally {
-      save.disabled = false;
-    }
+  const editMessage = element("p", "form-message");
+  editMessage.setAttribute("aria-live", "polite");
+  editForm.append(editInput, save, cancel, editMessage);
+  const renameButton = button("Rename", "quiet small", () => {
+    editForm.hidden = !editForm.hidden;
+    if (!editForm.hidden) editInput.focus();
   });
-  const editRow = element("div", "edit-row");
-  editRow.append(editToggle);
-  card.append(editRow, editForm);
+  clearMessageOnInput(editForm, editMessage);
+  editForm.addEventListener("submit", (event) => {
+    event.preventDefault();
+    withBusy(save, async () => {
+      showMessage(editMessage);
+      try {
+        await api(`/api/service-accounts/${encodeURIComponent(account.id)}`, {
+          method: "PUT", body: JSON.stringify({ name: editInput.value, enabled: account.enabled }),
+        });
+        pendingCardMessages.set(account.id, { text: "Name saved.", kind: "success" });
+        await loadAccounts();
+      } catch (error) {
+        showMessage(editMessage, formErrorText(error, { kind: "service-account", action: "rename", name: editInput.value }), "error");
+      }
+    });
+  });
+
+  const toggleButton = button(account.enabled ? "Disable" : "Enable", "quiet small", () => {
+    if (account.enabled && !window.confirm(`Disable “${account.name}”? Their keys stop working immediately. You can enable them again later.`)) return;
+    withBusy(toggleButton, async () => {
+      try {
+        await api(`/api/service-accounts/${encodeURIComponent(account.id)}`, {
+          method: "PUT", body: JSON.stringify({ name: account.name, enabled: !account.enabled }),
+        });
+        await loadAccounts();
+      } catch (error) {
+        window.alert(error.message);
+      }
+    });
+  });
+
+  const controls = element("div", "card-actions");
+  controls.append(renameButton, toggleButton, button("Delete", "danger quiet small", () => deleteAccount(account)));
+  header.append(titleBlock, controls);
+  card.append(header);
+
+  const cardMessage = element("p", "form-message");
+  cardMessage.setAttribute("aria-live", "polite");
+  card.append(cardMessage, editForm);
 
   const details = element("details", "account-details");
   const summary = element("summary", "", "Keys and Model access");
@@ -89,18 +118,13 @@ function renderAccount(account) {
     if (details.open && !details.loaded && !details.loading) loadAccountDetails(account, details, panel);
   });
   card.append(details);
-  return card;
-}
 
-async function setAccountEnabled(account, enabled) {
-  try {
-    await api(`/api/service-accounts/${encodeURIComponent(account.id)}`, {
-      method: "PUT", body: JSON.stringify({ name: account.name, enabled }),
-    });
-    await loadAccounts();
-  } catch (error) {
-    window.alert(error.message);
+  const stored = pendingCardMessages.get(account.id);
+  if (stored) {
+    pendingCardMessages.delete(account.id);
+    showMessage(cardMessage, stored.text, stored.kind);
   }
+  return card;
 }
 
 async function deleteAccount(account) {
@@ -133,37 +157,59 @@ async function loadAccountDetails(account, details, panel) {
   }
 }
 
+// The collapsed summary becomes stateful once the lazy detail load has real
+// counts (review S3). It stays the plain label before the first load because
+// the counts are only known after the lazy keys/grants fetch.
+function updateAccountSummary(details, keys, modelIds) {
+  const active = keys.filter((key) => !key.revokedAt).length;
+  const total = state.models.length;
+  details.querySelector("summary").textContent =
+    `Keys and Model access — ${active} active key${active === 1 ? "" : "s"} · ${modelIds.length} of ${total} Model${total === 1 ? "" : "s"} granted`;
+}
+
 function renderAccountDetails(account, details, panel, keys, modelIds) {
   panel.replaceChildren();
   const keySection = element("section", "detail-section");
   const keyHeading = element("div", "detail-heading");
-  keyHeading.append(element("h5", "", "Local API keys"), element("p", "muted", "A new key is shown once. Store it somewhere safe."));
-  const issueButton = button("Issue new key", "primary small", async () => {
-    issueButton.disabled = true;
-    try {
-      const issued = await api(`/api/service-accounts/${encodeURIComponent(account.id)}/keys`, {
-        method: "POST", body: JSON.stringify({}),
-      });
-      keys = [issued.metadata, ...keys];
-      renderAccountDetails(account, details, panel, keys, modelIds);
-      showKeyOnce(panel, issued.key);
-    } catch (error) {
-      showMessage(keyMessage, error.message, "error");
-    } finally {
-      issueButton.disabled = false;
-    }
-  });
-  keyHeading.append(issueButton);
-  keySection.append(keyHeading);
+  const headingCopy = element("div");
+  headingCopy.append(element("h5", "", "API keys"), element("p", "muted", "A new key is shown once. Store it somewhere safe."));
+  const labelInput = element("input");
+  labelInput.type = "text";
+  labelInput.maxLength = 128;
+  labelInput.placeholder = "Key label (optional)";
+  labelInput.setAttribute("aria-label", "Key label (optional)");
   const keyMessage = element("p", "form-message");
   keyMessage.setAttribute("aria-live", "polite");
-  keySection.append(keyMessage);
+  const createKeyButton = button("Create key", "primary small", () => {
+    withBusy(createKeyButton, async () => {
+      const label = labelInput.value.trim();
+      showMessage(keyMessage);
+      try {
+        const issued = await api(`/api/service-accounts/${encodeURIComponent(account.id)}/keys`, {
+          method: "POST", body: label ? JSON.stringify({ label }) : JSON.stringify({}),
+        });
+        keys = [issued.metadata, ...keys];
+        labelInput.value = "";
+        const fresh = renderAccountDetails(account, details, panel, keys, modelIds);
+        announceSuccess(fresh.keyMessage, "Key created. Copy it from the highlighted box now — it is shown only once.");
+        scrollCardIntoView(panel.closest(".account-card"));
+        showKeyOnce(panel, issued.key);
+      } catch (error) {
+        showMessage(keyMessage, formErrorText(error, { kind: "service-account", action: "create" }), "error");
+      }
+    });
+  });
+  const issueControls = element("div", "key-issue-controls");
+  issueControls.append(labelInput, createKeyButton);
+  keyHeading.append(headingCopy, issueControls);
+  keySection.append(keyHeading, keyMessage);
   if (keys.length === 0) {
-    keySection.append(element("p", "empty-inline", "No keys have been issued."));
+    keySection.append(element("p", "empty-inline", "No keys yet."));
   } else {
     const keyList = element("ul", "key-list");
     for (const key of keys) {
-      const row = element("li", "key-row");
+      const revoked = Boolean(key.revokedAt);
+      const row = element("li", revoked ? "key-row key-row-revoked" : "key-row");
       const keyInfo = element("div", "key-info");
       if (key.label) {
         keyInfo.append(element("strong", "", key.label));
@@ -171,22 +217,24 @@ function renderAccountDetails(account, details, panel, keys, modelIds) {
       } else {
         keyInfo.append(element("strong", "", key.displayHint));
       }
-      const revoked = Boolean(key.revokedAt);
       keyInfo.append(element("span", "muted", `${revoked ? "Revoked" : "Active"} · issued ${new Date(key.createdAt).toLocaleString()}`));
       row.append(keyInfo);
       if (!revoked) {
-        row.append(button("Revoke", "danger quiet small", async () => {
+        const revokeButton = button("Revoke", "danger quiet small", () => {
           if (!window.confirm(`Revoke key ${key.displayHint}? New requests using this key will be denied.`)) return;
-          try {
-            await api(`/api/service-accounts/${encodeURIComponent(account.id)}/keys/${encodeURIComponent(key.id)}/revoke`, {
-              method: "POST", body: JSON.stringify({}),
-            });
-            const refreshed = await api(`/api/service-accounts/${encodeURIComponent(account.id)}/keys`);
-            renderAccountDetails(account, details, panel, refreshed, modelIds);
-          } catch (error) {
-            showMessage(keyMessage, error.message, "error");
-          }
-        }));
+          withBusy(revokeButton, async () => {
+            try {
+              await api(`/api/service-accounts/${encodeURIComponent(account.id)}/keys/${encodeURIComponent(key.id)}/revoke`, {
+                method: "POST", body: JSON.stringify({}),
+              });
+              const refreshed = await api(`/api/service-accounts/${encodeURIComponent(account.id)}/keys`);
+              renderAccountDetails(account, details, panel, refreshed, modelIds);
+            } catch (error) {
+              showMessage(keyMessage, error.message, "error");
+            }
+          });
+        });
+        row.append(revokeButton);
       }
       keyList.append(row);
     }
@@ -198,7 +246,11 @@ function renderAccountDetails(account, details, panel, keys, modelIds) {
   grantsSection.append(element("h5", "", "Permitted Models"));
   grantsSection.append(element("p", "muted", "Only selected Models are available to this account. New Models need an explicit grant."));
   if (state.models.length === 0) {
-    grantsSection.append(element("p", "empty-inline", "Add a Model before granting access."));
+    // Review S1: the empty state bridges to the other half of the key+grant
+    // invariant instead of dead-ending.
+    const empty = element("p", "empty-inline", "Add a Model before granting access. ");
+    empty.append(pageLink("Go to Models", "models"));
+    grantsSection.append(empty);
   } else {
     const grantForm = element("form", "grant-form");
     const checkList = element("div", "grant-list");
@@ -229,6 +281,7 @@ function renderAccountDetails(account, details, panel, keys, modelIds) {
         });
         modelIds = result.modelIds;
         showMessage(grantMessage, "Model access saved.", "success");
+        updateAccountSummary(details, keys, modelIds);
       } catch (error) {
         showMessage(grantMessage, error.message, "error");
       } finally {
@@ -239,6 +292,58 @@ function renderAccountDetails(account, details, panel, keys, modelIds) {
   }
   panel.append(grantsSection);
   panel.append(renderPiSetupSection(account));
+  updateAccountSummary(details, keys, modelIds);
+  return { keyMessage };
+}
+
+// Recent rejections (review S2): the pre-admission harness rejections ring
+// (decision 9c), rendered newest-first. Loaded with the page, manual refresh
+// only — deliberately no auto-polling, since these are diagnostics, not
+// live traffic.
+async function loadRejections() {
+  const content = byId("rejections-content");
+  content.replaceChildren(element("p", "muted", "Loading rejections…"));
+  try {
+    const rejections = await api("/api/rejections");
+    renderRejections(rejections);
+  } catch (error) {
+    const failure = element("p", "inline-error", `Could not load rejections: ${error.message}`);
+    failure.setAttribute("role", "alert");
+    content.replaceChildren(failure, button("Retry", "quiet small", loadRejections));
+  }
+}
+
+function renderRejections(rejections) {
+  const content = byId("rejections-content");
+  content.replaceChildren();
+  if (!rejections.length) {
+    content.append(element("p", "empty-state", "No rejected requests recorded. Rejections happen before request recording — a call with a bad key or missing grant shows here."));
+    return;
+  }
+  const table = element("table", "data-table rejections-table");
+  const head = element("thead");
+  const headRow = element("tr");
+  for (const label of ["Time (UTC)", "Key", "Code", "Model", "Service account"]) headRow.append(element("th", "", label));
+  head.append(headRow);
+  const body = element("tbody");
+  for (const rejection of rejections) {
+    const row = element("tr");
+    row.append(element("td", "", formatUTC(rejection.at)));
+    row.append(element("td", "", rejection.keyHint ? `Key ending ${rejection.keyHint}` : "Unknown key"));
+    const code = element("td", "", rejectionCodeLabel(rejection.code));
+    if (rejection.code && rejectionCodeLabel(rejection.code) !== rejection.code) code.title = rejection.code;
+    row.append(code);
+    row.append(element("td", "", rejection.model || "—"));
+    const account = element("td");
+    account.append(element("strong", "", rejection.serviceAccountName || "—"));
+    if (rejection.serviceAccountName && rejection.serviceAccountId) account.append(element("small", "", rejection.serviceAccountId));
+    row.append(account);
+    body.append(row);
+  }
+  table.append(head, body);
+  const scroll = element("div", "table-scroll");
+  scroll.append(table);
+  content.append(scroll);
 }
 
 function renderPiSetupSection(account) {
@@ -286,7 +391,7 @@ function renderPiSetupResult(account, content, result) {
   }
 
   const environmentName = result.apiKeyEnvironmentVariable;
-  content.append(element("p", "muted", "Pi will read its API key from this environment variable. Issue a Gyemoim key above if needed, copy it when it is shown once, and set the variable in the environment used to launch pi:"));
+  content.append(element("p", "muted", "Pi will read its API key from this environment variable. Create a Gyemoim key above if needed, copy it when it is shown once, and set the variable in the environment used to launch pi:"));
   content.append(element("code", "pi-env-command", `export ${environmentName}='paste-the-one-time-issued-Gyemoim-key-here'`));
   content.append(element("p", "muted", "Download or copy this fragment, then merge its provider entry into the providers object in ~/.pi/agent/models.json. Preserve existing providers and other settings. Gyemoim does not write that file automatically. The provider baseUrl is built from the browser address you are using right now, so the fragment works through reverse proxies and remote access without server-side URL guessing. Check setup again after changing grants or metadata."));
   const withBaseURL = {
@@ -350,25 +455,41 @@ function showKeyOnce(panel, plaintext) {
   secret.tabIndex = 0;
 }
 
+// Review S5: reloading or closing the tab with a revealed one-time key still
+// on screen loses it forever, so the browser's own leave-guard fires. The
+// in-app navigation guard lives in nav.js (it must run before the hash
+// moves); both paths consult the same sensitiveCleanup machinery, so
+// dismissing the key removes the guard.
+window.addEventListener("beforeunload", (event) => {
+  if (state.sensitiveCleanup.size > 0) {
+    event.preventDefault();
+    event.returnValue = "";
+  }
+});
+
 function providerName(providerId) {
   return state.providers.find((provider) => provider.id === providerId)?.name || "Unknown provider";
 }
 
-byId("account-create-form").addEventListener("submit", async (event) => {
+const accountCreateForm = byId("account-create-form");
+clearMessageOnInput(accountCreateForm, byId("account-create-message"));
+accountCreateForm.addEventListener("submit", (event) => {
   event.preventDefault();
   const form = event.currentTarget;
   const submit = form.querySelector('[type="submit"]');
   const message = byId("account-create-message");
-  submit.disabled = true;
-  showMessage(message);
-  try {
-    await api("/api/service-accounts", { method: "POST", body: JSON.stringify({ name: form.elements.name.value, enabled: true }) });
-    form.reset();
-    showMessage(message, "Service account added. Grant Models and issue a key when ready.", "success");
-    await loadAccounts();
-  } catch (error) {
-    showMessage(message, error.message, "error");
-  } finally {
-    submit.disabled = false;
-  }
+  withBusy(submit, async () => {
+    showMessage(message);
+    try {
+      const created = await api("/api/service-accounts", { method: "POST", body: JSON.stringify({ name: form.elements.name.value, enabled: true }) });
+      form.reset();
+      announceSuccess(message, "Service account added. Grant Models and create a key when ready.");
+      await loadAccounts();
+      if (created?.id) scrollCardIntoView(byId("account-list").querySelector(`[data-account-id="${CSS.escape(created.id)}"]`));
+    } catch (error) {
+      showMessage(message, formErrorText(error, { kind: "service-account", action: "create", name: form.elements.name.value }), "error");
+    }
+  });
 });
+
+byId("rejections-refresh").addEventListener("click", loadRejections);

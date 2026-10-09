@@ -707,3 +707,145 @@ complete with a bogus authorization code → `{"status":"failed"}`,
 provider status stays `disconnected`), which is why the P4 browser check
 stubs the poll response. Deviations: none beyond the P9 skip documented
 above.
+
+### Step 7 — Service accounts page (2026-10-09)
+
+Changes in `internal/httpui/assets/js/pages/service-accounts.js`,
+`js/nav.js`, `js/format.js`, `js/pages/models.js`, `assets/index.html`,
+and `assets/site.css`; no Go changes.
+
+- **S1 (grant/Models bridge).** The grants section's empty state
+  (service-accounts.js:250-253) now reads "Add a Model before granting
+  access. " followed by a `pageLink("Go to Models", "models")` button.
+  Mirrored on the Models page: the Model form's "not automatically
+  granted" note gains " Grant access on the Service accounts page.
+  [Service accounts]" via a module-level append in models.js:233-239
+  (index.html text unchanged; the link is a `pageLink` button because the
+  CSP forbids inline handlers and the router is hash-based).
+- **S3 (collapsed summary made stateful) — choice documented: the summary
+  line, not the header readiness dot.** A header readiness color would
+  require eagerly fetching keys+grants for every account card, which the
+  brief forbids ("keep lazy loading"); the summary line gets its counts
+  from the lazy detail load. `updateAccountSummary` (service-accounts.js:163)
+  rewrites the collapsed `<summary>` to `Keys and Model access — <n>
+  active key<s> · <g> of <k> Model<s> granted` after the lazy load
+  (service-accounts.js:295), after key create/revoke (via the
+  renderAccountDetails re-render), and after a grants save
+  (service-accounts.js:284). Counts derive from non-revoked keys and
+  `modelIds.length` against `state.models.length`; pluralization is
+  grammatical ("1 of 1 Model granted" — deliberate deviation from the
+  brief's literal `<k> Models` template for the 1-of-1 case). Before the
+  first expand the summary stays the plain label (counts unknown without
+  the lazy fetch).
+- **S2 (Recent rejections panel).** New full-width panel in index.html:138-141
+  ("Recent rejections", subtitle explaining pre-recording rejections,
+  manual `#rejections-refresh` button). `loadRejections` (service-accounts.js:303)
+  is fired detached from the accounts load on every page load/refresh
+  (service-accounts.js:21) — lazy with the page, manual refresh only, no
+  auto-polling. Rows are a `.data-table` (service-accounts.js:316):
+  time via `formatUTC` (explicit UTC), key hint as "Key ending <hint>"
+  or "Unknown key", code via the new `rejectionCodeLabel` (format.js:117-133,
+  human labels for all eleven pre-admission codes the harness records;
+  unknown codes pass through verbatim per the explicit-errors invariant,
+  and known codes carry the raw enum as a title attribute), model name,
+  and service-account name with muted id. Error state is a role="alert"
+  message plus a Retry button (service-accounts.js:310-313). Empty state
+  is exactly the brief's sentence.
+- **S4 (key labels).** The key-issue heading gains a "Key label
+  (optional)" input (maxlength 128, aria-labeled) beside the create
+  button (service-accounts.js:174-180, `.key-issue-controls` layout in
+  site.css:160-161). Creating POSTs `{label}` when non-empty and the
+  byte-identical `{}` when empty (service-accounts.js:188); the input
+  clears on success. Step 3's labeled-row rendering already displays it.
+- **S5 (leave-guard) — scope: the revealed-key case only.** One
+  choke point in nav.js `applyHash` (nav.js:48-76):
+  `declinedSensitiveLeave` asks `window.confirm("A just-issued key that
+  has not been copied will be lost. Leave anyway?")` when leaving
+  Service accounts while `state.sensitiveCleanup` is non-empty — i.e.
+  exactly while a show-once reveal is undismissed, because dismissing
+  the key removes its cleanup from the set. Declining in-app reverts the
+  hash via `location.replace(renderedHash)` (no history entry); the
+  pre-existing `showPage` cleanup then handles accepted leaves. Reload/
+  close is covered by a `beforeunload` handler in service-accounts.js:463-470
+  consulting the same set, so both guards vanish after "Dismiss and
+  clear". An intermediate implementation that checked in both `navigate()`
+  and `renderRoute()` double-fired the confirm on the in-app path
+  (caught in browser testing) — fixed by collapsing to the single
+  `applyHash` choke point.
+- **S6 (Rename placement).** Rename moved into the header `.card-actions`
+  row as Rename · Disable · Delete (service-accounts.js:105-108); the
+  stray `.edit-row` wrapper and both of its CSS rules are deleted
+  (site.css former line 138 and the 420px media rule).
+- **S7 (wording + revoked keys + confirms + feedback).** "Issue local
+  keys for harnesses" → "Create API keys for your agents" (index.html:121);
+  detail heading "Local API keys" → "API keys"; "Issue new key" →
+  "Create key"; "No keys have been issued." → "No keys yet."; the account
+  empty state and create success drop "harness"/"issue" ("...create a key
+  when ready."). Revoked keys: verified there is no key-delete endpoint
+  (management routes only expose `POST .../keys/{id}/revoke`), so per the
+  brief they stay listed — visually muted via `.key-row-revoked`
+  (opacity .6, muted strong, site.css:157-159) with no Remove affordance.
+  Disable on an enabled account now confirms with
+  `Disable “X”? Their keys stop working immediately. You can enable them
+  again later.` (service-accounts.js:90; Enable stays instant). Key
+  creation shows "Key created. Copy it from the highlighted box now — it
+  is shown only once." and `scrollCardIntoView`s the account card
+  (service-accounts.js:192-195). Create/rename errors go through
+  `formErrorText` (create: service-accounts.js:199, rename :86, account
+  create :487), so a duplicate account name renders the step-5 human
+  sentence. Rename success survives the list re-render via a
+  `pendingCardMessages` map consumed by `renderAccount`
+  (service-accounts.js:14,81,122-125) and lands "Name saved." on the
+  fresh card's message slot. Account-create scrolls the new card into
+  view via its `data-account-id` (service-accounts.js:490).
+- **Item 8 (feedback standard).** `withBusy` wraps create-key,
+  disable/enable, rename, account create, and revoke buttons;
+  `clearMessageOnInput` on the account create form (and the rename form);
+  `announceSuccess` for all success messages.
+
+Verification: `node --check` on the changed modules OK (nav.js,
+format.js, pages/service-accounts.js, pages/models.js; full 13-module
+.mjs sweep also clean); `go vet ./...` OK; `CGO_ENABLED=0 go build
+-trimpath` OK; `./scripts/build-release.sh` builds all four targets.
+Browser pass on a private instance (port 9968, XDG-isolated data dir,
+seeded via API: 1 provider, 1 Model `gpt-x`, accounts "pi work" (labeled
+key + grant) and "ci bot" (unlabeled key, no grant), plus real `/v1`
+rejections triggered by curl). Evidence: rejections panel renders 3 rows
+newest-first with "Invalid API key"/"Model access denied" labels, "Key
+ending s-99"/"Key ending z9Lg"/"Unknown key", model "gpt-x", service
+account "ci bot" + muted id, and "—" for fields the ring omits; fresh
+instance (port 9969, second data dir) shows exactly the brief's empty
+state; error state via an aborted `/api/rejections` route shows
+"Could not load rejections: Failed to fetch" + Retry, and Retry after
+unrouting restores the rows; pi work's collapsed summary reads "Keys and
+Model access — 1 active key · 1 of 1 Model granted" (and "6 active keys"
+after churn) without expanding; labeled key creation via the new input
+("rotation test", "guard test") shows the label row, success message,
+cleared input, and card-highlight; leave-guard: nav to Overview with a
+revealed key fires exactly one confirm with the exact text, dismiss
+stays on the page with the reveal intact, accept leaves to #/overview
+with the cleanup applied ("The one-time key has been cleared…", secret
+emptied), and after "Dismiss and clear" no dialog appears; with
+`--no-auto-dialog`, reload with an active reveal raises a beforeunload
+dialog and after dismissing the key reload proceeds dialog-free;
+Rename · Disable · Delete in the header row (420px layout stacks them
+below the title); rename shows "Name saved." on the fresh card and
+round-trips the name; Disable confirm text read back verbatim,
+Disable→"Disabled" badge→Enable→"Enabled" round trip; revoke puts the
+row in `key-row-revoked` (computed opacity 0.6, "Revoked ·", no Revoke
+button); deleting the Model flipped the grants section to "Add a Model
+before granting access. Go to Models" whose link lands on #/models,
+where the form note reads "…Grant access on the Service accounts page."
+with a working link back; duplicate account create renders `A service
+account named “dup” already exists. Choose another name.` and typing
+clears it; Router regression after the applyHash rework: nav buttons,
+Back (restores #/service-accounts + title), `#/bogus` normalizes to
+`#/overview`, same-page click is a no-op, no spurious dialogs; 390px
+viewport: `scrollWidth == clientWidth`, header actions stack, summary
+visible collapsed (the rejections table keeps the established
+`.table-scroll` horizontal-scroll container, min-width 640px); browser
+console clean on both instances. Deviations: none — the only judgment
+calls are the documented S3 choice (summary line over header dot, for
+lazy loading), grammatical "1 of 1 Model granted", revoked keys staying
+listed but muted (no server endpoint), and the S5 single-choke-point
+rework after the double-confirm bug was caught in testing.

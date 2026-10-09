@@ -135,7 +135,6 @@ h4 { min-width: 0; overflow-wrap: anywhere; margin: 0; color: #2e3948; font-size
 .inline-form { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; margin-top: 12px; padding-top: 12px; border-top: 1px solid #eef0f3; }
 .inline-form input { flex: 1 1 180px; }
 .inline-form .form-message { flex-basis: 100%; }
-.edit-row { display: flex; justify-content: flex-end; margin-top: 5px; }
 .account-details { margin-top: 9px; border-top: 1px solid #eef0f3; }
 .account-details summary { padding: 12px 2px 2px; color: #465466; font-size: 11px; font-weight: 650; cursor: pointer; }
 .account-detail-content { padding: 12px 0 0; }
@@ -154,6 +153,12 @@ h5 { margin: 0; color: #3b4654; font-size: 11px; font-weight: 680; }
 .key-value { display: block; overflow-wrap: anywhere; padding: 10px; border: 1px solid #eadfbe; border-radius: 5px; color: #4e4022; background: #fff; font-size: 11px; user-select: all; }
 .key-cleared { border-color: #dce2e8; background: #f8f9fa; }
 .key-cleared p { margin: 0; }
+/* Revoked keys have no server-side delete, so they stay listed as history but
+   visually muted (review S7). */
+.key-row-revoked { opacity: .6; }
+.key-row-revoked .key-info strong { color: #8a949f; }
+.key-issue-controls { display: flex; flex: 1 1 240px; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 7px; min-width: 0; }
+.key-issue-controls input { flex: 1 1 150px; width: auto; }
 .grant-list { display: grid; gap: 6px; margin: 11px 0; }
 .grant-option { display: grid; grid-template-columns: 18px minmax(0, 1fr); align-items: center; gap: 2px 7px; padding: 8px; border: 1px solid #edf0f3; border-radius: 6px; cursor: pointer; }
 .grant-option input { grid-row: span 2; width: 16px; min-height: 16px; margin: 0; accent-color: var(--accent); }
@@ -216,7 +221,6 @@ h5 { margin: 0; color: #3b4654; font-size: 11px; font-weight: 680; }
   .ready-badge { padding: 6px 8px; font-size: 9px; }
   .resource-header { flex-direction: column; }
   .resource-header .card-actions { width: 100%; }
-  .edit-row { justify-content: flex-start; }
   .detail-heading { align-items: flex-start; }
 }
 .metadata-editor { padding: 12px; border: 1px solid #e8edf2; border-radius: 7px; background: #fbfcfd; }
@@ -241,6 +245,8 @@ h5 { margin: 0; color: #3b4654; font-size: 11px; font-weight: 680; }
 
 
 /* Bounded history investigation */
+.rejections-panel { margin-top: 17px; }
+.rejections-table { min-width: 640px; }
 .overview-history, .overview-performance { margin-top: 17px; }
 .overview-analysis-grid { display: grid; grid-template-columns: minmax(220px, .7fr) minmax(0, 1.8fr); gap: 18px; margin-top: 18px; }
 .overview-subsection { min-width: 0; }

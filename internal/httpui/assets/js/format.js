@@ -111,6 +111,27 @@ export function outcomeLegend() {
   return details;
 }
 
+// Pre-admission harness rejection codes (overhaul decision 9c) get human
+// labels for the Service accounts page's Recent-rejections panel. Unknown
+// codes pass through verbatim (explicit-errors invariant) — never masked.
+const rejectionCodeLabels = {
+  invalid_api_key: "Invalid API key",
+  invalid_request: "Invalid request",
+  invalid_json: "Invalid JSON body",
+  request_too_large: "Request too large",
+  model_required: "Model required",
+  model_not_found: "Model not found",
+  model_access_denied: "Model access denied",
+  concurrent_request_limit: "Concurrency limit reached",
+  service_unavailable: "Service unavailable",
+  internal_error: "Internal error",
+  method_not_allowed: "Method not allowed",
+};
+
+export function rejectionCodeLabel(code) {
+  return Object.hasOwn(rejectionCodeLabels, code) ? rejectionCodeLabels[code] : (code || "Unknown");
+}
+
 // Freshness stamp for status-line slots (review B3 / decision 4): the load
 // success feedback, e.g. "Updated 14:03:27 UTC".
 export function updatedStamp() {

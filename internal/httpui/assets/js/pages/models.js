@@ -3,6 +3,7 @@
 import { api } from "../api.js";
 import { state } from "../state.js";
 import { button, byId, element, showMessage } from "../dom.js";
+import { pageLink } from "../nav.js";
 
 export async function loadModelsAndProviders() {
   const list = byId("model-list");
@@ -229,3 +230,12 @@ byId("model-form").addEventListener("submit", submitModel);
 byId("model-cancel").addEventListener("click", cancelModelEdit);
 byId("model-provider").addEventListener("change", resetProviderModelCatalog);
 byId("model-catalog-load").addEventListener("click", loadProviderModelCatalog);
+
+// Review S1: the grant note bridges to the other half of the key+grant
+// invariant — the Model form's "not automatically granted" warning links to
+// the page where grants are made. The link is a pageLink button because the
+// strict CSP forbids inline anchors with handlers and the router is hash-based.
+{
+  const note = byId("model-form-heading").parentElement.querySelector(".muted");
+  note.append(" Grant access on the ", pageLink("Service accounts", "service-accounts"), " page.");
+}
