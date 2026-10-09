@@ -25,6 +25,30 @@ recovery is pending after a failure or restart, queries remain HTTP 503 and
 `GET /api/storage` exposes the deletion range, segment progress, state, and safe error.
 The journal is replayed before normal history validation and compression at startup.
 
+### Read-only deletion preview
+
+`GET /api/storage/delete-preview?first=<date>&last=<date>` answers "how much would
+that deletion remove?" without changing any history file. It uses the same date
+validation, effective interval computation (shared helper with the deletion), and
+`started_at` membership test, and takes a regular query lease: while maintenance,
+recovery, or compression holds the exclusive lease it returns the same HTTP 503
+`history_maintenance`, it honors the 30-second deadline with an explicit timeout, and
+it never returns a partial result. The response is
+`{"records": n, "segments": n, "capped": bool, "bytes": n|null}`. `records` counts
+record lines the deletion would remove across closed raw segments, closed compressed
+segments, and the active file (which the deletion rotates first). `segments` mirrors
+`segmentsProcessed`: the deletion rewrites every closed segment, not only the ones
+holding matches. The count is bounded — beyond 100,000 matching records the scan
+stops and `capped` is `true`. Segments whose modification time plus a 2-second margin
+precedes the first date are provably outside the range (a record's `started_at` never
+exceeds its write time and closed segments are immutable) and are skipped without
+being read or decompressed; there is no symmetric skip on the upper side because
+long-running requests keep writing continuation records into later segments. `bytes`
+is always `null`: removed bytes are interleaved with retained bytes inside immutable
+segments, and no cheap honest size exists. The preview is read-only and does not
+perform the in-progress-overlap (409) check; callers should state that rule when
+asking for confirmation.
+
 
 ## Request list
 

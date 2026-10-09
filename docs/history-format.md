@@ -220,3 +220,14 @@ The deletion result reports the effective `from` and exclusive `to` timestamps,
 processed segment count, and removed history-record count. The record count is stored
 in the per-segment checkpoint before replacement, so startup replay retains it across
 a crash after the replacement rename.
+
+A read-only deletion preview (`GET /api/storage/delete-preview`, documented in
+`history-query.md`) reuses the deletion's interval computation and record-reading
+machinery without changing files. It skips closed segments — raw or compressed — whose
+modification time plus a 2-second margin precedes the range start: closed segments are
+immutable, so the mtime of a raw segment bounds its last write and the mtime of a
+`.zst` segment bounds the later compression time, and a record's `started_at` never
+exceeds its write time. Skipped segments are neither opened nor decompressed. There is
+no symmetric skip on the upper side: a request started before the range end may keep
+writing continuation records into later segments, and those records are part of what
+the deletion removes.

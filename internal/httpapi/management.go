@@ -136,6 +136,8 @@ func (api *managementAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		api.resetUserPassword(w, r, parts[1])
 	case len(parts) == 1 && parts[0] == "storage":
 		api.storageStatus(w, r)
+	case len(parts) == 2 && parts[0] == "storage" && parts[1] == "delete-preview":
+		api.previewStorageDelete(w, r)
 	case len(parts) == 2 && parts[0] == "storage" && parts[1] == "delete":
 		api.deleteStorageHistory(w, r)
 	case len(parts) == 1 && parts[0] == "rejections":

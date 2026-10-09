@@ -128,6 +128,7 @@ func (r *Recorder) BeginMaintenance(ctx context.Context) (*MaintenanceLease, err
 type queryFile struct {
 	name       string
 	size       int64
+	modTime    time.Time
 	active     bool
 	compressed bool
 }
@@ -192,11 +193,11 @@ func (r *Recorder) querySnapshot(ctx context.Context) (*QuerySnapshot, error) {
 	}
 	for _, segment := range segments {
 		if !r.verifiedCompressed[segment.Name] || !compressedNames[segment.Name+compressedSuffix] {
-			snapshot.files = append(snapshot.files, queryFile{name: segment.Name, size: segment.Size})
+			snapshot.files = append(snapshot.files, queryFile{name: segment.Name, size: segment.Size, modTime: segment.ModifiedAt})
 		}
 	}
 	for _, segment := range compressed {
-		snapshot.files = append(snapshot.files, queryFile{name: segment.Name, size: segment.Size, compressed: true})
+		snapshot.files = append(snapshot.files, queryFile{name: segment.Name, size: segment.Size, modTime: segment.ModifiedAt, compressed: true})
 	}
 	activePath := filepath.Join(r.historyDir, activeFileName)
 	activeFile, openErr := os.Open(activePath)
@@ -215,7 +216,7 @@ func (r *Recorder) querySnapshot(ctx context.Context) (*QuerySnapshot, error) {
 			return nil, errors.New("active history path is not a regular file")
 		}
 		snapshot.active = activeFile
-		snapshot.files = append(snapshot.files, queryFile{name: activeFileName, size: info.Size(), active: true})
+		snapshot.files = append(snapshot.files, queryFile{name: activeFileName, size: info.Size(), modTime: info.ModTime(), active: true})
 	} else if !errors.Is(openErr, os.ErrNotExist) {
 		r.mu.Unlock()
 		_ = snapshot.Close()
@@ -241,7 +242,20 @@ func (r *Recorder) querySnapshot(ctx context.Context) (*QuerySnapshot, error) {
 }
 
 func (s *QuerySnapshot) scan(ctx context.Context, visit func(Record) error) error {
+	return s.scanWithSkip(ctx, nil, visit)
+}
+
+// scanWithSkip visits records from every snapshot file the skip predicate does
+// not exclude. The predicate may exclude a file only when it can prove the
+// file holds no record the caller cares about; the delete preview uses
+// filesystem modification times as a sound upper bound on record write times
+// (see preview.go for the exact rule and its limits). A nil predicate scans
+// everything, which is what every regular history query does.
+func (s *QuerySnapshot) scanWithSkip(ctx context.Context, skip func(queryFile) bool, visit func(Record) error) error {
 	for _, file := range s.files {
+		if skip != nil && skip(file) {
+			continue
+		}
 		if err := ctx.Err(); err != nil {
 			return err
 		}

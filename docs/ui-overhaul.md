@@ -1524,3 +1524,106 @@ upgrade-path seeding reused the admin bootstrap rather than a second user
 (equivalent coverage), and the pre-existing `issued <toLocaleString>`
 rendering in the same line was left untouched (established pre-overhaul
 behavior, not in this item's scope).
+
+### Review follow-up — T2 deletion preview (2026-10-09)
+
+The date-range deletion's confirm was blind: the admin picked two dates and
+confirmed with no indication of scale, learning `recordsRemoved` only after the
+fact. This item adds a read-only preview endpoint and wires it into the
+Storage page's destructive chain.
+
+**Backend.** New `GET /api/storage/delete-preview?first=<date>&last=<date>`
+(management session gate, GET-only — plain GET semantics are CSRF-safe like the
+other reads). `history.QueryService.DeletePreview` (new
+`internal/history/preview.go`) answers exactly "how many records would
+`DeleteDateRange` remove for this inclusive UTC date range?":
+
+- The effective interval comes from a new shared `deletionInterval` helper —
+  the validation block moved verbatim out of `Recorder.DeleteDateRangeAt`
+  (pure move; the rotation cutoff became `submittedAt.UTC()`, the same value
+  `cutoff` held) — so the preview and the deletion cannot drift apart. Same
+  400 family (`invalid_history_deletion_range`), same wording, same
+  submission-time cap.
+- Counting takes a regular query lease via `querySnapshot` (active file
+  through its captured length + closed raw + closed compressed, with the
+  usual verified-pair and validation handling), and counts records with the
+  deletion's exact `rewriteHistoryRecords` membership test
+  `!started_at.Before(from) && started_at.Before(to)`. Every closed segment
+  plus the active file is counted in `segments`, mirroring
+  `DeleteResult.segmentsProcessed` (the deletion rewrites every segment; an
+  empty active file is never rotated, so it is not counted).
+- Bounded like every history read: 30-second deadline (explicit 504
+  `history_query_timeout`, never a partial "looks fine" result) and a hard
+  `MaxDeletePreviewRecords` cap of 100,000 — at the cap the scan stops and
+  `capped: true` is reported. Maintenance/normal query errors propagate
+  unchanged: 503 `history_maintenance` while deletion, recovery, or
+  compression holds the exclusive lease, 503 `history_query_busy`, 503
+  `compressed_history_unavailable`, 500 `compressed_history_invalid`.
+- Cheap honest skip: a closed segment's mtime bounds the write time of every
+  record inside it (closed files are immutable; for a compressed segment the
+  mtime bounds the later compression time, which still postdates every
+  write), and a record's `started_at` never exceeds its write time. So a
+  segment with `mtime + 2s < from` provably holds no removable record and is
+  neither opened nor decompressed (`queryFile` gained `modTime`;
+  `scanWithSkip` adds an optional per-file skip predicate, with plain `scan`
+  unchanged for all existing callers). There is deliberately no symmetric
+  skip on the upper side: a request started before `to` can keep writing
+  continuation records into later segments, and those are exactly what the
+  deletion removes. `bytes` is always `null` today: removed bytes are
+  interleaved with retained bytes inside immutable segment files and neither
+  segment metadata nor the shared bounded record reader exposes per-line
+  sizes, so no honest cheap number exists.
+- In-flight requests: the preview is read-only and does not replicate the
+  server's 409 overlap check (documented choice); the UI confirm states the
+  rule instead.
+- Response: `{"records": n, "segments": n, "capped": bool, "bytes": n|null}`.
+
+**UI** (`pages/storage.js` only; `index.html` unchanged). Clicking "Delete
+matching history" now runs the preview first — `withBusy` on the submit
+button, message "Counting matching records…" — then the confirm dialog
+includes the numbers:
+`Delete ≈20 records in 6 segments, started from <first> 00:00 UTC through
+<last> end-of-day UTC (effectively capped at submission time)? This
+permanently deletes matching history for all service accounts and Models. The
+operation is rejected without changing files if an in-progress request
+overlaps the range.` Capped previews phrase it as "over 100,000 records";
+singular forms are grammatical ("1 record in 1 segment"). Any preview failure
+(400/503/504/…) shows an explicit error and blocks the confirm — no confirm,
+no POST. The T3 live range preview line is unchanged.
+
+Verification: `gofmt -l` clean on all changed Go files; `go vet ./...` OK;
+`CGO_ENABLED=0 go build -trimpath` OK; `./scripts/build-release.sh` builds all
+four targets; `node --check pages/storage.js` OK. Synthetic history seeded
+with the server stopped (schema-2 NDJSON records matching the strict decoder):
+closed raw segments, a compressed segment (`zstd -q -c`, pair-verified and
+raw-source-removed at startup), and an active file that startup rotates.
+curl counts cross-checked against the files: main range →
+`{"records":20,"segments":6}` (8+4 decompressed-compressed +4 published
+active +4 raw); narrow ranges → 2 and 4; today-only → 0; invalid/reversed/
+future dates → 400 `invalid_history_deletion_range` byte-identical to the
+delete endpoint; POST → 405. Skip proof: two segments with mtime
+2026-08-01 carrying `started_at` 2026-10-08 records (impossible in real data,
+deliberately) — the [2026-10-08, 2026-10-09) preview returns 0, proving the
+raw skip and the no-decompression compressed skip both fire (a broken skip
+would count 8); after the compression worker later rewrote one of them with a
+fresh mtime, the same range returns 4 — the skip follows current metadata.
+Capped: a seeded 100,004-record segment returns
+`{"records":100000,"segments":7,"capped":true,"bytes":null}` in ~1 s.
+Maintenance: an invalid `.history-delete.json` (reversed dates, zero entries —
+validated and rejected, nothing replayed, no file touched) holds the lease at
+startup; preview and `/api/requests` both return the identical 503
+`history_maintenance`, and removing the journal restores 200. Browser pass on
+the private instance (port 9986): the confirm appears only after the visible
+GET `delete-preview` and carries the real numbers; dismiss → "Nothing was
+deleted."; with the preview stubbed to 503 (CDP fetch wrapper — network route
+cannot set status codes), the click shows "Could not count the matching
+records: history files are undergoing maintenance; retry shortly" and no
+confirm fires; a 900 ms stubbed preview shows the button `disabled` +
+`aria-busy="true"` + "Counting matching records…" mid-count; stubbed
+`capped:true` renders "over 100,000 records"; network audit across the whole
+session shows exactly one POST (`/api/auth/login`) and zero
+`POST /api/storage/delete`; history files unchanged; console clean.
+Deviations: the `deletionInterval` extraction touches `deletion.go` as a pure
+move (required so both paths share one interval computation); `bytes` is
+always `null` (honest — see above); the 409 overlap rule is stated in the
+confirm rather than replicated server-side.

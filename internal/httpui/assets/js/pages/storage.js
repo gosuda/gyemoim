@@ -3,7 +3,7 @@
 // polling status renderer. The destructive gating chain (required inputs →
 // client range check before any network call → confirm naming scope/dates →
 // explicit 409 handling) is kept from the pre-overhaul page.
-import { api, beginHistoryFetch, historyFetchIsCurrent } from "../api.js";
+import { api, addQuery, beginHistoryFetch, historyFetchIsCurrent } from "../api.js";
 import { state } from "../state.js";
 import { byId, element, showMessage } from "../dom.js";
 import { withBusy, clearMessageOnInput } from "../feedback.js";
@@ -236,10 +236,31 @@ deleteForm.addEventListener("submit", async (event) => {
     showMessage(deleteMessage, "Choose a valid inclusive UTC date range.", "error");
     return;
   }
-  // T2: the confirm restates the effective range including the
-  // submission-time cap and names the blast radius.
-  const confirmed = window.confirm(`Delete history records started from ${firstDate} 00:00 UTC through ${lastDate} end-of-day UTC (effectively capped at submission time)? This permanently deletes matching history for all service accounts and Models.`);
-  if (!confirmed) return;
+  // Review T2: the destructive confirm is no longer blind. A read-only
+  // preview endpoint counts what the deletion would remove first, with the
+  // submit button busy while counting. Any preview failure (including the
+  // 30-second timeout and 503 maintenance) blocks the confirm entirely —
+  // the delete POST below only fires after the dialog is accepted.
+  showMessage(deleteMessage, "Counting matching records…");
+  let preview = null;
+  try {
+    preview = await withBusy(deleteForm.querySelector('[type="submit"]'), () =>
+      api(addQuery("/api/storage/delete-preview", { first: firstDate, last: lastDate })));
+  } catch (error) {
+    showMessage(deleteMessage, `Could not count the matching records: ${error.message}`, "error");
+    return;
+  }
+  const recordText = preview.capped
+    ? `over ${formatNumber(preview.records)} records`
+    : `${formatNumber(preview.records)} ${Number(preview.records) === 1 ? "record" : "records"}`;
+  // The confirm restates the effective range including the submission-time
+  // cap, the counted scale, and the in-progress-request rule (the preview is
+  // read-only and does not replicate the server's 409 overlap check).
+  const confirmed = window.confirm(`Delete ≈${recordText} in ${countNoun(preview.segments, "segment")}, started from ${firstDate} 00:00 UTC through ${lastDate} end-of-day UTC (effectively capped at submission time)? This permanently deletes matching history for all service accounts and Models. The operation is rejected without changing files if an in-progress request overlaps the range.`);
+  if (!confirmed) {
+    showMessage(deleteMessage, "Nothing was deleted.");
+    return;
+  }
   const pollController = new AbortController();
   let pollInFlight = false;
   const poll = setInterval(async () => {

@@ -711,6 +711,38 @@ func (r *Recorder) DeleteDateRange(ctx context.Context, firstDate, lastDate stri
 	return r.DeleteDateRangeAt(ctx, firstDate, lastDate, time.Now().UTC())
 }
 
+// deletionInterval validates an inclusive UTC date range exactly as the
+// date-range deletion does and returns its effective half-open interval
+// [from, to), capped at the submission time. The read-only delete preview
+// reuses this helper so the preview and the deletion can never drift apart.
+func deletionInterval(firstDate, lastDate string, submittedAt time.Time) (time.Time, time.Time, error) {
+	if submittedAt.IsZero() {
+		return time.Time{}, time.Time{}, ErrInvalidDeletionRange
+	}
+	cutoff := submittedAt.UTC()
+	from, err := parseDeletionDate(firstDate)
+	if err != nil {
+		return time.Time{}, time.Time{}, ErrInvalidDeletionRange
+	}
+	last, err := parseDeletionDate(lastDate)
+	if err != nil || last.Before(from) {
+		return time.Time{}, time.Time{}, ErrInvalidDeletionRange
+	}
+	today, _ := parseDeletionDate(cutoff.Format("2006-01-02"))
+	if last.After(today) {
+		return time.Time{}, time.Time{}, ErrInvalidDeletionRange
+	}
+	requestedTo := last.AddDate(0, 0, 1)
+	to := requestedTo
+	if to.After(cutoff) {
+		to = cutoff
+	}
+	if !from.Before(to) {
+		return time.Time{}, time.Time{}, ErrInvalidDeletionRange
+	}
+	return from, to, nil
+}
+
 // DeleteDateRangeAt keeps the submitted cutoff stable while existing query leases
 // drain. Recorder.Begin captures admission timestamps under the same writer mutex.
 func (r *Recorder) DeleteDateRangeAt(ctx context.Context, firstDate, lastDate string, submittedAt time.Time) (DeleteResult, error) {
@@ -720,29 +752,9 @@ func (r *Recorder) DeleteDateRangeAt(ctx context.Context, firstDate, lastDate st
 	if r == nil || r.historyDir == "" || r.queryGate == nil {
 		return DeleteResult{}, ErrQueryUnavailable
 	}
-	if submittedAt.IsZero() {
-		return DeleteResult{}, ErrInvalidDeletionRange
-	}
-	cutoff := submittedAt.UTC()
-	from, err := parseDeletionDate(firstDate)
+	from, to, err := deletionInterval(firstDate, lastDate, submittedAt)
 	if err != nil {
-		return DeleteResult{}, ErrInvalidDeletionRange
-	}
-	last, err := parseDeletionDate(lastDate)
-	if err != nil || last.Before(from) {
-		return DeleteResult{}, ErrInvalidDeletionRange
-	}
-	today, _ := parseDeletionDate(cutoff.Format("2006-01-02"))
-	if last.After(today) {
-		return DeleteResult{}, ErrInvalidDeletionRange
-	}
-	requestedTo := last.AddDate(0, 0, 1)
-	to := requestedTo
-	if to.After(cutoff) {
-		to = cutoff
-	}
-	if !from.Before(to) {
-		return DeleteResult{}, ErrInvalidDeletionRange
+		return DeleteResult{}, err
 	}
 	lease, err := r.BeginMaintenance(ctx)
 	if err != nil {
@@ -802,7 +814,7 @@ func (r *Recorder) DeleteDateRangeAt(ctx context.Context, firstDate, lastDate st
 		return DeleteResult{}, err
 	}
 	if r.bytesWritten > 0 {
-		if err := r.rotateLocked(cutoff); err != nil {
+		if err := r.rotateLocked(submittedAt.UTC()); err != nil {
 			r.mu.Unlock()
 			return DeleteResult{}, err
 		}
