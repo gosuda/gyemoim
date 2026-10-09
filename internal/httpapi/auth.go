@@ -53,11 +53,20 @@ func (api *managementAPI) login(w http.ResponseWriter, r *http.Request) {
 		writeInvalidCredentials(w)
 		return
 	}
+	// Brute-force backoff (decision 8) is checked before any store lookup or
+	// argon2id work, so a username inside a backoff window gets the same
+	// generic 401 almost for free. Rejected attempts are not counted as
+	// failures — windows decay naturally instead of being extended by spam.
+	if api.backoff.blocked(username, time.Now()) {
+		writeInvalidCredentials(w)
+		return
+	}
 	user, err := api.store.GetUserByUsername(r.Context(), username)
 	if err != nil {
 		if errors.Is(err, config.ErrNotFound) {
 			// Equalize timing with the wrong-password path before the generic 401.
 			_ = config.VerifyPassword(input.Password, timingEqualizerHash)
+			api.backoff.recordFailure(username, time.Now())
 			writeInvalidCredentials(w)
 			return
 		}
@@ -68,6 +77,7 @@ func (api *managementAPI) login(w http.ResponseWriter, r *http.Request) {
 	// argon2id verification, keeping every 401 path equally expensive.
 	validPassword := config.VerifyPassword(input.Password, user.PasswordHash)
 	if user.DisabledAt != nil || !validPassword {
+		api.backoff.recordFailure(username, time.Now())
 		writeInvalidCredentials(w)
 		return
 	}
@@ -86,6 +96,8 @@ func (api *managementAPI) login(w http.ResponseWriter, r *http.Request) {
 		writeManagementFailure(w, err)
 		return
 	}
+	// The login succeeded, so the username's failure state is cleared.
+	api.backoff.recordSuccess(username)
 	// Opportunistic housekeeping; a failed prune must not fail the login.
 	_, _ = api.store.DeleteExpiredSessions(r.Context())
 	setSessionCookie(w, sessionID, expires)

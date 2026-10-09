@@ -33,6 +33,7 @@ type managementAPI struct {
 	history  *history.QueryService
 	storage  *history.Recorder
 	port     int
+	backoff  loginBackoff
 }
 
 // NewManagement creates the management API handler. Paths outside the JSON API

@@ -211,6 +211,15 @@ database must keep working.
   printed password works, the step-3 gate blocks the API until the password is
   changed, then clears; restart prints nothing; grep of the data directory
   finds no plaintext.
+- **Step 5 — done (2026-10-09).** In-memory per-username exponential backoff
+  in `internal/httpapi/backoff.go`: 1 s base doubled per consecutive real
+  failure, capped at 15 min; successful login clears state. Requests rejected
+  inside a window are cheap and do NOT extend it (spam cannot lock an account
+  forever). Memory bounded by stale-entry sweep plus a 1024-entry cap.
+  Real failures log one stderr line each (decision 8); backoff rejects are
+  not logged. Verified: first wrong attempt costs argon2id (~0.16 s), later
+  rejects ~0.4 ms, correct password during a window rejected cheaply and
+  accepted after it, different usernames independent, restart resets state.
 
 ## Work breakdown
 
