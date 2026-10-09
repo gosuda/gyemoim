@@ -21,6 +21,48 @@ The requested scope list is not treated as proof that the account granted those 
 The Provider page explains these states and offers a full-page sign-in action. Callback results redirect to the local root with a fixed result code. The UI maps only those fixed codes to messages and removes the query string. The callback does not apply Origin or CSRF checks because it is a top-level provider redirect; the listener's exact loopback Host guard still applies. The management guard permits only the callback's fixed, read-only result query on `/` through Fetch Metadata's cross-site navigation check. Callback responses set no-store, no-referrer, nosniff, and restrictive CSP headers. OAuth codes, errors, token values, and upstream error bodies are not returned in callback pages or logs.
 
 
+## Remote enrollment
+
+OpenAI accepts only loopback redirect URIs, so a headless server cannot
+complete sign-in directly; the supported procedure is credential transfer
+completing OAuth on a machine with a browser. Gyemoim implements this as a
+server-distributed enrollment script. The loopback rules above apply
+unchanged — only the loopback port varies, and within one enrollment attempt
+the start and callback URIs are identical by construction.
+
+The admin presses **Connect** on the provider card in the management UI. The
+server issues a single-use enrollment code (128 bits, ~10 minute TTL, bound
+to that provider, consumed at the first claim; a later issue invalidates an
+earlier unclaimed code) and offers a download of `gyemoim-connect.py`, a
+stdlib-only Python script embedded in the server binary and served
+session-gated at `GET /api/connect/script`. On the browser machine the admin
+runs `python3 gyemoim-connect.py <server-url> <code>`:
+
+1. The script claims the code (`POST /connect/claim`) and starts a loopback
+   HTTP server on an ephemeral port.
+2. It asks the server to start the connect flow with
+   `redirect_uri=http://127.0.0.1:<port>/auth/callback` and opens the system
+   browser at the returned authorization URL.
+3. OpenAI redirects to the loopback port; the script forwards `code` and
+   `state` to the server (`POST /connect/complete`), which completes the
+   existing flow — dynamic registration with `client_id=dynamic_agent_client`,
+   PKCE, the token exchange, and ID-token verification — and stores the
+   credentials. The script only prints the outcome.
+
+The script is a thin bridge with no OAuth logic. The claim/complete endpoints
+sit outside the session and CSRF guards by design: the script is not a
+browser, and the single-use enrollment code plus the single-use OAuth state
+recorded at claim time are the capability; every failure answers the same
+generic error. Registration uses the server's own persistent
+`ext_agent_host_id` from the start, so the stored session is bound to the
+server, not to the browser machine, and the server owns all later refreshes.
+Re-authentication after a refresh failure (`require_reauthentication`) uses
+the same enrollment flow from the provider card.
+
+Per OpenAI's self-hosted VMs guidance, usage attribution and remote
+revocation for transferred sessions are not yet available upstream; a later
+re-authorization repeats the local enrollment flow.
+
 ## Refresh and disconnect
 
 Before returning an access token to an internal caller, Gyemoim checks the provider status and saved direct-use/offline grants. If the access token expires within 60 seconds, it serializes a refresh for that provider and sends a form-encoded `refresh_token` grant with the saved issued `client_id`, saved rotating refresh token, and `resource=https://api.openai.com/v1`. It omits `scope` so the existing grant is retained, following [OpenAI account and session guidance](https://developers.openai.com/siwc/token-sharing-open-source/profiles-and-sessions). The new access token, required replacement refresh token, expiry, scopes, `earliest_refresh_at`, and validated identity are saved in one transaction. When the response omits `scope`, Gyemoim keeps the last validated granted scopes; when it omits `id_token`, it keeps the last validated ID token and identity. If a new ID token is returned, Gyemoim checks its signature, issuer, issued-client audience, expiry, and subject continuity. A refresh response has no browser authorization nonce to compare.

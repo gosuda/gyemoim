@@ -1,9 +1,10 @@
 # Web deployment plan
 
-Status: approved plan, not yet implemented. This document records the confirmed
-decisions for running Gyemoim as an always-on web service behind a reverse nginx
-proxy, reachable by remote agents from multiple locations. Design decisions here
-should be folded into `design.md` (and `oauth.md`) as they land.
+Status: implemented (steps 1–7b, 2026-10-09); deployment notes below. This
+document records the confirmed decisions for running Gyemoim as an always-on
+web service behind a reverse nginx proxy, reachable by remote agents from
+multiple locations. The decisions have been folded into `design.md` and
+`oauth.md`.
 
 ## Confirmed constraints
 
@@ -310,6 +311,170 @@ database must keep working.
 | 8 | Deployment notes (nginx on separate host, firewall, systemd unit) in this document; update `design.md` / `oauth.md` | docs review |
 
 Steps 4–7 need a real ChatGPT account for full live verification.
+
+## Deployment
+
+### Build and install
+
+Requires Go 1.25+; `CGO_ENABLED=0` is mandatory (SQLite is pure-Go
+`modernc.org/sqlite`).
+
+```sh
+./scripts/build-release.sh                                  # linux/darwin × amd64/arm64 into ./dist
+CGO_ENABLED=0 go build -trimpath -o gyemoim ./cmd/gyemoim   # current platform only
+```
+
+Install the artifact matching the server platform (e.g.
+`dist/gyemoim-linux-amd64`) as `/usr/local/bin/gyemoim`. The ChatGPT
+enrollment script is Python served by the server itself — no additional build
+targets. `zstd` must be present in the server's `PATH` for history
+compression: without it, new history segments are recorded uncompressed, but
+already-compressed segments cannot be validated or queried until `zstd`
+returns (fresh installs are unaffected).
+
+### Data directory
+
+On Linux, the data directory is `$XDG_DATA_HOME/gyemoim` when
+`XDG_DATA_HOME` is set to an absolute path, otherwise
+`~/.local/share/gyemoim` (see `internal/datadir`). It holds `config.db`,
+`history/`, and the process lock, and is created with owner-only permissions
+(0700). A service account therefore needs a writable directory referenced
+through `XDG_DATA_HOME`; the systemd recipe below points it at `/var/lib`.
+
+### systemd unit (gyemoim host)
+
+```ini
+[Unit]
+Description=Gyemoim LLM gateway
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=gyemoim
+Group=gyemoim
+StateDirectory=gyemoim
+Environment=XDG_DATA_HOME=%S
+ExecStart=/usr/local/bin/gyemoim --listen :9092
+Restart=on-failure
+RestartSec=5s
+
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+PrivateTmp=true
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target
+```
+
+- `StateDirectory=gyemoim` makes systemd create `/var/lib/gyemoim` owned by
+  `User=`. For system services `%S` expands to `/var/lib`, so
+  `Environment=XDG_DATA_HOME=%S` resolves the data directory to
+  `/var/lib/gyemoim` — the app appends `gyemoim` to `XDG_DATA_HOME`, so use
+  `%S`, **not** `%S/gyemoim` (that would nest the directory twice).
+  Directories declared in `StateDirectory=` remain writable under
+  `ProtectSystem=strict`, so no extra `ReadWritePaths=` is needed.
+- `--listen :9092` binds all interfaces so the remote nginx host can reach
+  the port; the firewall section below restricts it to the nginx host.
+- **First start**: with an empty users table, Gyemoim creates the user
+  `admin` and prints a one-time initial password to stderr, which journald
+  collects: `journalctl -u gyemoim`. Log in with it immediately — the UI
+  forces a password change before any other screen — and change it. The
+  plaintext is never persisted in the database or history; once changed, the
+  journald copy is inert (you may drop old journal entries with
+  `journalctl --vacuum-time` / `--vacuum-size` if you prefer).
+- A second process on the same data directory fails on the process lock; the
+  `Restart=on-failure` policy is safe because the previous process releases
+  the lock on exit.
+
+### nginx server block (proxy host)
+
+TLS terminates on a different LAN host; the nginx→gyemoim hop is plain HTTP.
+
+```nginx
+server {
+    listen 80;
+    server_name gyemoim.example.com;
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl;
+    http2 on;
+    server_name gyemoim.example.com;
+
+    ssl_certificate     /etc/letsencrypt/live/gyemoim.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/gyemoim.example.com/privkey.pem;
+
+    location / {
+        proxy_pass http://192.0.2.10:9092;   # gyemoim host on the LAN
+        proxy_http_version 1.1;
+        # SSE: reasoning models may stay silent for minutes and the gateway
+        # imposes no total stream timeout.
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_read_timeout 3600s;
+        proxy_set_header Host $host;
+        # The app ignores X-Forwarded-* entirely (its checks are
+        # request-relative); set them only for nginx's own logging.
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+    }
+}
+```
+
+Issue certificates with certbot (`certbot certonly --nginx -d
+gyemoim.example.com`, or the `--nginx` installer to let certbot manage the
+blocks above); renewal follows certbot's standard timer. The app is reachable
+over plain HTTP from the LAN on :9092 — keep the firewall rule below tight.
+
+### Firewall (gyemoim host)
+
+Allow tcp/9092 only from the nginx host (examples assume nginx at
+192.0.2.11):
+
+```sh
+# ufw
+ufw allow from 192.0.2.11 to any port 9092 proto tcp
+
+# nftables
+nft add rule inet filter input ip saddr 192.0.2.11 tcp dport 9092 accept
+```
+
+All other sources must be denied on :9092 (the host's default policy, or an
+explicit ufw deny). No other inbound port is needed: the enrollment script
+runs on the admin's browser machine and talks to the server over the same
+https origin.
+
+### Admin quickstart
+
+1. **First login** — open `https://<domain>/`, sign in as `admin` with the
+   bootstrap password from journald, and set a new password (the UI forces
+   this before anything else).
+2. **Users** — add users in the Users panel; new users also get a forced
+   password change at first login. All signed-in users have full management
+   rights (personal-tool scope).
+3. **Connect a ChatGPT account** — create an OpenAI Provider, press
+   *Connect*, and the provider card shows a single-use enrollment code
+   (~10 min TTL) and a download link for `gyemoim-connect.py`. On the machine
+   that has the browser (with `python3`), run the printed command:
+   `python3 gyemoim-connect.py https://<domain> <code>`. The script opens the
+   OpenAI authorization page and forwards the result to the server; the
+   server owns registration, PKCE, the exchange, ID-token verification, and
+   all later refreshes. Re-authentication later uses the same flow.
+4. **Service accounts** — create a ServiceAccount and issue its key, define
+   a Model (one Provider + upstream model), and grant the Model to the
+   ServiceAccount (grants are always explicit).
+5. **Remote agents** — point them at `https://<domain>/v1` with the
+   ServiceAccount key as Bearer (`POST /v1/responses`, `GET /v1/models`).
+
+### Upgrades
+
+Replace the binary and restart the unit. Configuration schema migrations run
+automatically at startup and are forward-only: an older database version is
+migrated in place, and a database written by a newer version is rejected with
+an explicit error instead of being downgraded.
 
 ## Open items / not yet verified
 

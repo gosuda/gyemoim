@@ -11,7 +11,7 @@ CGO_ENABLED=0 go build -trimpath -o gyemoim ./cmd/gyemoim   # current platform
 node --check internal/httpui/assets/site.js                  # when UI JS changed
 ```
 
-Then exercise changes by hand: run the binary (listens on http://127.0.0.1:9092/, data directory auto-created) and call the API with curl. `--port` is the only CLI flag; a second process on the same data directory fails on the process lock.
+Then exercise changes by hand: run the binary (listens on http://127.0.0.1:9092/ by default, data directory auto-created) and call the API with curl. `--listen HOST:PORT` sets the bind address and `--port` remains a port-only alias (`--listen` wins when both are given); a second process on the same data directory fails on the process lock.
 
 ## Build constraints
 
@@ -45,7 +45,7 @@ One Go module, one executable (`cmd/gyemoim/main.go`); all code lives under `int
 
 ## Docs
 
-`docs/` is authoritative: `design.md` (confirmed product decisions), `responses-contract.md`, `history-format.md`, `history-query.md`, `oauth.md`, `pi.md` (Pi agent config export), `implementation-plan.md` (task-by-task verification evidence). `next-session.md` and `code-review.md` are historical handoff/review records — their machine-specific paths (e.g. `/home/deploy/...`, worktrees, skill paths) refer to a previous environment, not this one.
+`docs/` is authoritative: `design.md` (confirmed product decisions), `responses-contract.md`, `history-format.md`, `history-query.md`, `oauth.md`, `web-deployment.md` (remote web deployment decisions and deployment notes), `pi.md` (Pi agent config export), `implementation-plan.md` (task-by-task verification evidence). `next-session.md` and `code-review.md` are historical handoff/review records — their machine-specific paths (e.g. `/home/deploy/...`, worktrees, skill paths) refer to a previous environment, not this one.
 
 Docs and UI text are in English.
 

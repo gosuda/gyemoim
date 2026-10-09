@@ -37,6 +37,21 @@ The service has four primary goals:
 - Rotate logs and compress closed files by spawning the external `zstd` executable.
 - Retain request history indefinitely. Provide storage visibility and deletion of all request records in a selected date range; do not offer ServiceAccount- or Model-specific deletion in the first version.
 
+## Remote web deployment (agreed)
+
+The first version's loopback-only assumptions above are superseded for
+deployments where the WebUI runs as an always-on service behind a reverse
+nginx proxy on another LAN host; the bullets above remain the record of the
+original local-first decisions. Full rationale, schema, and deployment
+recipes: [web-deployment.md](web-deployment.md). One-line decisions:
+
+- New `--listen <addr>` flag (default unchanged, `127.0.0.1:9092`); `--port` remains a port-only alias. The deployed server binds `:9092` on all interfaces, firewall-restricted to the nginx host.
+- Multi-user session login for the management UI: 24 h absolute sessions, argon2id password hashing, first-start bootstrap `admin` with a one-time password on stderr and forced change.
+- Origin validation is request-relative (Origin must match the request's own host:port) and forwarded headers (`X-Forwarded-*`) are never trusted; the old loopback Host guard is removed.
+- Session cookies are always `Secure`, regardless of the scheme the app sees.
+- ChatGPT credential transfer for headless servers via a server-distributed Python enrollment script: OpenAI accepts only loopback redirect URIs (verified live), so the script runs on a browser machine and the server keeps owning registration, PKCE, exchange, ID-token verification, and refreshes, using its own host ID.
+- The pi-config base URL is built client-side from `window.location.origin`; the server derives no public URLs.
+
 ## Architecture
 
 ### Core Concepts
