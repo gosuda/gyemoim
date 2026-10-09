@@ -1138,3 +1138,76 @@ session. Deviations: CSS additions to site.css (required by the brief's
 name-only identity warning (documented above); stale results gray out rather
 than clear (documented choice); hash sync on Apply (documented above); the
 cursor-cap tooltip has no browser proof (100-page drive impractical).
+
+### Step 10 — Storage page (2026-10-09)
+
+`internal/httpui/assets/js/pages/storage.js` (rewritten), `index.html` storage
+sections, `site.css`. **T1**: the flat 14-row grid is replaced by a one-line
+health banner (`#storage-health`, site.css `.storage-health`, green
+`Recording healthy · compression idle · zstd available · 0 failed segments`;
+`.unhealthy` red variant listing only the failing facts — zstd unavailable,
+failed segments > 0, records not yet flushed > 0, lastCompressionError,
+deletion error / recovery pending), a collapsed "Compression debug detail"
+`<details>` holding Last compression segment / Last compression attempt (now
+`formatUTC`) / Last compression error / Compressed validation, and two
+always-relevant rows in `#storage-details` (Active requests, Records not yet
+flushed to disk). The four deletion rows moved into the deletion panel as a
+`#history-delete-details` grid that is hidden while idle. **T2**: the confirm
+now reads "Delete history records started from <first> 00:00 UTC through
+<last> end-of-day UTC (effectively capped at submission time)? This
+permanently deletes matching history for all service accounts and Models."
+and the red warning paragraph shrank to the blast radius + active-request
+rejection sentence (cap subtlety lives in the confirm). **T3**: both date
+inputs get `max` = today's UTC date on every render; a live preview
+(`#history-delete-preview`) shows "Will delete records started <first> 00:00
+UTC – <last> 23:59:59 UTC.", "The last date is before the first date; no
+range is valid.", or "Choose a first and last date." when incomplete.
+**T4**: `clearMessageOnInput` on the delete form; the idle line shows only
+after a completed deletion was seen this session (module flag, or the
+backend still reports `completed`); the whole form (inputs + button)
+disables while `running`/`pending_recovery` via `renderDeletionStatus`.
+**T5**: three tiles — Active / Closed raw / Compressed — with pending folded
+into the raw caption ("N segments · N awaiting compression", singular-aware
+`countNoun`); the summary panel intro defines segments ("History is stored
+in append-only NDJSON files called segments."); `.usage-metric span` bumped
+9px → 10px (also lifts Overview's identical tiles). **T6**: renamed to
+"Records not yet flushed to disk" with the hint "At risk only if the process
+crashes; zero is healthy."; placement choice: it is both a visible status
+row (red only when > 0) and a red banner fact when > 0 — the healthy banner
+line omits it (covered by "Recording healthy"). **T7**: debug renames applied
+(`Affected segment` → "Last compression segment", `Last attempt` → "Last
+compression attempt", Compressed validation gained the re-read hint);
+`#storage-message` now carries only load feedback (`updatedStamp()`) or the
+pending_recovery error — the essay moved to the page intro; Refresh button
+relabeled "Refresh status". Delete submit runs through `withBusy`; no
+`announceSuccess` on this page (deletion success uses its existing
+`#history-delete-message` status region; the only other action is Refresh,
+which uses the neutral freshness stamp). The 409 branch appends "No files
+were changed." to the server message (`operationError.status === 409`).
+
+Verification: `node --check` on storage.js/feedback.js/format.js OK; `go vet
+./...` and `CGO_ENABLED=0 go build -trimpath` OK. Browser pass on a private
+instance (port 9972, fresh data dir, admin password changed): healthy real
+status → green banner exactly as specified, three tiles ("1 active
+segment", "0 segments · 0 segments awaiting compression"), collapsed debug
+disclosure, idle line absent on fresh load, preview guidance text, both
+`max` attrs = 2026-10-09; stubbed `/api/storage` failure → red banner
+"Storage degraded · zstd unavailable · 3 failed segments · 5 records not yet
+flushed to disk · compression reported an error", red lost-records row with
+hint, debug rows verified open (incl. UTC attempt and validation hint);
+stubbed deletion states → running (form inputs+button disabled, details grid
+"2 / 5 segments", honest 503 sentence), pending_recovery (form disabled, red
+banner fact, error in both message slots), completed (details "4 / 4",
+form enabled) then a stubbed idle refresh shows the idle line; live preview
+updates on input/change; invalid range (last < first) submits with the
+client-side error and zero network calls; confirm dialog text inspected and
+**dismissed**; stale error cleared on the next input event; 390px viewport
+clean end-to-end (screenshot); console buffer empty at end of session. All
+`/api/storage*` routes unrouted after each state; the delete endpoint was
+additionally stubbed with an abort during form tests. Network log: 8 × GET
+`/api/storage`, 0 requests to `/api/storage/delete` for the whole session —
+no real deletion was ever fired. Deviations: date inputs were set via
+`value` + dispatched `input`/`change` events (Chromium segmented date
+controls ignore synthetic keyboard input; the listeners exercised are the
+real ones); the 409 branch has code review only (exercising it would have
+required confirming the dialog, which was off-limits).

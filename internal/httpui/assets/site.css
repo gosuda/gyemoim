@@ -267,7 +267,7 @@ h5 { margin: 0; color: #3b4654; font-size: 11px; font-weight: 680; }
 .usage-metric { min-width: 118px; flex: 1 1 118px; padding: 11px 12px; border: 1px solid #edf0f3; border-radius: 7px; background: #fbfcfd; }
 .usage-metric strong, .usage-metric span { display: block; }
 .usage-metric strong { color: #303b49; font-size: 15px; font-weight: 680; }
-.usage-metric span { margin-top: 4px; color: #818b97; font-size: 9px; line-height: 1.45; }
+.usage-metric span { margin-top: 4px; color: #818b97; font-size: 10px; line-height: 1.45; }
 .table-scroll { width: 100%; overflow-x: auto; }
 .data-table { width: 100%; border-collapse: collapse; font-size: 10px; }
 .data-table th { padding: 8px 9px; color: #85909c; font-size: 9px; font-weight: 650; text-align: left; white-space: nowrap; }
@@ -349,11 +349,20 @@ button.outcome-row:hover { border-color: #d6dce4; background: #f6f8fb; }
 }
 
 .history-deletion-panel { margin-top: 17px; }
-.deletion-warning { margin: 0 0 15px; padding: 11px 12px; border: 1px solid #f0d8d8; border-radius: 6px; color: #8e4141; background: #fff8f8; font-size: 10px; line-height: 1.55; }
 .history-delete-form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)) auto; align-items: end; gap: 11px; }
+.deletion-warning { margin: 0 0 15px; padding: 11px 12px; border: 1px solid #f0d8d8; border-radius: 6px; color: #8e4141; background: #fff8f8; font-size: 10px; line-height: 1.55; }
 .deletion-submit { min-height: 39px; border-color: #e6cccc; color: #9c4141; background: #fff; }
 .deletion-submit:hover:not(:disabled) { border-color: #d9a9a9; color: #8f3333; background: #fff7f7; }
 .deletion-status { margin: 11px 0 0; color: #77818e; font-size: 10px; line-height: 1.5; }
+
+/* Storage page health banner (T1), debug disclosure (T7), and the red state
+   of the unflushed-records row (T6). */
+.storage-health { margin: 10px 0 0; padding: 9px 11px; border: 1px solid #d8eee4; border-radius: 6px; color: #2c7a58; background: #f4fbf7; font-size: 11px; font-weight: 550; line-height: 1.5; }
+.storage-health.unhealthy { border-color: #eec9c9; color: #9c4141; background: #fff6f6; }
+.storage-debug { margin-top: 12px; }
+.storage-debug summary { color: #465466; font-size: 11px; font-weight: 650; cursor: pointer; }
+.storage-debug[open] summary { margin-bottom: 3px; }
+.runtime-grid dd .health-bad { color: #a43f3f; }
 @media (max-width: 760px) { .history-delete-form { grid-template-columns: minmax(0, 1fr); } }
 
 /* Login and forced password-change pages. */

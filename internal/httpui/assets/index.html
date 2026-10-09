@@ -211,26 +211,33 @@
       </section>
 
       <section class="page-view" data-view="storage" aria-labelledby="storage-heading" hidden>
-        <div class="page-intro"><h2 id="storage-heading">History storage</h2><p class="muted">Closed history is compressed with the external zstd program. Compression never blocks raw request recording.</p></div>
+        <div class="page-intro"><h2 id="storage-heading">History storage</h2><p class="muted">Closed history is compressed with the external zstd program. Compression never blocks raw request recording. Closed raw segments are replaced by compressed segments after successful publication. History has no automatic expiration.</p></div>
         <section class="panel" aria-labelledby="storage-summary-heading">
-          <div class="panel-heading"><div><h3 id="storage-summary-heading">Storage summary</h3><p class="muted">Sizes describe the current history directory. Active history is still being written.</p></div><button class="button quiet small" type="button" data-refresh="storage">Refresh</button></div>
+          <div class="panel-heading"><div><h3 id="storage-summary-heading">Storage summary</h3><p class="muted">History is stored in append-only NDJSON files called segments. Sizes describe the current history directory; active history is still being written.</p></div><button class="button quiet small" type="button" data-refresh="storage">Refresh status</button></div>
           <p class="form-message" id="storage-message" role="status" aria-live="polite">Loading storage…</p>
+          <p class="storage-health" id="storage-health" role="status"></p>
           <div id="storage-summary" class="usage-summary"></div>
         </section>
         <section class="panel request-results" aria-labelledby="storage-operations-heading">
           <div class="panel-heading"><div><h3 id="storage-operations-heading">Compression status</h3><p class="muted">Pending work is checked once per minute. Failed compression keeps the raw source.</p></div></div>
           <dl class="runtime-grid" id="storage-details"><div><dt>Status</dt><dd>Loading…</dd></div></dl>
+          <details class="storage-debug">
+            <summary>Compression debug detail</summary>
+            <dl class="runtime-grid" id="storage-debug-details"></dl>
+          </details>
         </section>
         <section class="panel history-deletion-panel" aria-labelledby="history-deletion-heading">
           <div class="panel-heading"><div><h3 id="history-deletion-heading">Delete history by date</h3><p class="muted">Delete every request record started during the selected inclusive UTC calendar dates.</p></div></div>
-          <p class="deletion-warning">This permanently deletes matching history for all ServiceAccounts and Models. If any matching request is still in progress, the operation is rejected without changing files. Today's end is capped at the server submission time, so requests started later today remain.</p>
+          <p class="deletion-warning">This permanently deletes matching history for all service accounts and Models. If any matching request is still in progress, the operation is rejected without changing files.</p>
           <form id="history-delete-form" class="history-delete-form">
             <div class="field"><label for="history-delete-first">First date (UTC, inclusive)</label><input id="history-delete-first" name="firstDate" type="date" required></div>
             <div class="field"><label for="history-delete-last">Last date (UTC, inclusive)</label><input id="history-delete-last" name="lastDate" type="date" required></div>
             <button class="button danger deletion-submit" type="submit">Delete matching history</button>
           </form>
+          <p class="form-message" id="history-delete-preview" role="status" aria-live="polite">Choose a first and last date.</p>
           <p class="form-message" id="history-delete-message" role="status" aria-live="polite"></p>
-          <p class="deletion-status" id="history-delete-status" role="status" aria-live="polite">Loading deletion status…</p>
+          <dl class="runtime-grid" id="history-delete-details" hidden></dl>
+          <p class="deletion-status" id="history-delete-status" role="status" aria-live="polite"></p>
         </section>
       </section>
 
