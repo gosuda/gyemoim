@@ -201,6 +201,16 @@ database must keep working.
   cookie flags, 43-char value, per-login re-issue, forced-change gate,
   other-session revocation on password change, forged Origin/missing CSRF
   still 403, `/v1/` and `/auth/callback` behavior unchanged.
+- **Step 4 — done (2026-10-09).** `EnsureBootstrapAdmin` in
+  `internal/config/bootstrap.go`: when the users table is empty, one `admin`
+  user is created inside a single transaction with a 128-bit base64url
+  generated password (22 chars) and `must_change_password`; main prints the
+  password to stderr exactly once and the plaintext is never persisted or
+  logged. Bootstrap deliberately repeats if all users are ever deleted
+  (documented). Verified: fresh start prints the banner once; login with the
+  printed password works, the step-3 gate blocks the API until the password is
+  changed, then clears; restart prints nothing; grep of the data directory
+  finds no plaintext.
 
 ## Work breakdown
 

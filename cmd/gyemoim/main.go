@@ -100,6 +100,21 @@ func run(args []string) error {
 		}
 	}()
 
+	// Bootstrap runs during startup sequencing (here, not inside the store) so
+	// the config store stays a plain data owner. The process lock guarantees a
+	// single process per data directory; the store additionally performs the
+	// check-and-create in one transaction. The password goes to stderr only —
+	// never to history or the database — and is shown exactly once.
+	bootstrapContext, cancelBootstrapContext := context.WithTimeout(context.Background(), 30*time.Second)
+	bootstrapPassword, bootstrapped, err := store.EnsureBootstrapAdmin(bootstrapContext)
+	cancelBootstrapContext()
+	if err != nil {
+		return err
+	}
+	if bootstrapped {
+		fmt.Fprintf(os.Stderr, "No management users exist. Created initial user %q.\nInitial password (shown once; change it at first login): %s\n", config.BootstrapUsername, bootstrapPassword)
+	}
+
 	historyRecorder, historyOpenErr := history.Open(dataDirectory)
 	if historyOpenErr != nil {
 		fmt.Fprintln(os.Stderr, "gyemoim: request history is unavailable; new inference requests will be rejected")
