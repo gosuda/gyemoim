@@ -158,14 +158,6 @@ const (
 	formatChat
 )
 
-func (api *harnessAPI) serveResponses(w http.ResponseWriter, r *http.Request) {
-	api.serveInference(w, r, formatResponses)
-}
-
-func (api *harnessAPI) serveChatCompletions(w http.ResponseWriter, r *http.Request) {
-	api.serveInference(w, r, formatChat)
-}
-
 func (api *harnessAPI) serveInference(w http.ResponseWriter, r *http.Request, format inferenceFormat) {
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", http.MethodPost)
@@ -226,8 +218,9 @@ func (api *harnessAPI) serveInference(w http.ResponseWriter, r *http.Request, fo
 	// recorded incoming_request stays the chat body exactly as received.
 	var prepareInput json.RawMessage
 	var includeChatUsage bool
+	var chatDroppedFields []string
 	if format == formatChat {
-		translated, includeUsage, translateErr := provider.TranslateChatCompletions(body)
+		translation, translateErr := provider.TranslateChatCompletions(body)
 		if translateErr != nil {
 			var capability *provider.CapabilityError
 			if errors.As(translateErr, &capability) {
@@ -239,8 +232,9 @@ func (api *harnessAPI) serveInference(w http.ResponseWriter, r *http.Request, fo
 			api.noteRejection(r, "invalid_request", "", identity)
 			return
 		}
-		prepareInput = translated
-		includeChatUsage = includeUsage
+		prepareInput = translation.Responses
+		includeChatUsage = translation.IncludeUsage
+		chatDroppedFields = translation.DroppedFields
 	}
 	var modelName string
 	if modelRaw, exists := fields["model"]; !exists || json.Unmarshal(modelRaw, &modelName) != nil || strings.TrimSpace(modelName) == "" {
@@ -296,7 +290,8 @@ func (api *harnessAPI) serveInference(w http.ResponseWriter, r *http.Request, fo
 			return
 		}
 		// Classified drops from request preparation are recorded on every end
-		// outcome; sites pass provider details and the merge keeps them intact.
+		// outcome. Callers pass provider details in details; the drop list is
+		// owned by this closure, so overwriting it here is safe.
 		if len(droppedFields) > 0 {
 			details.DroppedFields = droppedFields
 		}
@@ -336,6 +331,18 @@ func (api *harnessAPI) serveInference(w http.ResponseWriter, r *http.Request, fo
 		return
 	}
 	droppedFields = prepared.DroppedFields
+	if len(chatDroppedFields) > 0 {
+		merged := make([]string, 0, len(chatDroppedFields)+len(prepared.DroppedFields))
+		seenDrops := make(map[string]struct{}, len(chatDroppedFields)+len(prepared.DroppedFields))
+		for _, field := range append(append([]string{}, chatDroppedFields...), prepared.DroppedFields...) {
+			if _, duplicate := seenDrops[field]; duplicate {
+				continue
+			}
+			seenDrops[field] = struct{}{}
+			merged = append(merged, field)
+		}
+		droppedFields = merged
+	}
 	managedToken, err := preparation.AccessToken(r.Context())
 	authPreparationNS := handle.ElapsedNS()
 	timings := history.Timings{AuthenticationPreparationNS: &authPreparationNS}
@@ -434,15 +441,6 @@ func (api *harnessAPI) serveInference(w http.ResponseWriter, r *http.Request, fo
 		return
 	}
 
-	if prepared.ClientStream && format == formatChat {
-		// Chat streaming synthesis is implemented with the chat delivery work;
-		// until then the stream request is rejected explicitly instead of
-		// returning Responses-format events a chat client cannot parse.
-		timings = providerTimings(authPreparationNS, trace.Snapshot(), nil)
-		finish("failed", 0, "chat completions streaming is not supported yet", nil, timings, endDetails)
-		writeHarnessError(w, http.StatusBadRequest, "chat completions streaming is not supported yet; use stream:false", "invalid_request_error", "unsupported_value")
-		return
-	}
 	if !prepared.ClientStream {
 		api.serveNonStreamingResponse(w, r, handle, upstream, trace, authPreparationNS, endDetails, finish, format, route.Model.Name)
 		return

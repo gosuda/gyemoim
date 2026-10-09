@@ -63,7 +63,7 @@ infer. No synthetic end records are written at startup.
 
 | Field | Type | Meaning |
 | --- | --- | --- |
-| `schema_version` | integer | New records use `2`. The reader accepts legacy schema `1` and schema `2`. |
+| `schema_version` | integer | New records use `2`. The reader accepts legacy schema `1` and schema `2`. Schema-2 `request_end` records may carry the optional `dropped_fields` field, which binaries predating it cannot parse (their strict decoder fails on those lines); a rollback to such a binary degrades history queries for segments containing dropped-field records until they are removed. |
 | `type` | string | `request_start`, `upstream_transmission`, `upstream_response`, `response_event`, or `request_end`. |
 | `request_id` | string | Gateway request ID correlating all records for one request. |
 | `started_at` | UTC timestamp | Wall-clock timestamp captured at recorder admission and repeated unchanged on every line. |
@@ -137,7 +137,10 @@ per frame, not per stream. Event records are synced by the next durable fence or
 - `dropped_fields`: optional list of the known-unsupported request fields and tool
   entries the gateway removed while preparing the effective upstream request —
   field names (`temperature`, `connectors`, …) plus `<container>.<tool-type>` entries
-  (`tools.mcp`, `additional_tools.image_generation`) for removed tool definitions.
+  (`tools.mcp`, `additional_tools.image_generation`, tool types lowercased) for
+  removed tool definitions, and the bare container name when every entry was
+  removed. Deduplicated across the request. On the Chat Completions path the
+  list also includes the chat-only fields the request translator dropped.
   Absent when nothing was dropped; the raw incoming and effective request bodies in
   `request_start`/`upstream_transmission` remain the full evidence.
 - `timings`: offsets `authentication_preparation_ns`, `connection_requested_ns`,

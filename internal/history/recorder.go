@@ -858,6 +858,33 @@ func validDroppedFields(fields []string) bool {
 	return true
 }
 
+// clampDroppedFields forces a drop list into the recorded bounds: at most 64
+// entries of at most 128 valid UTF-8 bytes each, with empty entries removed.
+// Write-side deduplication makes overflow unlikely; the clamp is the last
+// resort so a diagnostics list can never invalidate an end record.
+func clampDroppedFields(fields []string) []string {
+	if len(fields) > 64 {
+		fields = fields[:64]
+	}
+	clamped := make([]string, 0, len(fields))
+	for _, field := range fields {
+		if !utf8.ValidString(field) {
+			continue
+		}
+		if len(field) > 128 {
+			field = strings.TrimSpace(field[:128])
+		}
+		if field == "" {
+			continue
+		}
+		clamped = append(clamped, field)
+	}
+	if len(clamped) == 0 {
+		return nil
+	}
+	return clamped
+}
+
 // End records a final request outcome and always unregisters the handle. Outcomes
 // are completed, failed, cancelled, or incomplete. safeError must be a short,
 // pre-sanitized explanation and must not contain bodies, credentials, or URLs.
@@ -877,7 +904,7 @@ func (h *Request) EndWithDetails(outcome string, httpStatus int, safeError strin
 	if h.ended {
 		return nil
 	}
-	if !validUpstreamRequestID(details.UpstreamRequestID) || !validOutcome(outcome) || httpStatus < 0 || httpStatus > 599 || len(safeError) > maxSafeError || !utf8.ValidString(safeError) || !validTimings(timings) || !validUsage(usage) || !validDroppedFields(details.DroppedFields) {
+	if !validUpstreamRequestID(details.UpstreamRequestID) || !validOutcome(outcome) || httpStatus < 0 || httpStatus > 599 || len(safeError) > maxSafeError || !utf8.ValidString(safeError) || !validTimings(timings) || !validUsage(usage) {
 		writeErr := r.writeEndLocked(h, "incomplete", 0, "request ended with invalid final details", nil, Timings{}, EndDetails{})
 		h.ended = true
 		delete(r.active, h.id)
@@ -886,6 +913,10 @@ func (h *Request) EndWithDetails(outcome string, httpStatus int, safeError strin
 		}
 		return fmt.Errorf("%w: invalid end details", ErrInvalidRecord)
 	}
+	// The drop list is diagnostics-only: an overflowing or malformed list is
+	// clamped so it can never degrade the whole end record. The raw incoming and
+	// effective request bodies remain the full evidence either way.
+	details.DroppedFields = clampDroppedFields(details.DroppedFields)
 	if usage != nil {
 		usage = cloneUsage(usage)
 	}

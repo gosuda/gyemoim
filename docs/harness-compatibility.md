@@ -42,17 +42,20 @@ after translation.
   `file_search`, `code_interpreter`, `computer`, `computer_use`,
   `computer_use_preview`, `mcp`, `hosted_mcp`, `hostedmcp`, `connector`,
   `connectors`, and `tool_search` are removed from `tools`,
-  `additional_tools`, and nested namespaces; remaining tools are forwarded.
-  If every entry is removed the request is forwarded without tools (the model
+  `additional_tools`, and nested namespaces (including nested `connectors`
+  containers); remaining tools are forwarded. Tool types are matched
+  case-insensitively and recorded lowercased. If every entry is removed the
+  request is forwarded without tools (the model
   answers in text and the harness fails visibly, which is preferable to a
   400 the harness cannot recover from).
 - **`role:"system"` message items** are rewritten to `developer` message
   items, order preserved (the SIWC backend rejects explicit system items; this
   is the standard lossless rewrite used by the Codex ecosystem).
 - **Explicit errors kept**: `previous_response_id` (section 2), `conversation`
-  (section 2), audio and video input items, `n > 1` on the Chat Completions
-  path, and structurally invalid requests (non-array `input`, invalid JSON,
-  unknown model, missing grants).
+  (section 2), audio and video input items, legacy assistant `function_call`
+  messages on the Chat Completions path (no reliable call id to translate),
+  `n` other than 1 on the Chat Completions path, and structurally invalid
+  requests (non-array `input`, invalid JSON, unknown model, missing grants).
 - **Unknown fields not on any list still pass through**; the upstream API
   remains the validator for future fields. Only known-unsupported fields are
   dropped, so a typo cannot silently disable a real parameter.
@@ -115,9 +118,9 @@ translated Responses JSON, and `response_event` records stay upstream-native
 | `response_format: json_schema` | `text.format` (`name` moves to top level) | |
 | `response_format: json_object` | `text.format: {type:"json_object"}` | |
 | `parallel_tool_calls`, `prompt_cache_key`, `service_tier` | pass-through | |
-| `temperature`, `top_p`, `max_tokens`, `max_completion_tokens`, `stop`, `seed`, frequency/presence penalties, `logprobs`, `top_logprobs`, `user`, `metadata` | dropped | same classes as section 1; the SIWC backend rejects them |
+| `temperature`, `top_p`, `max_tokens`, `max_completion_tokens`, `stop`, `seed`, frequency/presence penalties, `logprobs`, `top_logprobs`, `logit_bias`, `user`, `metadata` | dropped | same classes as section 1; the SIWC backend rejects them, and removals are recorded in `request_end.dropped_fields` |
 | `stream_options.include_usage` | consumed (final usage chunk) | never forwarded |
-| `n` | `n: 1` only | `n > 1` is an explicit 400 |
+| `n` | `n: 1` only | anything other than `n: 1` is an explicit 400 |
 | image content parts | `input_image` items | supported |
 | audio content parts | — | explicit 400 |
 

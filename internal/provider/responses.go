@@ -14,7 +14,6 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptrace"
-	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -148,6 +147,7 @@ func (a *OpenAIResponsesAdapter) Prepare(upstreamModel string, incoming json.Raw
 	}
 
 	var dropped []string
+	seenDrops := make(map[string]struct{})
 	inputRaw, exists := fields["input"]
 	if !exists {
 		return PreparedRequest{}, capability("input", "missing_required_parameter", "Input must be a complete array of conversation items.")
@@ -185,13 +185,14 @@ func (a *OpenAIResponsesAdapter) Prepare(upstreamModel string, incoming json.Raw
 					inputChanged = true
 				}
 			}
-			var itemType string
-			if rawType, ok := message["type"]; ok && json.Unmarshal(rawType, &itemType) == nil && itemType == "additional_tools" {
-				forward, removeContainer := stripUnsupportedTools(message["additional_tools"], "additional_tools", &dropped)
+			// The additional_tools member is classified wherever it appears in an
+			// input item, regardless of the item's own type.
+			if _, hasTools := message["additional_tools"]; hasTools {
+				forward, removeContainer := stripUnsupportedTools(message["additional_tools"], "additional_tools", &dropped, seenDrops)
 				if removeContainer || forward != nil {
 					if removeContainer {
 						delete(message, "additional_tools")
-						dropped = append(dropped, "additional_tools")
+						recordDroppedField("additional_tools", &dropped, seenDrops)
 					} else {
 						message["additional_tools"] = forward
 					}
@@ -224,22 +225,22 @@ func (a *OpenAIResponsesAdapter) Prepare(upstreamModel string, incoming json.Raw
 	for _, field := range droppedFields {
 		if _, exists := effective[field]; exists {
 			delete(effective, field)
-			dropped = append(dropped, field)
+			recordDroppedField(field, &dropped, seenDrops)
 		}
 	}
 	if _, exists := effective["connectors"]; exists {
 		delete(effective, "connectors")
-		dropped = append(dropped, "connectors")
+		recordDroppedField("connectors", &dropped, seenDrops)
 	}
 	for _, container := range []string{"tools", "additional_tools"} {
 		raw, exists := effective[container]
 		if !exists {
 			continue
 		}
-		forward, removeContainer := stripUnsupportedTools(raw, container, &dropped)
+		forward, removeContainer := stripUnsupportedTools(raw, container, &dropped, seenDrops)
 		if removeContainer {
 			delete(effective, container)
-			dropped = append(dropped, container)
+			recordDroppedField(container, &dropped, seenDrops)
 			continue
 		}
 		if forward != nil {
@@ -389,16 +390,19 @@ var droppedFields = []string{
 // definitions). It returns the value to forward — nil when nothing changed and
 // the original raw value must be kept — and whether every entry was dropped so
 // the whole container field must be removed. Removed tool types are recorded in
-// dropped as "<field>.<type>", deduplicated in first-seen order.
-func stripUnsupportedTools(raw json.RawMessage, fieldName string, dropped *[]string) (forward json.RawMessage, removeContainer bool) {
+// dropped as "<field>.<type>", deduplicated across the whole request via seen.
+// Decoding uses json.Number so untouched sibling entries re-encode without
+// numeric precision loss.
+func stripUnsupportedTools(raw json.RawMessage, fieldName string, dropped *[]string, seen map[string]struct{}) (forward json.RawMessage, removeContainer bool) {
 	if len(raw) == 0 {
 		return nil, false
 	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
 	var value any
-	if err := json.Unmarshal(raw, &value); err != nil {
+	if err := decoder.Decode(&value); err != nil {
 		return nil, false // The upstream API owns validation of malformed shapes.
 	}
-	seen := make(map[string]struct{})
 	result, removed, changed := stripToolValue(value, fieldName, dropped, seen)
 	if removed {
 		return nil, true
@@ -428,7 +432,7 @@ func stripToolValue(value any, fieldName string, dropped *[]string, seen map[str
 				changed = true
 				continue
 			}
-			if childChanged || !reflect.DeepEqual(filtered, child) {
+			if childChanged {
 				changed = true
 			}
 			kept = append(kept, filtered)
@@ -458,7 +462,7 @@ func stripToolValue(value any, fieldName string, dropped *[]string, seen map[str
 					changed = true
 					continue
 				}
-				if nestedChanged || !reflect.DeepEqual(nested, child) {
+				if nestedChanged {
 					changed = true
 				}
 				filtered[key] = nested
@@ -486,13 +490,19 @@ var nestedToolContainers = map[string]struct{}{
 	"namespace": {}, "additional_tools": {}, "tools": {}, "connectors": {},
 }
 
-func recordDroppedTool(fieldName, toolType string, dropped *[]string, seen map[string]struct{}) {
-	entry := fieldName + "." + toolType
-	if _, duplicate := seen[entry]; duplicate {
+// recordDroppedField appends one drop name, deduplicated across the request so
+// the recorded list can never exceed the history validator's bounds through
+// repeated occurrences.
+func recordDroppedField(name string, dropped *[]string, seen map[string]struct{}) {
+	if _, duplicate := seen[name]; duplicate {
 		return
 	}
-	seen[entry] = struct{}{}
-	*dropped = append(*dropped, entry)
+	seen[name] = struct{}{}
+	*dropped = append(*dropped, name)
+}
+
+func recordDroppedTool(fieldName, toolType string, dropped *[]string, seen map[string]struct{}) {
+	recordDroppedField(fieldName+"."+toolType, dropped, seen)
 }
 
 func capability(param, code, message string) *CapabilityError {

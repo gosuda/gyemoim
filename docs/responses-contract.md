@@ -37,9 +37,10 @@ SIWC backend forbids server-side response storage and a silent drop would lose
 conversation context without diagnostics.
 
 Known unsupported tool types are removed from `tools`, `additional_tools`, and nested
-namespace definitions instead of being rejected: `image_generation`, `file_search`,
-`code_interpreter`, `computer`, `computer_use`, `computer_use_preview`,
-MCP/hosted-MCP, connector, and `tool_search` tools. Remaining tools are forwarded; if
+namespace definitions (including nested `connectors` containers) instead of being
+rejected: `image_generation`, `file_search`, `code_interpreter`, `computer`,
+`computer_use`, `computer_use_preview`, `mcp`, `hosted_mcp`/`hostedmcp`,
+`connector`/`connectors`, and `tool_search` tools. Remaining tools are forwarded; if
 every entry is removed the container field is dropped entirely and the request is
 forwarded without tools. Each removal is recorded in `DroppedFields` as
 `tools.<type>` or `additional_tools.<type>`. Audio and video input item types are

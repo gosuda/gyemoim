@@ -1,6 +1,7 @@
 package provider
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"strconv"
@@ -31,58 +32,83 @@ var managedChatRequestFields = map[string]struct{}{
 }
 
 // TranslateChatCompletions converts a Chat Completions request body into the
-// Responses request format. It returns the translated body and whether the
-// client asked for a final usage-only chunk via
-// stream_options.include_usage (never forwarded upstream). Client errors are
-// returned as *CapabilityError suitable for a standard OpenAI error envelope.
-func TranslateChatCompletions(chat json.RawMessage) (json.RawMessage, bool, error) {
+// Responses request format. The result carries the translated body, whether the
+// client asked for a final usage-only chunk via stream_options.include_usage
+// (never forwarded upstream), and the list of chat-only fields that were
+// dropped so the executor can record them like the classified Responses drops.
+// Client errors are returned as *CapabilityError suitable for a standard
+// OpenAI error envelope.
+type ChatTranslation struct {
+	Responses     json.RawMessage
+	IncludeUsage  bool
+	DroppedFields []string
+}
+
+// chatDroppedByTranslation are Chat Completions request fields the translator
+// removes with no Responses equivalent, recorded as drops when present.
+// Fields that are mapped (messages, tools, tool_choice, response_format,
+// reasoning_effort, verbosity) and fields the Responses adapter classifies
+// (temperature, top_p, user, metadata, top_logprobs, ...) are not listed.
+var chatDroppedByTranslation = []string{
+	"max_tokens", "max_completion_tokens", "stop", "seed",
+	"frequency_penalty", "presence_penalty", "logit_bias", "logprobs",
+	"n", "stream_options",
+}
+
+// jsonNull reports whether a raw value is a JSON null, which optional chat
+// fields use the same way as absence.
+func jsonNull(raw json.RawMessage) bool {
+	return len(raw) == 0 || string(bytes.TrimSpace(raw)) == "null"
+}
+
+func TranslateChatCompletions(chat json.RawMessage) (*ChatTranslation, error) {
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(chat, &fields); err != nil || fields == nil {
-		return nil, false, capability("", "invalid_json", "The request body must be a JSON object.")
+		return nil, capability("", "invalid_json", "The request body must be a JSON object.")
 	}
 
 	messagesRaw, exists := fields["messages"]
 	if !exists {
-		return nil, false, capability("messages", "missing_required_parameter", "The request must include messages.")
+		return nil, capability("messages", "missing_required_parameter", "The request must include messages.")
 	}
 	var messages []json.RawMessage
 	if err := json.Unmarshal(messagesRaw, &messages); err != nil || messages == nil {
-		return nil, false, capability("messages", "invalid_type", "The messages field must be an array of message objects.")
+		return nil, capability("messages", "invalid_type", "The messages field must be an array of message objects.")
 	}
 	items := make([]json.RawMessage, 0, len(messages))
 	for index, message := range messages {
 		translated, err := translateChatMessage(index, message)
 		if err != nil {
-			return nil, false, err
+			return nil, err
 		}
 		items = append(items, translated...)
 	}
 
 	includeUsage := false
-	if raw, exists := fields["stream_options"]; exists {
+	if raw, exists := fields["stream_options"]; exists && !jsonNull(raw) {
 		var options map[string]json.RawMessage
 		if json.Unmarshal(raw, &options) != nil || options == nil {
-			return nil, false, capability("stream_options", "invalid_type", "The stream_options field must be an object.")
+			return nil, capability("stream_options", "invalid_type", "The stream_options field must be an object.")
 		}
-		if raw, exists := options["include_usage"]; exists {
+		if raw, exists := options["include_usage"]; exists && !jsonNull(raw) {
 			value, err := strictBool(raw)
 			if err != nil {
-				return nil, false, capability("stream_options.include_usage", "invalid_type", "The stream_options.include_usage field must be a boolean.")
+				return nil, capability("stream_options.include_usage", "invalid_type", "The stream_options.include_usage field must be a boolean.")
 			}
 			includeUsage = value
 		}
 	}
-	if raw, exists := fields["n"]; exists {
+	if raw, exists := fields["n"]; exists && !jsonNull(raw) {
 		var count float64
 		if json.Unmarshal(raw, &count) != nil {
-			return nil, false, capability("n", "invalid_type", "The n field must be a number.")
+			return nil, capability("n", "invalid_type", "The n field must be a number.")
 		}
 		if count != 1 {
-			return nil, false, capability("n", "invalid_value", "Only a single choice is supported; use n: 1.")
+			return nil, capability("n", "invalid_value", "Only a single choice is supported; use n: 1.")
 		}
 	}
-	if _, exists := fields["audio"]; exists {
-		return nil, false, capability("audio", "unsupported_value", "Audio output is not supported by this provider adapter.")
+	if raw, exists := fields["audio"]; exists && !jsonNull(raw) {
+		return nil, capability("audio", "unsupported_value", "Audio output is not supported by this provider adapter.")
 	}
 
 	out := make(map[string]json.RawMessage, len(fields))
@@ -94,21 +120,21 @@ func TranslateChatCompletions(chat json.RawMessage) (json.RawMessage, bool, erro
 	}
 	inputJSON, err := json.Marshal(items)
 	if err != nil {
-		return nil, false, capability("", "invalid_json", "The request body could not be translated.")
+		return nil, capability("", "invalid_json", "The request body could not be translated.")
 	}
 	out["input"] = inputJSON
 
-	if raw, exists := fields["tools"]; exists {
+	if raw, exists := fields["tools"]; exists && !jsonNull(raw) {
 		translated, err := translateChatTools(raw)
 		if err != nil {
-			return nil, false, err
+			return nil, err
 		}
 		out["tools"] = translated
 	}
-	if raw, exists := fields["tool_choice"]; exists {
+	if raw, exists := fields["tool_choice"]; exists && !jsonNull(raw) {
 		translated, err := translateChatToolChoice(raw)
 		if err != nil {
-			return nil, false, err
+			return nil, err
 		}
 		if translated != nil {
 			out["tool_choice"] = translated
@@ -116,7 +142,7 @@ func TranslateChatCompletions(chat json.RawMessage) (json.RawMessage, bool, erro
 	}
 	text, reasoning, err := translateChatOutputShape(fields)
 	if err != nil {
-		return nil, false, err
+		return nil, err
 	}
 	if text != nil {
 		out["text"] = text
@@ -127,9 +153,15 @@ func TranslateChatCompletions(chat json.RawMessage) (json.RawMessage, bool, erro
 
 	payload, err := json.Marshal(out)
 	if err != nil {
-		return nil, false, capability("", "invalid_json", "The request body could not be translated.")
+		return nil, capability("", "invalid_json", "The request body could not be translated.")
 	}
-	return payload, includeUsage, nil
+	var dropped []string
+	for _, field := range chatDroppedByTranslation {
+		if _, exists := fields[field]; exists {
+			dropped = append(dropped, field)
+		}
+	}
+	return &ChatTranslation{Responses: payload, IncludeUsage: includeUsage, DroppedFields: dropped}, nil
 }
 
 // translateChatMessage converts one chat message into one or more Responses
@@ -209,10 +241,17 @@ func translateChatContent(raw json.RawMessage, textPartType, path string) ([]any
 			out = append(out, part)
 		case "image_url":
 			var image struct {
-				URL *string `json:"url"`
+				URL    *string         `json:"url"`
+				Detail json.RawMessage `json:"detail"`
 			}
 			if json.Unmarshal(entry["image_url"], &image) == nil && image.URL != nil {
-				out = append(out, map[string]any{"type": "input_image", "image_url": *image.URL})
+				part := map[string]any{"type": "input_image", "image_url": *image.URL}
+				if len(image.Detail) != 0 && !jsonNull(image.Detail) {
+					// detail affects image quality only; Responses supports the
+					// same field on input_image, so it is carried across.
+					part["detail"] = image.Detail
+				}
+				out = append(out, part)
 				continue
 			}
 			out = append(out, part)
@@ -226,6 +265,12 @@ func translateChatContent(raw json.RawMessage, textPartType, path string) ([]any
 }
 
 func chatAssistantItems(message map[string]json.RawMessage, path string) ([]json.RawMessage, error) {
+	if raw, exists := message["function_call"]; exists && !jsonNull(raw) {
+		// The deprecated chat function_call shape has no reliable call id to
+		// link the following tool message to, so it is an explicit error rather
+		// than a silent loss of the tool call.
+		return nil, capability(path+".function_call", "unsupported_value", "The deprecated function_call message field is not supported; use tool_calls.")
+	}
 	content, err := translateChatContent(message["content"], "output_text", path+".content")
 	if err != nil {
 		return nil, err
@@ -296,7 +341,14 @@ func chatToolOutputItem(message map[string]json.RawMessage, path string) ([]json
 						texts = append(texts, entry.Text)
 					}
 				}
-				output = strings.Join(texts, "\n")
+				if len(texts) > 0 {
+					output = strings.Join(texts, "\n")
+				} else {
+					// No text parts to extract (images, empty parts, or
+					// non-object entries): preserve the exact JSON instead of
+					// silently emptying the tool result.
+					output = string(raw)
+				}
 			}
 		}
 	}
@@ -370,16 +422,17 @@ func translateChatToolChoice(raw json.RawMessage) (json.RawMessage, error) {
 }
 
 // translateChatOutputShape maps reasoning_effort, verbosity, and
-// response_format into the Responses reasoning and text objects.
+// response_format into the Responses reasoning and text objects. A JSON null
+// value is treated the same as absence.
 func translateChatOutputShape(fields map[string]json.RawMessage) (text, reasoning json.RawMessage, err error) {
-	if raw, exists := fields["reasoning_effort"]; exists {
+	if raw, exists := fields["reasoning_effort"]; exists && !jsonNull(raw) {
 		var effort string
 		if json.Unmarshal(raw, &effort) != nil || effort == "" {
 			return nil, nil, capability("reasoning_effort", "invalid_type", "The reasoning_effort field must be a non-empty string.")
 		}
 		reasoning = mustMarshal(map[string]any{"effort": effort})
 	}
-	if raw, exists := fields["verbosity"]; exists {
+	if raw, exists := fields["verbosity"]; exists && !jsonNull(raw) {
 		var verbosity string
 		if json.Unmarshal(raw, &verbosity) != nil || verbosity == "" {
 			return nil, nil, capability("verbosity", "invalid_type", "The verbosity field must be a non-empty string.")
@@ -394,7 +447,7 @@ func translateChatOutputShape(fields map[string]json.RawMessage) (text, reasonin
 		shape["verbosity"] = verbosity
 		text = mustMarshal(shape)
 	}
-	if raw, exists := fields["response_format"]; exists {
+	if raw, exists := fields["response_format"]; exists && !jsonNull(raw) {
 		format, err := translateChatResponseFormat(raw)
 		if err != nil {
 			return nil, nil, err
@@ -467,11 +520,8 @@ func TranslateChatCompletionResponse(gatewayRequestID, modelAlias string, create
 		IncompleteDetails *struct {
 			Reason string `json:"reason"`
 		} `json:"incomplete_details"`
-		Output []json.RawMessage `json:"output"`
-		Error  *struct {
-			Message string `json:"message"`
-		} `json:"error"`
-		Usage *responsesUsageJSON `json:"usage"`
+		Output []json.RawMessage   `json:"output"`
+		Usage  *responsesUsageJSON `json:"usage"`
 	}
 	if err := json.Unmarshal(responseJSON, &response); err != nil {
 		return nil, fmt.Errorf("provider response is not a Responses object")
@@ -550,54 +600,52 @@ type responsesUsageJSON struct {
 	} `json:"output_tokens_details"`
 }
 
-// chatUsageJSON maps Responses usage counts into the chat usage shape. Missing
-// counts stay null rather than zero.
-func chatUsageJSON(usage *responsesUsageJSON) any {
-	if usage == nil {
-		return nil
-	}
+// chatUsageShape builds the chat usage object from possibly-missing counts.
+// Missing counts stay null rather than zero.
+func chatUsageShape(prompt, completion, cached, reasoning *int64) map[string]any {
 	chatUsage := map[string]any{
-		"prompt_tokens":     usage.InputTokens,
-		"completion_tokens": usage.OutputTokens,
+		"prompt_tokens":     prompt,
+		"completion_tokens": completion,
 	}
-	if usage.InputTokens != nil && usage.OutputTokens != nil {
-		total := *usage.InputTokens + *usage.OutputTokens
+	if prompt != nil && completion != nil {
+		total := *prompt + *completion
 		chatUsage["total_tokens"] = &total
 	} else {
 		chatUsage["total_tokens"] = nil
 	}
-	if usage.InputTokensDetails != nil && usage.InputTokensDetails.CachedTokens != nil {
-		chatUsage["prompt_tokens_details"] = map[string]any{"cached_tokens": usage.InputTokensDetails.CachedTokens}
+	if cached != nil {
+		chatUsage["prompt_tokens_details"] = map[string]any{"cached_tokens": cached}
 	}
-	if usage.OutputTokensDetails != nil && usage.OutputTokensDetails.ReasoningTokens != nil {
-		chatUsage["completion_tokens_details"] = map[string]any{"reasoning_tokens": usage.OutputTokensDetails.ReasoningTokens}
+	if reasoning != nil {
+		chatUsage["completion_tokens_details"] = map[string]any{"reasoning_tokens": reasoning}
 	}
 	return chatUsage
 }
 
-// chatUsageFromProviderUsage maps the adapter's parsed terminal usage into the
-// chat usage shape used by streaming usage chunks. Missing counts stay null.
-func chatUsageFromProviderUsage(usage *Usage) any {
+// chatUsageJSON maps the provider-reported Responses usage object into the
+// chat usage shape.
+func chatUsageJSON(usage *responsesUsageJSON) any {
 	if usage == nil {
 		return nil
 	}
-	chatUsage := map[string]any{
-		"prompt_tokens":     usage.InputTokens,
-		"completion_tokens": usage.OutputTokens,
+	var cached, reasoning *int64
+	if usage.InputTokensDetails != nil {
+		cached = usage.InputTokensDetails.CachedTokens
 	}
-	if usage.InputTokens != nil && usage.OutputTokens != nil {
-		total := *usage.InputTokens + *usage.OutputTokens
-		chatUsage["total_tokens"] = &total
-	} else {
-		chatUsage["total_tokens"] = nil
+	if usage.OutputTokensDetails != nil {
+		reasoning = usage.OutputTokensDetails.ReasoningTokens
 	}
-	if usage.CachedInputTokens != nil {
-		chatUsage["prompt_tokens_details"] = map[string]any{"cached_tokens": usage.CachedInputTokens}
+	return chatUsageShape(usage.InputTokens, usage.OutputTokens, cached, reasoning)
+}
+
+// chatUsageFromProviderUsage maps the adapter's parsed terminal usage into the
+// chat usage shape used by streaming usage chunks. A missing usage report is
+// still an object, with null counts.
+func chatUsageFromProviderUsage(usage *Usage) any {
+	if usage == nil {
+		usage = &Usage{}
 	}
-	if usage.ReasoningOutputTokens != nil {
-		chatUsage["completion_tokens_details"] = map[string]any{"reasoning_tokens": usage.ReasoningOutputTokens}
-	}
-	return chatUsage
+	return chatUsageShape(usage.InputTokens, usage.OutputTokens, usage.CachedInputTokens, usage.ReasoningOutputTokens)
 }
 
 // ChatStreamSynthesizer converts parsed Responses SSE events into Chat
@@ -664,12 +712,13 @@ func (s *ChatStreamSynthesizer) Feed(event SSEEvent) []json.RawMessage {
 		index := s.toolCount
 		s.toolCount++
 		s.sawToolCalls = true
-		key := payload.Item.ID
-		if key == "" {
-			key = payload.Item.CallID
+		// Register the index under both identifiers so arguments deltas resolve
+		// whichever one the upstream uses for item_id.
+		if payload.Item.ID != "" {
+			s.toolIndexes[payload.Item.ID] = index
 		}
-		if key != "" {
-			s.toolIndexes[key] = index
+		if payload.Item.CallID != "" && payload.Item.CallID != payload.Item.ID {
+			s.toolIndexes[payload.Item.CallID] = index
 		}
 		return s.withRole([]json.RawMessage{s.chunk(map[string]any{"tool_calls": []any{map[string]any{
 			"index": index,
@@ -743,7 +792,7 @@ func (s *ChatStreamSynthesizer) finalChunks(event SSEEvent) []json.RawMessage {
 			finishReason = "length"
 		}
 	}
-	chunks := []json.RawMessage{s.chunk(map[string]any{}, finishReason)}
+	chunks := s.withRole([]json.RawMessage{s.chunk(map[string]any{}, finishReason)})
 	if s.includeUsage {
 		chunks = append(chunks, s.usageChunk(event.Usage))
 	}
