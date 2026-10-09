@@ -139,7 +139,7 @@ function setupChecklistElement(providers, models, accounts, connected, keyed) {
       "providers", "Go to Providers"),
     setupStep(2, models.length > 0, "Add a Model",
       models.length > 0 ? `${formatNumber(models.length)} configured.` : "No Models are configured yet.",
-      "Name the alias agents will request and point it at one provider and upstream model.",
+      "Name the alias agents will request and point it at one provider and one upstream model ID.",
       "models", "Go to Models"),
     setupStep(3, keyed, "Issue a key and grant a Model",
       keyed ? "At least one account has a key and a Model grant." : accounts.length ? "No account has both a key and a Model grant yet." : "No service accounts yet.",

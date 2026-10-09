@@ -111,6 +111,25 @@ export function outcomeLegend() {
   return details;
 }
 
+// Provider connection status (review M2): human labels and tag classes for
+// the OpenAI account connection states. Used by the Providers page's cards
+// and, since step 11, by the Models page (dropdown options and the provider
+// line on Model cards), so they live here with the other shared builders.
+// Unknown values fall back to the disconnected wording and muted tag.
+export function providerStatusLabel(status) {
+  if (status === "connected") return "Connected";
+  if (status === "plan_usage_disabled") return "Plan usage disabled";
+  if (status === "require_reauthentication") return "Re-authentication required";
+  if (status === "failed") return "Connection failed";
+  return "Disconnected";
+}
+
+export function providerStatusTagClass(status) {
+  if (status === "connected") return "tag-success";
+  if (["plan_usage_disabled", "require_reauthentication", "failed"].includes(status)) return "tag-danger";
+  return "tag-muted";
+}
+
 // Pre-admission harness rejection codes (overhaul decision 9c) get human
 // labels for the Service accounts page's Recent-rejections panel. Unknown
 // codes pass through verbatim (explicit-errors invariant) — never masked.

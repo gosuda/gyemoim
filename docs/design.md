@@ -52,6 +52,46 @@ recipes: [web-deployment.md](web-deployment.md). One-line decisions:
 - ChatGPT credential transfer for headless servers via a server-distributed Python enrollment script: OpenAI accepts only loopback redirect URIs (verified live), so the script runs on a browser machine and the server keeps owning registration, PKCE, exchange, ID-token verification, and refreshes, using its own host ID.
 - The pi-config base URL is built client-side from `window.location.origin`; the server derives no public URLs.
 
+## Web UI overhaul (agreed)
+
+A usability overhaul of the management WebUI landed as steps 1–10 of
+[ui-overhaul.md](ui-overhaul.md), consuming the findings in
+[ui-review.md](ui-review.md). It fixes usability only — no visual redesign, no
+frontend toolchain, and none of the behavioral invariants above are weakened.
+The agreed decisions, summarized:
+
+- **Hash routing.** The SPA routes by URL hash (`#/overview` … `#/users`,
+  unknown → `#/overview`, parameters in the hash query); every page sets
+  `document.title` and works with Back/Forward/reload/bookmarks.
+- **Module split.** `site.js` was split into dependency-free ES modules under
+  `assets/js/` (state, dom, format, api, errors, feedback, nav, one module per
+  page, `app.js` entry). Still vanilla JS with relative imports under the
+  strict CSP; no bundler.
+- **Error humanization.** A shared mapping module translates a small set of
+  known generic/conflict responses (duplicate-name 409s, JSON-field leaks)
+  into labeled, actionable sentences; server messages that are already
+  specific pass through verbatim. Never auto-retry, never mask.
+- **Feedback standard.** Every mutating action ends in one inline success
+  message that names the consequence, or a card/row update with a
+  scroll-and-highlight; messages clear on input; loading states disable their
+  buttons; load feedback is an "Updated HH:MM:SS UTC" stamp.
+- **Cross-page links.** Empty states and next-step prose that reference
+  another page link to it (`navigate(page, params)`).
+- **UTC policy.** Timestamps display with explicit UTC; time-range filters
+  take presets and validate exactly what the backend accepts.
+- **Terminology.** Capital-M "Model" is reserved for the route alias;
+  "upstream model ID" elsewhere; "harness" reads "agent(s)" in UI text;
+  Pi-specific fields are labeled and explained; internal enums (outcomes,
+  rejection codes, provider statuses) render human labels with a legend where
+  first shown.
+- **Auto-refresh.** Only Overview's usage/performance panels auto-refresh
+  (30 s, paused while the tab is hidden); every other page stays manual with
+  staleness stamps.
+- **Backend UX support.** Optional key labels, `lastLoginAt` on users, and a
+  bounded (100-entry) in-memory ring buffer of pre-admission auth rejections
+  exposed via `GET /api/rejections`; none of it touches request recording,
+  the admission semaphore, or history files.
+
 ## Architecture
 
 ### Core Concepts

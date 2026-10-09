@@ -3,6 +3,9 @@
 import { api } from "../api.js";
 import { state } from "../state.js";
 import { button, byId, element, showMessage } from "../dom.js";
+import { formErrorText } from "../errors.js";
+import { announceSuccess, clearMessageOnInput, scrollCardIntoView, withBusy } from "../feedback.js";
+import { providerStatusLabel, providerStatusTagClass } from "../format.js";
 import { pageLink } from "../nav.js";
 
 export async function loadModelsAndProviders() {
@@ -24,7 +27,7 @@ function renderProviderOptions() {
   const selected = select.value;
   select.replaceChildren(new Option("Choose a provider", ""));
   for (const provider of state.providers) {
-    const option = new Option(`${provider.name} · ${provider.status}`, provider.id);
+    const option = new Option(`${provider.name} · ${providerStatusLabel(provider.status)}`, provider.id);
     select.add(option);
   }
   if (state.providers.some((provider) => provider.id === selected)) select.value = selected;
@@ -32,17 +35,17 @@ function renderProviderOptions() {
   resetProviderModelCatalog();
 }
 
-function syncModelCatalogControl() {
-  const provider = state.providers.find((item) => item.id === byId("model-provider").value);
-  byId("model-catalog-load").disabled = provider?.status !== "connected";
-}
-
+// Review M1: "Load models" stays enabled even when the selected provider is
+// disconnected — clicking it is what surfaces the explanation in the adjacent
+// message slot. The old silent disable made the written message dead code and
+// left the button state unexplained.
 function resetProviderModelCatalog() {
   state.catalogRequest += 1;
   byId("provider-model-catalog").replaceChildren();
-  byId("model-catalog-load").textContent = "Load models";
+  const load = byId("model-catalog-load");
+  load.disabled = false;
+  load.textContent = "Load models";
   showMessage(byId("model-catalog-message"));
-  syncModelCatalogControl();
 }
 
 async function loadProviderModelCatalog() {
@@ -54,8 +57,11 @@ async function loadProviderModelCatalog() {
   const requestId = ++state.catalogRequest;
   catalog.replaceChildren();
   showMessage(message);
-  syncModelCatalogControl();
-  if (!providerId || provider?.status !== "connected") {
+  if (!providerId) {
+    showMessage(message, "Choose a provider to load its account model list.", "error");
+    return;
+  }
+  if (provider?.status !== "connected") {
     showMessage(message, "Connect the selected provider to load its account model list.", "error");
     return;
   }
@@ -76,8 +82,8 @@ async function loadProviderModelCatalog() {
     showMessage(message, `${error.message} You can still enter an upstream model ID.`, "error");
   } finally {
     if (requestId === state.catalogRequest && byId("model-provider").value === providerId) {
+      load.disabled = false;
       load.textContent = "Load models";
-      syncModelCatalogControl();
     }
   }
 }
@@ -92,8 +98,16 @@ function renderModels() {
   for (const model of state.models) list.append(renderModel(model));
 }
 
+// findModelCard locates a Model's card after a list re-render (cards carry
+// their model id as a data attribute) so feedback can be placed on the fresh
+// card, mirroring the provider/account card convention.
+function findModelCard(modelID) {
+  return byId("model-list").querySelector(`.resource-card[data-model-id="${CSS.escape(modelID)}"]`);
+}
+
 function renderModel(model) {
   const card = element("article", "resource-card model-card");
+  card.dataset.modelId = model.id;
   const header = element("div", "resource-header");
   const titleBlock = element("div", "resource-title");
   titleBlock.append(element("h4", "", model.name));
@@ -107,7 +121,7 @@ function renderModel(model) {
       if (state.editingModel?.id === model.id) cancelModelEdit();
       await loadModelsAndProviders();
     } catch (error) {
-      const message = element("p", "inline-error", error.message);
+      const message = element("p", "inline-error", formErrorText(error, { kind: "model", action: "delete", name: model.name }));
       message.setAttribute("role", "alert");
       card.append(message);
     }
@@ -116,8 +130,21 @@ function renderModel(model) {
   card.append(header);
   const target = element("dl", "target-details");
   const provider = state.providers.find((item) => item.id === model.providerId);
+  // Review M2: the Model card carries its target provider's connection
+  // status (the same "name · status" convention as the form's dropdown), so
+  // a Model pointing at a dead provider is not pixel-identical to a healthy
+  // one. The title carries the one-line intent; connected needs no sentence.
   const providerLine = element("div");
-  providerLine.append(element("dt", "", "Provider"), element("dd", "", provider?.name || "Unknown provider"));
+  const providerValue = element("dd");
+  providerValue.append(provider?.name || "Unknown provider");
+  if (provider) {
+    const statusTag = element("span", `tag ${providerStatusTagClass(provider.status)}`, providerStatusLabel(provider.status));
+    if (provider.status !== "connected") {
+      statusTag.title = `This Model won't serve until ${provider.name} is connected.`;
+    }
+    providerValue.append(" ", statusTag);
+  }
+  providerLine.append(element("dt", "", "Provider"), providerValue);
   const upstreamLine = element("div");
   upstreamLine.append(element("dt", "", "Upstream model"), element("dd", "", model.upstreamModel || "Not set"));
   target.append(providerLine, upstreamLine);
@@ -200,8 +227,9 @@ async function submitModel(event) {
   const submit = byId("model-submit");
   const message = byId("model-form-message");
   const editing = state.editingModel;
+  const name = byId("model-name").value;
   const payload = {
-    name: byId("model-name").value,
+    name,
     providerId: byId("model-provider").value,
     upstreamModel: byId("model-upstream").value,
   };
@@ -212,24 +240,30 @@ async function submitModel(event) {
     showMessage(message, error.message, "error");
     return;
   }
-  submit.disabled = true;
-  showMessage(message);
-  try {
+  await withBusy(submit, async () => {
+    showMessage(message);
     const path = editing ? `/api/models/${encodeURIComponent(editing.id)}` : "/api/models";
-    await api(path, { method: editing ? "PUT" : "POST", body: JSON.stringify(payload) });
+    const saved = await api(path, { method: editing ? "PUT" : "POST", body: JSON.stringify(payload) });
+    const savedID = editing ? editing.id : saved?.id;
     cancelModelEdit();
     await loadModelsAndProviders();
-  } catch (error) {
-    showMessage(message, error.message, "error");
-  } finally {
-    submit.disabled = false;
-  }
+    // Feedback standard (decision 4): the outcome names the consequence and
+    // the fresh card announces itself.
+    announceSuccess(message, editing ? "Changes saved." : `Model “${name}” added.`);
+    scrollCardIntoView(findModelCard(savedID));
+  }).catch((error) => {
+    // Errors go through the shared humanization table (kind "model"), which
+    // covers the duplicate-name 409 and the providerId/upstreamModel field
+    // leak; unknown errors pass through verbatim.
+    showMessage(message, formErrorText(error, { kind: "model", action: editing ? "rename" : "create", name }), "error");
+  });
 }
 
 byId("model-form").addEventListener("submit", submitModel);
 byId("model-cancel").addEventListener("click", cancelModelEdit);
 byId("model-provider").addEventListener("change", resetProviderModelCatalog);
 byId("model-catalog-load").addEventListener("click", loadProviderModelCatalog);
+clearMessageOnInput(byId("model-form"), byId("model-form-message"));
 
 // Review S1: the grant note bridges to the other half of the key+grant
 // invariant — the Model form's "not automatically granted" warning links to
@@ -239,3 +273,11 @@ byId("model-catalog-load").addEventListener("click", loadProviderModelCatalog);
   const note = byId("model-form-heading").parentElement.querySelector(".muted");
   note.append(" Grant access on the ", pageLink("Service accounts", "service-accounts"), " page.");
 }
+
+// Review M4: the Pi metadata fields point at the Pi setup panel where it
+// actually lives (each service account's detail view).
+byId("model-metadata-hint").append(
+  " The Pi setup panel is on the ",
+  pageLink("Service accounts", "service-accounts"),
+  " page.",
+);

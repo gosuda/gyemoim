@@ -1211,3 +1211,113 @@ no real deletion was ever fired. Deviations: date inputs were set via
 controls ignore synthetic keyboard input; the listeners exercised are the
 real ones); the 409 branch has code review only (exercising it would have
 required confirming the dialog, which was off-limits).
+
+### Step 11 — Terminology sweep + docs fold-in (2026-10-09)
+
+Changes in `internal/httpui/assets/{index.html,site.css}`, `js/format.js`,
+`js/pages/models.js`, `js/pages/providers.js`, `js/pages/overview.js`, plus
+`docs/design.md`; no Go changes.
+
+- **M1 (enable-with-message) — choice: keep "Load models" enabled.**
+  Rationale: the catalog message slot sits directly below the control, so a
+  click surfaces the explanation in the page's established feedback channel;
+  a disabled-button + adjacent-hint design needs a second always-visible
+  element whose state must be kept in sync with the dropdown for no extra
+  clarity. `syncModelCatalogControl` (the silent disabler) is deleted; the
+  button state is owned by the load handler (`disabled` only while a load is
+  in flight, models.js:61-66, 90-93) and `resetProviderModelCatalog`
+  re-enables it on provider change so an aborted load cannot leave a stuck
+  disabled button (models.js:41-48). The unreachable sentence is now
+  reachable: clicking with a disconnected provider shows "Connect the
+  selected provider to load its account model list." (models.js:65), and the
+  no-provider-selected case gets its own accurate sentence "Choose a
+  provider to load its account model list." (models.js:61).
+- **M2 (provider status on Model cards).** `providerStatusLabel` and
+  `providerStatusTagClass` moved from providers.js to format.js (format.js:119,
+  127 — now shared by two pages); providers.js imports them (providers.js:8).
+  Model cards show the Provider dd as `name` + a status tag with the
+  dropdown's conventions: `tag-success` "Connected", `tag-danger` for
+  plan_usage_disabled / require_reauthentication / failed, `tag-muted`
+  "Disconnected" (models.js:139-147). Every non-connected status carries the
+  one-line intent as a title: "This Model won't serve until <name> is
+  connected." (models.js:143); connected gets no repeated sentence. The
+  form's dropdown options now use the human label too ("work-main ·
+  Disconnected", models.js:30).
+- **M3 (terminology stack).** Models page subtitle is now the glossary line
+  "A Model is the name your agents request — it routes to exactly one
+  provider and one upstream model ID." (index.html:147). The upstream field
+  hint reads "Pick one of the provider's account models from the loaded
+  list, or type its exact upstream model ID. Metadata below is never guessed
+  from the name." (index.html:154 — the "Model details are not inferred."
+  sentence is gone), and the placeholder says "Enter or choose an upstream
+  model ID". Overview checklist step 2 says "…point it at one provider and
+  one upstream model ID." (overview.js:142). The Requested Model / Upstream
+  model table headers are untouched, as required.
+- **M4 (Pi metadata).** The editor summary is "Optional model metadata (used
+  by the Pi agent export)" (index.html:156) and its hint now leads with
+  "Only the Pi agent setup export uses these fields. Leave them empty if you
+  don't use Pi — the Model works without them." followed by the pageLink
+  "The Pi setup panel is on the [Service accounts] page." (pageLink button,
+  models.js:279-283, same CSP-safe convention as the S1 grant note).
+- **M5/M6 leftovers.** `#model-catalog-message` 9px → 11px (site.css:183).
+  Model form submit runs through `withBusy` (models.js:243), the form is
+  wired with `clearMessageOnInput` (models.js:266), create/edit errors go
+  through `formErrorText` with `{kind: "model", action:
+  create|rename}` (models.js:258 — covers the duplicate-name 409 and the
+  providerId/upstreamModel 400 leak mapping that step 5 pre-built), and the
+  delete error uses `{kind: "model", action: "delete"}` (models.js:124).
+  Cards carry `data-model-id` + `findModelCard` (models.js:104-106) so
+  create/edit success lands "Model “X” added." / "Changes saved." with
+  `scrollCardIntoView` (models.js:250-253) — the model form previously gave
+  no success feedback, which violated the decision-4 standard.
+- **Terminology sweep.** "Harness" is gone from all UI text: the rejections
+  panel intro says "Agent calls that were refused…" (index.html:139) and the
+  old Models subtitle is replaced by the M3 glossary; the remaining matches
+  in the assets are code comments only. No other page mentions "harness"
+  (grep across index.html, all page modules, login/change-password). Pi
+  appears only on Models (explained per M4) and Service accounts (the panel
+  itself). Raw enums: rejection codes already render through
+  `rejectionCodeLabel`, outcomes through `outcomeLabel`/`outcomeTag`; the
+  last surfaced enum, provider status, is labeled everywhere per M2. Runtime
+  `state` values ("ready"/"degraded") remain server-derived status words and
+  stay out of scope.
+- **docs/design.md.** New "Web UI overhaul (agreed)" section (design.md:55)
+  summarizing the ten decisions, pointing at ui-review.md/ui-overhaul.md.
+
+Verification: `node --check` on all 16 JS modules OK (as .mjs copies);
+`go vet ./...` OK; `CGO_ENABLED=0 go build -trimpath` OK;
+`./scripts/build-release.sh` builds all four targets. Full browser
+regression on a private instance (`/tmp/opencode/step11-bin`, port 9973,
+XDG-isolated data dir `/tmp/opencode/step11-data`; admin password changed
+through the forced gate):
+
+| Page | Result |
+| --- | --- |
+| /login | Error path: "Sign-in failed: invalid credentials." with error styling rgb(164,63,63); credentials preserved. |
+| /change-password (forced) | Temp-password login redirects here; title/h1/button "Set a new password"; change lands on #/overview. |
+| Overview | Title "Overview · Gyemoim"; setup checklist with live counts and the new step-2 wording; Group-by options keep "Requested Model (the alias agents request)"; Refresh + stamps work. |
+| Providers | Created "work-main" + "work-temp" (success messages, scroll+highlight); delete confirm read back verbatim `Delete provider “work-temp”? Models targeting it must be removed first.`; delete removes the card. |
+| Models | Glossary subtitle, new field hint, placeholder, Pi summary/sentence + working pageLink; "Load models" enabled with a disconnected provider and clicking it renders "Connect the selected provider to load its account model list." (the previously dead sentence); catalog message computed 11px; dropdown "work-main · Disconnected"; card shows Provider "work-main" + `tag-muted` "Disconnected" with the title tooltip (stubbed connected state renders `tag-success` "Connected" with no title, stub unrouted and re-verified); create ("Model “temp-model” added." + card-highlight), edit ("Changes saved.", card renamed), duplicate-name create → `A Model named “gpt-x2” already exists. Choose another name.`, delete confirm verbatim + delete works, stale message clears on first input. |
+| Service accounts | Created "pi work"; labeled key ("ci key") with show-once reveal + "Dismiss and clear"; summary "1 active key · 0 of 1 Model granted" → grant saved → "1 of 1 Model granted" ("Model access saved."); second key created and revoked (row `.key-row-revoked`, opacity 0.6, summary recounts); Recent rejections panel fed by three real curl /v1 rejections rendering newest-first with human labels ("Invalid API key" / "Model not found" with model / "Model required"), key hints, and account name — no raw enum codes. |
+| Requests | Preset "Last 24 hours" fills UTC strings; Apply fires `?from=…&to=…` (time-only filters deliberately do not touch the hash — step 9 design); outcome filter syncs `#/requests?outcome=failed` in the hash and the fetch; Reset clears and refetches plain; fresh-load deep link `#/requests?outcome=failed` pre-selects and fetches; empty-state and summary lines correct. |
+| Storage | Green health banner "Recording healthy · compression idle · zstd available · 0 failed segments", three tiles with segment captions, "Updated 13:00:25 UTC" stamp. |
+| Users | Created "reg-user" with one-time handoff block showing the temp password and consequence message; "Must change password at next sign-in" badge; delete confirm verbatim; card removed. |
+| 390px spot check | Models, Users, Storage at 390×844: scrollWidth == clientWidth == 390 on all three (screenshot of Storage reviewed). |
+| Console | Browser console and page-error buffers empty across the whole session. |
+
+Deviations/judgment calls: (1) M1 implemented as enable-with-message — argued
+above. (2) The model-delete 409 branch is code-reviewed only: the backend's
+`DeleteModel` (internal/config/repository.go:627) performs no reference
+check, so a granted Model actually deletes cleanly today (verified live —
+the confirm accepted and the card went away) and the humanized
+still-in-use sentence is currently unreachable for models; the mapping is
+harmless and future-proof. (3) The brief's "any leftover 9px fonts" was
+read as the flagged offender only (the catalog message); the remaining 9px
+rules are the established small-text scale (table headers, field hints,
+tags) shared by every page — changing them wholesale would be the visual
+redesign the plan's non-goals exclude. (4) Success feedback +
+scroll-into-view on the Model form was added beyond the letter of item 5
+because the decision-4 feedback standard is binding acceptance criteria.
+(5) The regression instance's "pi work" account briefly referenced a
+deleted Model (see 2); the page renders correctly ("0 of 0 Models
+granted"). Nothing broken found outside step 11's own files.

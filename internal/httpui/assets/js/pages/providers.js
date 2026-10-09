@@ -5,6 +5,7 @@ import { state } from "../state.js";
 import { button, byId, element, showMessage } from "../dom.js";
 import { formErrorText } from "../errors.js";
 import { announceSuccess, clearMessageOnInput, scrollCardIntoView, withBusy } from "../feedback.js";
+import { providerStatusLabel, providerStatusTagClass } from "../format.js";
 
 export async function loadProviders() {
   const list = byId("provider-list");
@@ -60,26 +61,12 @@ function renderProviders(open = new Map()) {
   }
 }
 
-function providerStatusLabel(status) {
-  if (status === "connected") return "Connected";
-  if (status === "plan_usage_disabled") return "Plan usage disabled";
-  if (status === "require_reauthentication") return "Re-authentication required";
-  if (status === "failed") return "Connection failed";
-  return "Disconnected";
-}
-
 function providerStatusDescription(status) {
   if (status === "connected") return "This OpenAI account is connected and ready for direct inference.";
   if (status === "plan_usage_disabled") return "Plan usage disabled — enable API access on the ChatGPT plan, then reconnect this account.";
   if (status === "require_reauthentication") return "Re-authentication required. The saved refresh grant can no longer renew access; reconnect before using this account.";
   if (status === "failed") return "The last connection attempt failed. Start the connect flow again.";
   return "Connect an OpenAI account with Sign in with ChatGPT.";
-}
-
-function providerStatusTagClass(status) {
-  if (status === "connected") return "tag-success";
-  if (["plan_usage_disabled", "require_reauthentication", "failed"].includes(status)) return "tag-danger";
-  return "tag-muted";
 }
 
 // buildConnectPanel renders the inline enrollment panel for one provider
