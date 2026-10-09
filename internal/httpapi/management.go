@@ -42,11 +42,35 @@ func NewManagement(store *config.Store, fallback http.Handler, oauthManager *siw
 }
 
 func (api *managementAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if !strings.HasPrefix(r.URL.Path, "/api/") || r.URL.Path == "/api/status" {
+	if !strings.HasPrefix(r.URL.Path, "/api/") {
 		api.fallback.ServeHTTP(w, r)
 		return
 	}
 	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/api/"), "/")
+	// Login needs no session; logout accepts stale sessions so browsers can
+	// always clean up. Every other management path requires a valid session.
+	if len(parts) == 2 && parts[0] == "auth" && parts[1] == "login" {
+		api.login(w, r)
+		return
+	}
+	if len(parts) == 2 && parts[0] == "auth" && parts[1] == "logout" {
+		api.logout(w, r)
+		return
+	}
+	user, session, ok := api.authenticate(w, r)
+	if !ok {
+		return
+	}
+	// Forced password change: only the password change itself and logout (handled
+	// above) work until the user sets a new password.
+	if user.MustChangePassword && r.URL.Path != "/api/auth/password" {
+		writeManagementError(w, http.StatusForbidden, "a password change is required before using the management API", "password_change_required")
+		return
+	}
+	if r.URL.Path == "/api/status" {
+		api.fallback.ServeHTTP(w, r)
+		return
+	}
 	switch {
 	case len(parts) == 1 && parts[0] == "providers":
 		api.providers(w, r)
@@ -86,6 +110,8 @@ func (api *managementAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		api.requestContent(w, r, parts[1])
 	case len(parts) == 1 && parts[0] == "usage":
 		api.usage(w, r)
+	case len(parts) == 2 && parts[0] == "auth" && parts[1] == "password":
+		api.changePassword(w, r, session, user)
 	case len(parts) == 1 && parts[0] == "storage":
 		api.storageStatus(w, r)
 	case len(parts) == 2 && parts[0] == "storage" && parts[1] == "delete":

@@ -51,7 +51,7 @@ func New(dataDirectory string, port int, startedAt time.Time, csrfToken string, 
 	if err != nil {
 		return nil, fmt.Errorf("open embedded UI assets: %w", err)
 	}
-	page, err := template.ParseFS(assets, "index.html")
+	page, err := template.ParseFS(assets, "index.html", "login.html", "change-password.html")
 	if err != nil {
 		return nil, fmt.Errorf("parse embedded UI page: %w", err)
 	}
@@ -67,6 +67,15 @@ func New(dataDirectory string, port int, startedAt time.Time, csrfToken string, 
 		HistoryState:    "unavailable",
 	}
 	fileServer := http.FileServer(http.FS(assets))
+	renderPage := func(name string) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			if err := page.ExecuteTemplate(w, name, struct{ CSRFToken string }{CSRFToken: csrfToken}); err != nil {
+				// The response may already be committed; logging belongs at the server boundary later.
+				return
+			}
+		}
+	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
@@ -74,13 +83,11 @@ func New(dataDirectory string, port int, startedAt time.Time, csrfToken string, 
 			http.NotFound(w, r)
 			return
 		}
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		if err := page.ExecuteTemplate(w, "index.html", struct{ CSRFToken string }{CSRFToken: csrfToken}); err != nil {
-			// The response may already be committed; logging belongs at the server boundary later.
-			return
-		}
+		renderPage("index.html")(w, r)
 	})
 	mux.Handle("GET /assets/", http.StripPrefix("/assets/", fileServer))
+	mux.Handle("GET /login", renderPage("login.html"))
+	mux.Handle("GET /change-password", renderPage("change-password.html"))
 	mux.HandleFunc("GET /api/status", func(w http.ResponseWriter, r *http.Request) {
 		currentStatus := status
 		if database == nil {

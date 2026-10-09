@@ -292,3 +292,10 @@ h5 { margin: 0; color: #3b4654; font-size: 11px; font-weight: 680; }
 .deletion-submit:hover:not(:disabled) { border-color: #d9a9a9; color: #8f3333; background: #fff7f7; }
 .deletion-status { margin: 11px 0 0; color: #77818e; font-size: 10px; line-height: 1.5; }
 @media (max-width: 760px) { .history-delete-form { grid-template-columns: minmax(0, 1fr); } }
+
+/* Login and forced password-change pages. */
+.auth-shell { display: grid; place-items: center; min-height: 100vh; padding: 24px; }
+.auth-panel { width: min(430px, 100%); padding: 23px; display: grid; gap: 17px; }
+.auth-heading { border-bottom: 0; padding-bottom: 0; }
+.auth-heading h1 { font-size: 19px; }
+.auth-heading .card-icon { width: 42px; height: 42px; border-radius: 11px; font-size: 19px; font-weight: 750; }

@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="csrf-token" content="{{.CSRFToken}}">
+  <title>Sign in · Gyemoim</title>
+  <link rel="stylesheet" href="/assets/site.css">
+  <script src="/assets/login.js" defer></script>
+</head>
+<body>
+  <main class="auth-shell">
+    <section class="panel form-panel auth-panel">
+      <div class="card-heading auth-heading">
+        <div class="card-icon" aria-hidden="true">G</div>
+        <div><h1>Sign in to Gyemoim</h1><p class="muted">Management access to this gateway instance.</p></div>
+      </div>
+      <form id="login-form" class="stack-form">
+        <label for="login-username">Username</label>
+        <input id="login-username" name="username" type="text" autocomplete="username" required>
+        <label for="login-password">Password</label>
+        <input id="login-password" name="password" type="password" autocomplete="current-password" required>
+        <button class="button primary" type="submit">Sign in</button>
+        <p class="form-message" id="login-message" role="status" aria-live="polite"></p>
+      </form>
+    </section>
+  </main>
+</body>
+</html>

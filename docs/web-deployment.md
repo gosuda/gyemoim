@@ -178,6 +178,29 @@ database must keep working.
   (seeded provider/service-account/key/model/grant) migrates with every row
   preserved value-by-value; accessors exercised via a throwaway `go run`
   probe (duplicate username → ErrConflict, cascade delete, prune count).
+- **Step 3 — done (2026-10-09).** Argon2id hashing (PHC string, 16-byte salt,
+  32-byte key, m=64 MiB/t=3/p=1, constant-time verify, malformed stored hashes
+  are a failure not a panic) in `internal/config/password.go`; the store stays
+  hash-agnostic. `POST /api/auth/login|logout|password` under the existing
+  management guard (login CSRF comes from the token injected into served
+  HTML); generic 401 for unknown user, wrong password, and disabled accounts.
+  Session cookie `gym_session` (256-bit base64url ID, only its SHA-256 hash
+  stored) with `HttpOnly; Secure; SameSite=Lax; Path=/`, 24 h absolute expiry,
+  re-issued per login. Session middleware gates every `/api/` path except
+  login/logout and every UI page except `/login` + `/assets/`; a
+  `must_change_password` user is restricted to the password change (403
+  `password_change_required`) and gets page redirects to `/change-password`.
+  Minimal server-rendered `/login` and `/change-password` pages with a small
+  fetch-based JS (inline scripts are blocked by the CSP). `/v1/` and
+  `/auth/callback` untouched. Review hardenings: verification rejects stored
+  hash parameters outside safe bounds (threads ≤ 255, memory ≤ 1 GiB) instead
+  of trusting them, and every 401 path costs one argon2id verification
+  (unknown usernames verify against a fixed dummy hash, disabled accounts
+  verify before the disabled check) so login timing cannot enumerate users.
+  Verified: vet/build clean; full curl pass —
+  cookie flags, 43-char value, per-login re-issue, forced-change gate,
+  other-session revocation on password change, forged Origin/missing CSRF
+  still 403, `/v1/` and `/auth/callback` behavior unchanged.
 
 ## Work breakdown
 

@@ -125,11 +125,14 @@ func run(args []string) error {
 	responsesAdapter := provider.NewOpenAIResponsesAdapter()
 	mux := http.NewServeMux()
 	// Browser-origin protections cover the UI and management JSON API; the
-	// bearer-authenticated /v1 harness routes sit outside them.
+	// bearer-authenticated /v1 harness routes sit outside them. Management
+	// session enforcement lives inside each handler: /api/ routes gate
+	// themselves in httpapi (login and logout opt out), while UI page requests
+	// redirect to /login. /auth/callback and /v1/ need no session.
 	mux.Handle("/api/", guard.Management(httpapi.NewManagement(store, uiHandler, oauthManager, listenPort, historyRecorder)))
 	mux.Handle("GET /auth/callback", guard.Callback(http.HandlerFunc(oauthManager.ServeCallback)))
 	mux.Handle("/v1/", httpapi.NewHarness(gateway.New(store), historyRecorder, oauthManager, responsesAdapter))
-	mux.Handle("/", guard.Management(uiHandler))
+	mux.Handle("/", guard.Management(httpapi.RequireManagementSession(store, uiHandler)))
 
 	serverBase, cancelServerBase := context.WithCancel(context.Background())
 	server := &http.Server{
