@@ -174,3 +174,46 @@ password, and folding decisions into `design.md` ("Web UI overhaul (agreed)").
 ## Implementation log
 
 Appended per step with verification evidence.
+
+### Step 1 — Hash routing + document.title (2026-10-09)
+
+`internal/httpui/assets/site.js` only; `index.html` unchanged. `navigate(page, params)`
+(site.js:150) is now a thin wrapper: it builds `#/<page>?<query>` via `URLSearchParams`,
+no-ops when the hash already equals the target (no double render, no junk history
+entry), otherwise writes `location.hash` and calls `renderRoute()` directly. The old
+`navigate()` body (cancel fetches, sensitive cleanup, request-detail reset, nav
+`aria-current`, view visibility, h1/breadcrumb) moved into `showPage(page, params)`
+(site.js:133), which now also sets `document.title` to `<Page> · Gyemoim` (review A3).
+`renderRoute()` (site.js:108) parses the hash (`parseHash`, site.js:101), renders the
+page, and normalizes an empty or unknown page to `#/overview` via
+`location.replace` (no history entry). A `window` `hashchange` listener drives
+Back/Forward/bookmarks; an internal `renderedHash` guard makes the direct render +
+queued `hashchange` pair render exactly once. Boot (site.js:2239) calls
+`renderRoute()` instead of the hardcoded `navigate("overview")`.
+
+`state.pendingRequestID` is removed. Overview Recent-performance Inspect rows call
+`navigate("requests", { select: requestId })` (site.js:1504); `refreshPage` forwards
+`select` to `loadRequestHistory(selectID)` (site.js:1581), which opens the detail via
+`selectRequest` after the page settles (also when the list query fails, so an unknown
+id still shows the detail's explicit load error). The `select` param is **kept** in
+the hash (not cleared on selection/close), so reload and bookmarks re-open the same
+detail; pagination/filter actions and "Close details" clear only the in-memory
+selection as before. Unknown hash params are ignored; the requests page consumes only
+`select`. Session-expiry redirect to `/login` and the logout flow are untouched
+(login assigns `/`, which normalizes to `#/overview`).
+
+Verification: `node --check site.js` OK; `go vet ./...` and
+`CGO_ENABLED=0 go build -trimpath` OK (pre-existing committed `internal/history/
+query.go` is `gofmt -l`-dirty; not touched by this step). Browser pass on a private
+instance (port 9961, seeded providers/accounts/users, admin password changed): all 7
+nav clicks update hash, title, `aria-current`, and leave exactly one view visible;
+Back/Forward restore page+title+`aria-current`; reload on `#/users` stays on Users;
+`#/bogus` normalizes to `#/overview` with no extra history entry; deep link
+`#/requests?select=nonexistent` opens Requests with the detail panel showing its
+explicit load error; with `/api/requests*` stubbed to a synthetic request, the deep
+link (fresh load) auto-opens the detail with summary grid + 2 event cards and
+highlights the row, and an Overview Inspect row click lands on
+`#/requests?select=synthetic-1` with the detail auto-opened (real
+`navigate(page, params)` path); logout → `/login`, re-login → `#/overview`; a nav
+click on the current page is a no-op; one navigation triggers exactly one page load
+(single `/api/users`+`/api/auth/me` pair per Users render). Deviations: none.

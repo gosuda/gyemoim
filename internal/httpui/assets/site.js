@@ -13,7 +13,6 @@
     catalogRequest: 0,
     usersRequest: 0,
     sensitiveCleanup: new Set(),
-    pendingRequestID: "",
     requestCursors: [""],
     requestPageIndex: 0,
     appliedRequestFilters: null,
@@ -86,8 +85,44 @@
     return data;
   }
 
-  function navigate(page) {
-    if (!titles[page]) return;
+  // The last hash this SPA rendered. It guards against double renders when a
+  // location change both renders directly and fires hashchange afterwards.
+  let renderedHash = "";
+
+  // Hash routing: the SPA renders from location.hash (#/page?key=value).
+  // navigate() is a thin wrapper that writes the hash; renderRoute() is the
+  // single render entry point, driven by hashchange (Back/Forward, manual
+  // edits, bookmarks) and called directly right after writing the hash.
+  function buildHash(page, params) {
+    const query = params ? new URLSearchParams(params).toString() : "";
+    return `#/${page}${query ? `?${query}` : ""}`;
+  }
+
+  function parseHash() {
+    const raw = window.location.hash.replace(/^#\/?/, "");
+    const [name, query = ""] = raw.split("?");
+    const page = Object.hasOwn(titles, name) ? name : "";
+    return { page, params: new URLSearchParams(query) };
+  }
+
+  function renderRoute() {
+    const { page, params } = parseHash();
+    if (!page) {
+      // Unknown or missing page: normalize without adding a history entry.
+      if (window.location.hash !== "#/overview") window.location.replace("#/overview");
+      applyHash("#/overview", "overview", new URLSearchParams());
+      return;
+    }
+    applyHash(window.location.hash, page, params);
+  }
+
+  function applyHash(hash, page, params) {
+    if (hash === renderedHash) return;
+    renderedHash = hash;
+    showPage(page, params);
+  }
+
+  function showPage(page, params = new URLSearchParams()) {
     cancelHistoryFetches();
     if (state.page === "service-accounts" && page !== state.page) {
       for (const clear of [...state.sensitiveCleanup]) clear();
@@ -106,17 +141,26 @@
     document.querySelectorAll("[data-view]").forEach((view) => {
       view.hidden = view.dataset.view !== page;
     });
+    document.title = `${titles[page]} · Gyemoim`;
     byId("page-title").textContent = titles[page];
     byId("breadcrumb").textContent = titles[page].toUpperCase();
-    refreshPage(page);
+    refreshPage(page, params);
   }
 
-  async function refreshPage(page = state.page) {
+  function navigate(page, params = null) {
+    if (!titles[page]) return;
+    const hash = buildHash(page, params);
+    if (window.location.hash === hash) return;
+    window.location.hash = hash;
+    renderRoute();
+  }
+
+  async function refreshPage(page = state.page, params = null) {
     if (page === "overview") return Promise.all([loadStatus(), loadOverviewHistory()]);
     if (page === "providers") return loadProviders();
     if (page === "service-accounts") return loadAccounts();
     if (page === "models") return loadModelsAndProviders();
-    if (page === "requests") return loadRequestHistory();
+    if (page === "requests") return loadRequestHistory(params?.get("select") || "");
     if (page === "storage") return loadStorage();
     if (page === "users") return loadUsers();
   }
@@ -1457,8 +1501,7 @@
       const model = request.model || {};
       const firstOutput = request.timings?.first_output_ns;
       const inspect = button("Inspect", "quiet small", () => {
-        state.pendingRequestID = request.requestId;
-        navigate("requests");
+        navigate("requests", { select: request.requestId });
       });
       const action = element("td");
       action.append(inspect);
@@ -1536,7 +1579,7 @@
     state.requestPageIndex = 0;
   }
 
-  async function loadRequestHistory() {
+  async function loadRequestHistory(selectID = "") {
     const token = beginHistoryFetch();
     const message = byId("request-list-message");
     showMessage(message, "Loading request history…");
@@ -1564,6 +1607,10 @@
       setRequestPageLoading(false);
       byId("request-results-summary").textContent = "Request history is unavailable.";
     }
+    // A ?select= deep link opens the detail panel once the page has settled;
+    // the detail loads independently of the list query's outcome. The select
+    // param stays in the hash so reload and bookmarks re-open the detail.
+    if (selectID) await selectRequest(selectID);
   }
 
   async function fetchRequestPage(cursor, token, filters = state.appliedRequestFilters, onSuccess = null) {
@@ -1575,11 +1622,6 @@
       onSuccess?.();
       renderRequestPage(page);
       showMessage(byId("request-list-message"), page.requests.length ? "Each page is bounded to 25 requests." : "No requests match these filters.");
-      if (state.pendingRequestID) {
-        const pending = state.pendingRequestID;
-        state.pendingRequestID = "";
-        await selectRequest(pending);
-      }
     } catch (error) {
       if (!historyFetchIsCurrent(token) || state.page !== "requests") return;
       setRequestPageLoading(false);
@@ -2194,6 +2236,7 @@
     window.history.replaceState({}, "", window.location.pathname);
     navigate("providers");
   } else {
-    navigate("overview");
+    renderRoute();
   }
+  window.addEventListener("hashchange", renderRoute);
 })();
