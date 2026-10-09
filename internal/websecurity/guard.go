@@ -1,4 +1,4 @@
-// Package websecurity contains reusable protections for the loopback management UI.
+// Package websecurity contains reusable browser-origin protections for the management UI.
 package websecurity
 
 import (
@@ -6,48 +6,24 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"strconv"
 	"strings"
 )
 
 const csrfHeader = "X-Gyemoim-CSRF"
 
-// Guard validates the browser origin and host for management requests.
+// Guard validates the browser origin of management requests against the Host of
+// each incoming request.
 type Guard struct {
 	csrf string
-	host string
-	port string
 }
 
-// New creates a guard for one exact local origin and listener port.
-func New(port int, csrfToken string) *Guard {
-	portText := strconv.Itoa(port)
-	return &Guard{
-		csrf: csrfToken,
-		host: "127.0.0.1",
-		port: portText,
-	}
-}
-
-// Host restricts all requests to the IPv4 loopback address and actual listener port.
-func (g *Guard) Host(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requestHost, requestPort, err := net.SplitHostPort(r.Host)
-		if err != nil && r.Host == g.host && g.port == "80" {
-			requestHost, requestPort, err = g.host, "80", nil
-		}
-		ip := net.ParseIP(requestHost)
-		if err != nil || ip == nil || !ip.Equal(net.ParseIP(g.host)) || requestPort != g.port {
-			http.Error(w, "invalid Host header", http.StatusMisdirectedRequest)
-			return
-		}
-		next.ServeHTTP(w, r)
-	})
+// New creates a guard with the given CSRF token.
+func New(csrfToken string) *Guard {
+	return &Guard{csrf: csrfToken}
 }
 
 // Callback adds response security headers without applying browser Origin or CSRF
-// checks, which would reject the provider's top-level OAuth redirect. The global
-// Host guard still applies to this route.
+// checks, which would reject the provider's top-level OAuth redirect.
 func (g *Guard) Callback(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		setSecurityHeaders(w)
@@ -78,23 +54,32 @@ func (g *Guard) Management(next http.Handler) http.Handler {
 
 func (g *Guard) validOriginIfPresent(r *http.Request) bool {
 	origin := r.Header.Get("Origin")
-	return origin == "" || g.sameOrigin(origin)
+	return origin == "" || g.sameOrigin(r, origin)
 }
 
 func (g *Guard) hasValidOrigin(r *http.Request) bool {
-	return g.sameOrigin(r.Header.Get("Origin"))
+	return g.sameOrigin(r, r.Header.Get("Origin"))
 }
 
-func (g *Guard) sameOrigin(origin string) bool {
+// sameOrigin reports whether an Origin header refers to the request's own Host.
+// The comparison is scheme-agnostic and covers only host:port: the gateway
+// serves plain HTTP behind a reverse proxy while browsers send https origins.
+// An absent port on either side (the default for the site's own scheme) counts
+// as no port and matches only another portless value.
+func (g *Guard) sameOrigin(r *http.Request, origin string) bool {
 	parsed, err := url.Parse(origin)
-	if err != nil || parsed.Scheme != "http" || parsed.User != nil || parsed.Hostname() != g.host || parsed.Path != "" || parsed.RawQuery != "" || parsed.Fragment != "" {
+	if err != nil || parsed.User != nil || parsed.Path != "" || parsed.RawQuery != "" || parsed.Fragment != "" {
 		return false
 	}
-	port := parsed.Port()
-	if port == "" {
-		port = "80"
+	requestHost, requestPort := splitHostPort(r.Host)
+	return strings.EqualFold(parsed.Hostname(), requestHost) && parsed.Port() == requestPort
+}
+
+func splitHostPort(hostport string) (host string, port string) {
+	if parsedHost, parsedPort, err := net.SplitHostPort(hostport); err == nil {
+		return parsedHost, parsedPort
 	}
-	return port == g.port
+	return hostport, ""
 }
 
 func (g *Guard) validCSRF(r *http.Request) bool {

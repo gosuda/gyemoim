@@ -155,6 +155,18 @@ CREATE TABLE sessions (
 `PRAGMA user_version` migration follows the existing pattern; opening an older
 database must keep working.
 
+## Implementation log
+
+- **Step 1 — done (2026-10-09).** `--listen` flag added (`--listen` wins over
+  `--port`; port-only `--port` alias kept), Host guard and its plumbing removed,
+  Origin checks now compare host:port against the request's own Host
+  (scheme-agnostic, case-insensitive, portless matches only portless).
+  Listener switched `tcp4`→`tcp` for IPv6 `--listen` support. Verified:
+  `go vet` clean, build clean, default loopback behavior unchanged (200),
+  arbitrary Host accepted (421 gone), forged Origin 403, matching Origin passes
+  the guard, port mismatch 403, Origin-with-path 403, Sec-Fetch-Site kept,
+  missing CSRF 403, `--listen :9092` reachable via loopback and LAN IP.
+
 ## Work breakdown
 
 | # | Task | Verification |

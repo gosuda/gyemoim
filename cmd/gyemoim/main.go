@@ -39,9 +39,10 @@ func main() {
 func run(args []string) error {
 	flags := flag.NewFlagSet("gyemoim", flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
-	port := flags.Int("port", 9092, "TCP port for the loopback WebUI (1-65535)")
+	port := flags.Int("port", 9092, "TCP port for the WebUI (1-65535); shorthand for --listen 127.0.0.1:PORT")
+	listen := flags.String("listen", "", "host:port address to listen on; when both are given, --listen wins over --port")
 	flags.Usage = func() {
-		fmt.Fprintln(flags.Output(), "Usage: gyemoim [--port PORT]")
+		fmt.Fprintln(flags.Output(), "Usage: gyemoim [--listen HOST:PORT] [--port PORT]")
 		flags.PrintDefaults()
 	}
 	if err := flags.Parse(args); err != nil {
@@ -55,6 +56,19 @@ func run(args []string) error {
 	}
 	if *port < 1 || *port > 65535 {
 		return fmt.Errorf("port must be between 1 and 65535, got %d", *port)
+	}
+	listenHost := "127.0.0.1"
+	listenPort := *port
+	if *listen != "" {
+		host, portText, err := net.SplitHostPort(*listen)
+		if err != nil {
+			return fmt.Errorf("--listen must be a host:port address, got %q", *listen)
+		}
+		listenPort, err = strconv.Atoi(portText)
+		if err != nil || listenPort < 1 || listenPort > 65535 {
+			return fmt.Errorf("--listen port must be between 1 and 65535, got %q", portText)
+		}
+		listenHost = host
 	}
 
 	dataDirectory, err := datadir.Path()
@@ -101,26 +115,26 @@ func run(args []string) error {
 		return fmt.Errorf("create management request token: %w", err)
 	}
 	startedAt := time.Now().UTC()
-	uiHandler, err := httpui.New(dataDirectory, *port, startedAt, csrfToken, store, historyRecorder)
+	uiHandler, err := httpui.New(dataDirectory, listenPort, startedAt, csrfToken, store, historyRecorder)
 	if err != nil {
 		return err
 	}
 
-	guard := websecurity.New(*port, csrfToken)
-	oauthManager := siwc.NewManager(store, *port)
+	guard := websecurity.New(csrfToken)
+	oauthManager := siwc.NewManager(store, listenPort)
 	responsesAdapter := provider.NewOpenAIResponsesAdapter()
 	mux := http.NewServeMux()
-	// Browser-origin protections cover the UI and management JSON API. Bearer-authenticated
-	// harness routes share only the loopback Host guard applied by the server.
-	mux.Handle("/api/", guard.Management(httpapi.NewManagement(store, uiHandler, oauthManager, *port, historyRecorder)))
+	// Browser-origin protections cover the UI and management JSON API; the
+	// bearer-authenticated /v1 harness routes sit outside them.
+	mux.Handle("/api/", guard.Management(httpapi.NewManagement(store, uiHandler, oauthManager, listenPort, historyRecorder)))
 	mux.Handle("GET /auth/callback", guard.Callback(http.HandlerFunc(oauthManager.ServeCallback)))
 	mux.Handle("/v1/", httpapi.NewHarness(gateway.New(store), historyRecorder, oauthManager, responsesAdapter))
 	mux.Handle("/", guard.Management(uiHandler))
 
 	serverBase, cancelServerBase := context.WithCancel(context.Background())
 	server := &http.Server{
-		Addr:              net.JoinHostPort("127.0.0.1", strconv.Itoa(*port)),
-		Handler:           guard.Host(mux),
+		Addr:              net.JoinHostPort(listenHost, strconv.Itoa(listenPort)),
+		Handler:           mux,
 		ReadHeaderTimeout: 5 * time.Second,
 		IdleTimeout:       2 * time.Minute,
 		MaxHeaderBytes:    1 << 20,
@@ -128,13 +142,12 @@ func run(args []string) error {
 			return serverBase
 		},
 	}
-	listener, err := net.Listen("tcp4", server.Addr)
+	listener, err := net.Listen("tcp", server.Addr)
 	if err != nil {
 		cancelServerBase()
-		return fmt.Errorf("cannot start at http://127.0.0.1:%d/ (data directory %q): %w", *port, dataDirectory, err)
+		return fmt.Errorf("cannot start at http://%s/ (data directory %q): %w", server.Addr, dataDirectory, err)
 	}
-	actualPort := listener.Addr().(*net.TCPAddr).Port
-	fmt.Fprintf(os.Stderr, "Gyemoim listening at http://127.0.0.1:%d/\nData directory: %s\n", actualPort, dataDirectory)
+	fmt.Fprintf(os.Stderr, "Gyemoim listening at http://%s/\nData directory: %s\n", listener.Addr().(*net.TCPAddr).String(), dataDirectory)
 
 	signals, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stopSignals()
