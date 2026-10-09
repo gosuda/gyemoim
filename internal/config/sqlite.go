@@ -14,7 +14,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const currentSchemaVersion = 2
+const currentSchemaVersion = 3
 
 // Store owns the configuration database. A single connection makes connection-local
 // SQLite settings consistent, while the DSN reapplies them if database/sql reconnects.
@@ -123,6 +123,14 @@ func (s *Store) migrate(ctx context.Context) error {
 			return fmt.Errorf("set configuration schema version: %w", err)
 		}
 	}
+	if version <= 2 {
+		if _, err := tx.ExecContext(ctx, keyLabelAndLastLoginSchema); err != nil {
+			return fmt.Errorf("create key label and last login schema: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, "PRAGMA user_version = 3"); err != nil {
+			return fmt.Errorf("set configuration schema version: %w", err)
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit configuration schema migration: %w", err)
 	}
@@ -218,6 +226,15 @@ CREATE TABLE sessions (
     last_seen_at TEXT NOT NULL
 );
 CREATE INDEX sessions_by_user ON sessions(user_id, expires_at);
+`
+
+// keyLabelAndLastLoginSchema adds the optional local-key label and the user
+// login timestamp (schema v3). Both columns are nullable TEXT: existing rows
+// keep NULL, meaning "no label" and "never signed in". No timestamp convention
+// changes — new values use the v1 RFC3339Nano UTC TEXT format.
+const keyLabelAndLastLoginSchema = `
+ALTER TABLE local_keys ADD COLUMN label TEXT;
+ALTER TABLE users ADD COLUMN last_login_at TEXT;
 `
 
 func nowText() (time.Time, string) {

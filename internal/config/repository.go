@@ -420,8 +420,9 @@ func (s *Store) ListServiceAccounts(ctx context.Context) ([]ServiceAccount, erro
 	return accounts, nil
 }
 
-// CreateLocalKey stores a supplied cryptographic hash and display hint, never a plaintext key.
-func (s *Store) CreateLocalKey(ctx context.Context, accountID string, hash []byte, displayHint string) (LocalKey, error) {
+// CreateLocalKey stores a supplied cryptographic hash, display hint, and
+// optional human label, never a plaintext key. An empty label persists as NULL.
+func (s *Store) CreateLocalKey(ctx context.Context, accountID string, hash []byte, displayHint, label string) (LocalKey, error) {
 	if len(hash) == 0 {
 		return LocalKey{}, errors.New("local key hash is required")
 	}
@@ -433,9 +434,9 @@ func (s *Store) CreateLocalKey(ctx context.Context, accountID string, hash []byt
 		return LocalKey{}, err
 	}
 	now, timestamp := nowText()
-	key := LocalKey{ID: id, AccountID: accountID, DisplayHint: displayHint, CreatedAt: now}
-	_, err = s.db.ExecContext(ctx, `INSERT INTO local_keys(id, account_id, key_hash, display_hint, created_at) VALUES (?, ?, ?, ?, ?)`,
-		key.ID, key.AccountID, append([]byte(nil), hash...), key.DisplayHint, timestamp)
+	key := LocalKey{ID: id, AccountID: accountID, DisplayHint: displayHint, Label: label, CreatedAt: now}
+	_, err = s.db.ExecContext(ctx, `INSERT INTO local_keys(id, account_id, key_hash, display_hint, label, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
+		key.ID, key.AccountID, append([]byte(nil), hash...), key.DisplayHint, nullableString(key.Label), timestamp)
 	if err != nil {
 		if isUniqueConstraint(err) {
 			return LocalKey{}, ErrConflict
@@ -450,7 +451,7 @@ func (s *Store) CreateLocalKey(ctx context.Context, accountID string, hash []byt
 
 // ListLocalKeys returns key metadata for one account without returning any key hashes.
 func (s *Store) ListLocalKeys(ctx context.Context, accountID string) ([]LocalKey, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, account_id, display_hint, created_at, revoked_at FROM local_keys WHERE account_id = ? ORDER BY created_at, id`, accountID)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, account_id, display_hint, label, created_at, revoked_at FROM local_keys WHERE account_id = ? ORDER BY created_at, id`, accountID)
 	if err != nil {
 		return nil, fmt.Errorf("list local keys: %w", err)
 	}
@@ -534,9 +535,12 @@ func scanServiceAccount(row scanner) (ServiceAccount, error) {
 func scanLocalKey(row scanner) (LocalKey, error) {
 	var key LocalKey
 	var createdAt string
-	var revokedAt sql.NullString
-	if err := row.Scan(&key.ID, &key.AccountID, &key.DisplayHint, &createdAt, &revokedAt); err != nil {
+	var label, revokedAt sql.NullString
+	if err := row.Scan(&key.ID, &key.AccountID, &key.DisplayHint, &label, &createdAt, &revokedAt); err != nil {
 		return LocalKey{}, err
+	}
+	if label.Valid {
+		key.Label = label.String
 	}
 	var err error
 	if key.CreatedAt, err = readTime(createdAt); err != nil {

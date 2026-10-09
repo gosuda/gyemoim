@@ -40,7 +40,7 @@ func (s *Store) CreateUser(ctx context.Context, user User) (User, error) {
 
 // GetUser returns one User including its password hash for login verification.
 func (s *Store) GetUser(ctx context.Context, id string) (User, error) {
-	user, err := scanUser(s.db.QueryRowContext(ctx, `SELECT id, username, password_hash, must_change_password, disabled_at, created_at, updated_at FROM users WHERE id = ?`, id))
+	user, err := scanUser(s.db.QueryRowContext(ctx, `SELECT id, username, password_hash, must_change_password, disabled_at, last_login_at, created_at, updated_at FROM users WHERE id = ?`, id))
 	if errors.Is(err, sql.ErrNoRows) {
 		return User{}, notFound("user", id)
 	}
@@ -53,7 +53,7 @@ func (s *Store) GetUser(ctx context.Context, id string) (User, error) {
 // GetUserByUsername returns one User including its password hash for login
 // verification. Usernames are compared as stored; normalization belongs to callers.
 func (s *Store) GetUserByUsername(ctx context.Context, username string) (User, error) {
-	user, err := scanUser(s.db.QueryRowContext(ctx, `SELECT id, username, password_hash, must_change_password, disabled_at, created_at, updated_at FROM users WHERE username = ?`, username))
+	user, err := scanUser(s.db.QueryRowContext(ctx, `SELECT id, username, password_hash, must_change_password, disabled_at, last_login_at, created_at, updated_at FROM users WHERE username = ?`, username))
 	if errors.Is(err, sql.ErrNoRows) {
 		return User{}, notFound("user", username)
 	}
@@ -66,7 +66,7 @@ func (s *Store) GetUserByUsername(ctx context.Context, username string) (User, e
 // ListUsers returns all Users in stable creation order. It never returns password
 // hashes; login verification reads them through the individual getters.
 func (s *Store) ListUsers(ctx context.Context) ([]User, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, username, must_change_password, disabled_at, created_at, updated_at FROM users ORDER BY created_at, id`)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, username, must_change_password, disabled_at, last_login_at, created_at, updated_at FROM users ORDER BY created_at, id`)
 	if err != nil {
 		return nil, fmt.Errorf("list users: %w", err)
 	}
@@ -191,6 +191,9 @@ func (s *Store) DeleteUserGuarded(ctx context.Context, id string) error {
 
 // CreateSession stores a new login session keyed by its ID hash. The caller
 // generates the random session ID and its hash; the store never sees the ID.
+// CreateSession is only invoked on a successful management login, so the same
+// transaction also stamps users.last_login_at — the login timestamp and the
+// session that proves it are committed atomically or not at all.
 func (s *Store) CreateSession(ctx context.Context, session Session) (Session, error) {
 	if len(session.IDHash) == 0 {
 		return Session{}, errors.New("session ID hash is required")
@@ -201,17 +204,28 @@ func (s *Store) CreateSession(ctx context.Context, session Session) (Session, er
 	if session.ExpiresAt.IsZero() {
 		return Session{}, errors.New("session expiry is required")
 	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Session{}, fmt.Errorf("begin login session creation: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
 	now, timestamp := nowText()
 	// last_seen_at is informational only: it is stamped once at creation and
 	// never advanced. Sessions are never extended — expiry is absolute.
 	session.CreatedAt, session.LastSeenAt = now, now
-	_, err := s.db.ExecContext(ctx, `INSERT INTO sessions(id_hash, user_id, created_at, expires_at, last_seen_at) VALUES (?, ?, ?, ?, ?)`,
+	_, err = tx.ExecContext(ctx, `INSERT INTO sessions(id_hash, user_id, created_at, expires_at, last_seen_at) VALUES (?, ?, ?, ?, ?)`,
 		append([]byte(nil), session.IDHash...), session.UserID, timestamp, nullableTime(session.ExpiresAt), timestamp)
 	if err != nil {
 		if isForeignKeyConstraint(err) {
 			return Session{}, notFound("user", session.UserID)
 		}
 		return Session{}, fmt.Errorf("create session: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE users SET last_login_at = ? WHERE id = ?`, timestamp, session.UserID); err != nil {
+		return Session{}, fmt.Errorf("record user last login: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return Session{}, fmt.Errorf("commit login session creation: %w", err)
 	}
 	return session, nil
 }
@@ -277,13 +291,13 @@ func (s *Store) DeleteExpiredSessions(ctx context.Context) (int64, error) {
 func scanUser(row scanner) (User, error) {
 	var user User
 	var mustChange int
-	var disabledAt sql.NullString
+	var disabledAt, lastLoginAt sql.NullString
 	var createdAt, updatedAt string
-	err := row.Scan(&user.ID, &user.Username, &user.PasswordHash, &mustChange, &disabledAt, &createdAt, &updatedAt)
+	err := row.Scan(&user.ID, &user.Username, &user.PasswordHash, &mustChange, &disabledAt, &lastLoginAt, &createdAt, &updatedAt)
 	if err != nil {
 		return User{}, err
 	}
-	if err := fillUser(&user, mustChange, disabledAt, createdAt, updatedAt); err != nil {
+	if err := fillUser(&user, mustChange, disabledAt, lastLoginAt, createdAt, updatedAt); err != nil {
 		return User{}, err
 	}
 	return user, nil
@@ -292,19 +306,19 @@ func scanUser(row scanner) (User, error) {
 func scanUserWithoutHash(row scanner) (User, error) {
 	var user User
 	var mustChange int
-	var disabledAt sql.NullString
+	var disabledAt, lastLoginAt sql.NullString
 	var createdAt, updatedAt string
-	err := row.Scan(&user.ID, &user.Username, &mustChange, &disabledAt, &createdAt, &updatedAt)
+	err := row.Scan(&user.ID, &user.Username, &mustChange, &disabledAt, &lastLoginAt, &createdAt, &updatedAt)
 	if err != nil {
 		return User{}, err
 	}
-	if err := fillUser(&user, mustChange, disabledAt, createdAt, updatedAt); err != nil {
+	if err := fillUser(&user, mustChange, disabledAt, lastLoginAt, createdAt, updatedAt); err != nil {
 		return User{}, err
 	}
 	return user, nil
 }
 
-func fillUser(user *User, mustChange int, disabledAt sql.NullString, createdAt, updatedAt string) error {
+func fillUser(user *User, mustChange int, disabledAt, lastLoginAt sql.NullString, createdAt, updatedAt string) error {
 	user.MustChangePassword = mustChange != 0
 	if disabledAt.Valid {
 		t, err := readTime(disabledAt.String)
@@ -312,6 +326,13 @@ func fillUser(user *User, mustChange int, disabledAt sql.NullString, createdAt, 
 			return err
 		}
 		user.DisabledAt = &t
+	}
+	if lastLoginAt.Valid {
+		t, err := readTime(lastLoginAt.String)
+		if err != nil {
+			return err
+		}
+		user.LastLoginAt = &t
 	}
 	var err error
 	if user.CreatedAt, err = readTime(createdAt); err != nil {

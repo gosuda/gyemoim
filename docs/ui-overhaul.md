@@ -305,3 +305,94 @@ reset-password form expands with its aria-label, and user creation adds a card;
 logout → `/login`, re-login → `#/overview`; a nav click on the current page adds no
 history entry; one Users render issues exactly one `/api/users`+`/api/auth/me`
 pair; browser console is clean across the entire session. Deviations: none.
+
+### Step 3 — Backend UX support (2026-10-09)
+
+**(a) Optional key label.** Schema v3 (one new migration block appended to the
+chain; `currentSchemaVersion = 3`): `ALTER TABLE local_keys ADD COLUMN label TEXT;`
+plus the (b) column below in the same block — both are plain nullable TEXT, NULL
+meaning "no label" / "never signed in", no timestamp-convention change. The
+management key-issue endpoint (`POST /api/service-accounts/{id}/keys`) now decodes
+an optional body via a new `decodeOptionalJSON` helper (empty body and `{}` still
+accepted, `DisallowUnknownFields` kept): `{"label": "…"}` is trimmed of
+surrounding whitespace, empty is allowed (stored as NULL), and >128 Unicode runes
+is rejected with 400 `invalid_request` (documented choice: reject, not truncate).
+`gateway.IssueLocalKey(ctx, accountID, label)` and `store.CreateLocalKey(…, label)`
+pass it through; `LocalKey.Label string` with `json:"label,omitempty"` rides every
+key metadata response, so unlabeled keys are byte-identical to before. UI wiring
+is display-only in `service-accounts.js` (no form field — that is step 7): a key
+row's strong text is `key.label` with a secondary muted "Key ending <hint>" span
+when a label exists, otherwise today's display-hint-only row. The key-issue form
+input remains untouched.
+
+**(b) users.lastLoginAt.** Same v3 migration block:
+`ALTER TABLE users ADD COLUMN last_login_at TEXT;`. `User.LastLoginAt *time.Time`
+serializes as `"lastLoginAt": null` when never. The stamp is written inside the
+same transaction that creates the session: `store.CreateSession` (whose only
+caller is the successful-login path in `auth.go`) now wraps the session INSERT and
+`UPDATE users SET last_login_at = ? WHERE id = ?` in one tx, so the login
+timestamp commits atomically with the session that proves it; `updated_at` is
+deliberately left alone. Consequence worth noting: the login *response body*
+still shows the pre-login value (the user row is read before session creation);
+the Users page refetches `/api/users`, so the UI is unaffected. All three user
+queries (`GetUser`, `GetUserByUsername`, `ListUsers`) select the new column.
+UI wiring is display-only in `users.js`: a second `resource-copy` line under
+"Created" renders `Last signed in <formatUTC>` or `Never signed in`.
+
+**(c) Auth-rejection ring buffer.** New `internal/httpapi/rejections.go`:
+`RejectionLog` is a mutex-guarded fixed `[100]Rejection` ring with a write cursor
+and count — `Record` is a constant-time, allocation-free copy into the array
+(oldest entry overwritten when full, safe under concurrent rejections, nil-safe);
+`Snapshot` returns newest-first copies. Entries store UTC `at`, `keyHint`
+(last four characters of the presented bearer key when it has the `gym_` shape
+and sane length — the same last-4 style as stored hints, never the full key,
+"" for absent/malformed headers), `code`, `model` (when known), and
+`serviceAccountId`/`serviceAccountName` (when authenticated). One instance is
+created in `main.go` and shared: `NewHarness` records into it,
+`NewManagement` reads it. Hooks cover every pre-admission rejection in the
+harness path (everything before `recorder.Begin`): method-not-allowed,
+`invalid_api_key`/`internal_error` in `authenticate`, `concurrent_request_limit`,
+`service_unavailable`, body-read failures (`invalid_request`/`request_too_large`),
+`invalid_json`, `model_required`, the gateway error mapping (now
+`writeGatewayError(w, r, err, identity, model)` so `model_access_denied`,
+`model_not_found`, `invalid_api_key`, and `internal_error` record with the exact
+response code and the requested model name), and pre-admission provider-auth
+preparation failures (client cancellations are not recorded). Post-admission
+failures (recording, capability, route, upstream) never touch the ring. The ring
+never interacts with request recording, history files, or the inference
+semaphore. New endpoint `GET /api/rejections` (management session gate, GET-only
+like other reads, newest-first array response) is served by
+`managementAPI.listRejections`.
+
+Verification: `gofmt -l` clean on all changed files; `go vet ./...` OK;
+`CGO_ENABLED=0 go build -trimpath` OK and `./scripts/build-release.sh` builds all
+four targets; `node --check` on both changed JS modules OK (no UI structure
+changes). Migration: fresh-dir start writes `user_version = 3` with both
+`ALTER TABLE` columns present (verified by a throwaway `go run` probe reading
+`PRAGMA user_version` + `sqlite_master`, deleted afterwards); the upgrade path
+was exercised for real by building the pre-change binary from a `git archive`
+extract of HEAD in /tmp (no worktree/branch/stash), seeding a v2 database
+(admin + service account + key + second user), then starting the new binary on
+the same data directory: version 2 → 3 migrated, all rows preserved (key still
+authenticates on `/v1/models` with 200, label/lastLoginAt NULL, no re-bootstrap).
+curl pass: key without label via empty body and `{}` (metadata has no `label`
+field — back-compat); key with label stored and returned by POST and GET
+(whitespace-trimmed); 129-rune label → 400 "label must contain at most 128
+Unicode characters"; 128-rune label accepted; unknown body field → 400. Login
+updates `lastLoginAt` (`/api/users`: signed-in user shows a UTC timestamp,
+never-signed-in user shows `null`). `/api/rejections` empty before any `/v1`
+call, then populated newest-first with `invalid_api_key` (hint `y-99` from a
+fake key; empty hint for a malformed `Authorization` header), `model_not_found`
+with model name, `model_required`, and `model_access_denied` (valid key + model
+route + no grant, 403) each carrying key hint and service-account id/name.
+History directory untouched by all rejected requests (only the empty
+`active.ndjson`). Concurrency: 160 bad-key `/v1/responses` posts at concurrency
+24 → buffer holds exactly 100, valid JSON, strict newest-first ordering,
+all hints ≤ 4 characters. Browser spot-check on a private instance (port 9964,
+the migrated database): Users cards render "Last signed in Oct 9, 2026, 9:06:20
+AM UTC" (admin) and "Never signed in" (olduser); the expanded account detail
+renders labeled key rows as strong label + muted "Key ending <hint>" and
+unlabeled rows unchanged; browser console clean. Deviations: the GET
+`/api/rejections` response is a bare newest-first array (consistent with the
+other management list endpoints rather than an envelope object), and the
+login response body's `lastLoginAt` is the pre-login snapshot (see (b) above).

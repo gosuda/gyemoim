@@ -24,23 +24,28 @@ import (
 const (
 	managementBodyLimit = 1 << 20
 	openAIBaseURL       = "https://api.openai.com/v1"
+	// maxKeyLabelLength caps the optional local-key label, matching the model
+	// name cap. The label is trimmed of surrounding whitespace; empty is allowed.
+	maxKeyLabelLength = 128
 )
 
 type managementAPI struct {
-	store    *config.Store
-	gateway  *gateway.Service
-	fallback http.Handler
-	oauth    *siwc.Manager
-	connect  *connect.Service
-	history  *history.QueryService
-	storage  *history.Recorder
-	backoff  loginBackoff
+	store      *config.Store
+	gateway    *gateway.Service
+	fallback   http.Handler
+	oauth      *siwc.Manager
+	connect    *connect.Service
+	history    *history.QueryService
+	storage    *history.Recorder
+	backoff    loginBackoff
+	rejections *RejectionLog
 }
 
 // NewManagement creates the management API handler. Paths outside the JSON API
-// routes fall through to the embedded UI, which also owns /api/status.
-func NewManagement(store *config.Store, fallback http.Handler, oauthManager *siwc.Manager, connectService *connect.Service, recorder *history.Recorder) http.Handler {
-	return &managementAPI{store: store, gateway: gateway.New(store), fallback: fallback, oauth: oauthManager, connect: connectService, history: history.NewQueryService(recorder), storage: recorder}
+// routes fall through to the embedded UI, which also owns /api/status. The
+// rejection ring is the same instance the harness records into.
+func NewManagement(store *config.Store, fallback http.Handler, oauthManager *siwc.Manager, connectService *connect.Service, recorder *history.Recorder, rejections *RejectionLog) http.Handler {
+	return &managementAPI{store: store, gateway: gateway.New(store), fallback: fallback, oauth: oauthManager, connect: connectService, history: history.NewQueryService(recorder), storage: recorder, rejections: rejections}
 }
 
 func (api *managementAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -133,6 +138,8 @@ func (api *managementAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		api.storageStatus(w, r)
 	case len(parts) == 2 && parts[0] == "storage" && parts[1] == "delete":
 		api.deleteStorageHistory(w, r)
+	case len(parts) == 1 && parts[0] == "rejections":
+		api.listRejections(w, r)
 	default:
 		writeManagementError(w, http.StatusNotFound, "management endpoint not found", "not_found")
 	}
@@ -480,14 +487,24 @@ func (api *managementAPI) serviceAccountKeys(w http.ResponseWriter, r *http.Requ
 		methodNotAllowed(w, http.MethodGet, http.MethodPost)
 		return
 	}
-	if !decodeOptionalEmptyJSON(w, r) {
+	// The body is optional for back-compatibility: an empty body or {} issues an
+	// unlabeled key, and {"label": "..."} attaches an optional human label.
+	var input struct {
+		Label string `json:"label"`
+	}
+	if !decodeOptionalJSON(w, r, &input) {
+		return
+	}
+	label := strings.TrimSpace(input.Label)
+	if utf8.RuneCountInString(label) > maxKeyLabelLength {
+		writeManagementError(w, http.StatusBadRequest, "label must contain at most 128 Unicode characters", "invalid_request")
 		return
 	}
 	if _, err := api.store.GetServiceAccount(r.Context(), accountID); err != nil {
 		writeManagementFailure(w, err)
 		return
 	}
-	plaintext, metadata, err := api.gateway.IssueLocalKey(r.Context(), accountID)
+	plaintext, metadata, err := api.gateway.IssueLocalKey(r.Context(), accountID, label)
 	if err != nil {
 		writeManagementFailure(w, err)
 		return
@@ -720,6 +737,44 @@ func decodeOptionalEmptyJSON(w http.ResponseWriter, r *http.Request) bool {
 		return false
 	}
 	return true
+}
+
+// decodeOptionalJSON decodes an optional JSON object body into target: an empty
+// body is accepted with target left zero, and a present body must be a single
+// JSON object with only the supported fields.
+func decodeOptionalJSON(w http.ResponseWriter, r *http.Request, target any) bool {
+	body := http.MaxBytesReader(w, r.Body, managementBodyLimit)
+	data, err := io.ReadAll(body)
+	if err != nil {
+		writeManagementError(w, http.StatusBadRequest, "request body is too large or unreadable", "invalid_request")
+		return false
+	}
+	if len(bytes.TrimSpace(data)) == 0 {
+		return true
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(target); err != nil {
+		writeManagementError(w, http.StatusBadRequest, "request body must contain valid JSON with only supported fields", "invalid_request")
+		return false
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		writeManagementError(w, http.StatusBadRequest, "request body must contain exactly one JSON value", "invalid_request")
+		return false
+	}
+	return true
+}
+
+// rejections returns the newest-first snapshot of the pre-admission harness
+// rejections ring. Like other management reads it is GET-only, sits behind the
+// session gate, and mutates nothing — plain GET semantics are CSRF-safe.
+func (api *managementAPI) listRejections(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w, http.MethodGet)
+		return
+	}
+	writeJSON(w, http.StatusOK, api.rejections.Snapshot())
 }
 
 func writeManagementFailure(w http.ResponseWriter, err error) {

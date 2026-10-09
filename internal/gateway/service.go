@@ -19,7 +19,8 @@ var ErrUnauthenticated = errors.New("service account authentication failed")
 var ErrSelectionExhausted = errors.New("routing selection exhausted")
 var ErrUnsupportedStrategy = errors.New("routing strategy is unsupported")
 
-const localKeyPrefix = "gym_"
+// LocalKeyPrefix is the fixed prefix of every locally issued harness key.
+const LocalKeyPrefix = "gym_"
 
 // Identity is an admission-time ServiceAccount snapshot paired with the key
 // that authenticated it. Storage revalidates that key when resolving a route.
@@ -124,16 +125,17 @@ func (s *Service) AuthenticateBearer(ctx context.Context, authorization string) 
 	return Identity{Account: account, KeyID: key.ID}, nil
 }
 
-// IssueLocalKey creates a fresh local key. The plaintext is returned to the
-// caller exactly once; only its SHA-256 hash and final-four-character hint persist.
-func (s *Service) IssueLocalKey(ctx context.Context, accountID string) (string, config.LocalKey, error) {
+// IssueLocalKey creates a fresh local key with an optional human label. The
+// plaintext is returned to the caller exactly once; only its SHA-256 hash and
+// final-four-character hint persist.
+func (s *Service) IssueLocalKey(ctx context.Context, accountID, label string) (string, config.LocalKey, error) {
 	var random [32]byte
 	if _, err := rand.Read(random[:]); err != nil {
 		return "", config.LocalKey{}, fmt.Errorf("generate local ServiceAccount key: %w", err)
 	}
-	plaintext := localKeyPrefix + base64.RawURLEncoding.EncodeToString(random[:])
+	plaintext := LocalKeyPrefix + base64.RawURLEncoding.EncodeToString(random[:])
 	hash := sha256.Sum256([]byte(plaintext))
-	key, err := s.store.CreateLocalKey(ctx, accountID, hash[:], plaintext[len(plaintext)-4:])
+	key, err := s.store.CreateLocalKey(ctx, accountID, hash[:], plaintext[len(plaintext)-4:], label)
 	if err != nil {
 		return "", config.LocalKey{}, err
 	}
@@ -172,10 +174,10 @@ func (s *Service) ListModels(ctx context.Context, identity Identity) ([]config.M
 }
 
 func validLocalKey(token string) bool {
-	if !strings.HasPrefix(token, localKeyPrefix) || strings.ContainsAny(token, " \t\r\n") {
+	if !strings.HasPrefix(token, LocalKeyPrefix) || strings.ContainsAny(token, " \t\r\n") {
 		return false
 	}
-	encoded := strings.TrimPrefix(token, localKeyPrefix)
+	encoded := strings.TrimPrefix(token, LocalKeyPrefix)
 	decoded, err := base64.RawURLEncoding.DecodeString(encoded)
 	return err == nil && len(decoded) == 32 && base64.RawURLEncoding.EncodeToString(decoded) == encoded
 }

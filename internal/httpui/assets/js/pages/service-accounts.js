@@ -165,7 +165,12 @@ function renderAccountDetails(account, details, panel, keys, modelIds) {
     for (const key of keys) {
       const row = element("li", "key-row");
       const keyInfo = element("div", "key-info");
-      keyInfo.append(element("strong", "", key.displayHint));
+      if (key.label) {
+        keyInfo.append(element("strong", "", key.label));
+        keyInfo.append(element("span", "muted", `Key ending ${key.displayHint}`));
+      } else {
+        keyInfo.append(element("strong", "", key.displayHint));
+      }
       const revoked = Boolean(key.revokedAt);
       keyInfo.append(element("span", "muted", `${revoked ? "Revoked" : "Active"} · issued ${new Date(key.createdAt).toLocaleString()}`));
       row.append(keyInfo);

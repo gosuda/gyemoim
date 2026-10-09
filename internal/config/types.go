@@ -60,10 +60,12 @@ type ServiceAccount struct {
 }
 
 // LocalKey contains only stored key metadata. The plaintext key is never persisted.
+// Label is an optional, human-chosen display name; an empty value means unlabeled.
 type LocalKey struct {
 	ID          string     `json:"id"`
 	AccountID   string     `json:"accountId"`
 	DisplayHint string     `json:"displayHint"`
+	Label       string     `json:"label,omitempty"`
 	CreatedAt   time.Time  `json:"createdAt"`
 	RevokedAt   *time.Time `json:"revokedAt,omitempty"`
 }
@@ -94,12 +96,15 @@ type ModelGrant struct {
 // User is a management-login identity. PasswordHash holds an already-hashed
 // password string (argon2id arrives in a later step); plaintext passwords never
 // enter this package, and the hash is excluded from JSON serialization.
+// LastLoginAt is stamped transactionally with session creation at successful
+// login and is nil when the user has never signed in.
 type User struct {
 	ID                 string     `json:"id"`
 	Username           string     `json:"username"`
 	PasswordHash       string     `json:"-"`
 	MustChangePassword bool       `json:"mustChangePassword"`
 	DisabledAt         *time.Time `json:"disabledAt,omitempty"`
+	LastLoginAt        *time.Time `json:"lastLoginAt"`
 	CreatedAt          time.Time  `json:"createdAt"`
 	UpdatedAt          time.Time  `json:"updatedAt"`
 }

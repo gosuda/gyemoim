@@ -140,13 +140,16 @@ func run(args []string) error {
 	oauthManager := siwc.NewManager(store, listenPort)
 	connectService := connect.NewService(store, oauthManager)
 	responsesAdapter := provider.NewOpenAIResponsesAdapter()
+	// Diagnostics-only ring of the last pre-admission harness rejections; the
+	// harness records into it and the management API reads it.
+	rejectionLog := httpapi.NewRejectionLog()
 	mux := http.NewServeMux()
 	// Browser-origin protections cover the UI and management JSON API; the
 	// bearer-authenticated /v1 harness routes sit outside them. Management
 	// session enforcement lives inside each handler: /api/ routes gate
 	// themselves in httpapi (login and logout opt out), while UI page requests
 	// redirect to /login. /auth/callback and /v1/ need no session.
-	mux.Handle("/api/", guard.Management(httpapi.NewManagement(store, uiHandler, oauthManager, connectService, historyRecorder)))
+	mux.Handle("/api/", guard.Management(httpapi.NewManagement(store, uiHandler, oauthManager, connectService, historyRecorder, rejectionLog)))
 	mux.Handle("GET /auth/callback", guard.Callback(http.HandlerFunc(oauthManager.ServeCallback)))
 	// The connect endpoints sit deliberately OUTSIDE the session and CSRF
 	// guards, wrapped only in security headers: they serve the enrollment
@@ -160,7 +163,7 @@ func run(args []string) error {
 	// recorded at claim time. See docs/web-deployment.md decision 7.
 	mux.Handle("POST /connect/claim", guard.Callback(http.HandlerFunc(connectService.ServeClaim)))
 	mux.Handle("POST /connect/complete", guard.Callback(http.HandlerFunc(connectService.ServeComplete)))
-	mux.Handle("/v1/", httpapi.NewHarness(gateway.New(store), historyRecorder, oauthManager, responsesAdapter))
+	mux.Handle("/v1/", httpapi.NewHarness(gateway.New(store), historyRecorder, oauthManager, responsesAdapter, rejectionLog))
 	mux.Handle("/", guard.Management(httpapi.RequireManagementSession(store, uiHandler)))
 
 	serverBase, cancelServerBase := context.WithCancel(context.Background())

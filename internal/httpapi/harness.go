@@ -29,19 +29,23 @@ type tokenSource interface {
 }
 
 type harnessAPI struct {
-	gateway  *gateway.Service
-	recorder *history.Recorder
-	tokens   tokenSource
-	adapter  provider.Adapter
-	slots    chan struct{}
+	gateway    *gateway.Service
+	recorder   *history.Recorder
+	tokens     tokenSource
+	adapter    provider.Adapter
+	slots      chan struct{}
+	rejections *RejectionLog
 }
 
 // NewHarness creates the local bearer-authenticated model-list and Responses
 // endpoints. The recorder admission fence is required before provider auth or I/O.
-func NewHarness(service *gateway.Service, recorder *history.Recorder, tokens tokenSource, adapter provider.Adapter) http.Handler {
+// The rejection ring is optional diagnostics: it records only pre-admission
+// rejections and never influences admission, recording, or inference.
+func NewHarness(service *gateway.Service, recorder *history.Recorder, tokens tokenSource, adapter provider.Adapter, rejections *RejectionLog) http.Handler {
 	return &harnessAPI{
 		gateway: service, recorder: recorder, tokens: tokens, adapter: adapter,
-		slots: make(chan struct{}, maxInferenceRequests),
+		slots:      make(chan struct{}, maxInferenceRequests),
+		rejections: rejections,
 	}
 }
 
@@ -60,10 +64,49 @@ func (api *harnessAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// noteRejection records a pre-admission rejection in the bounded in-memory ring
+// (decision 9c). It runs only after the rejection has already been decided and
+// the error response is on its way, so it cannot block or gate inference; the
+// ring push itself is a constant-time, allocation-free mutex section that never
+// touches request recording or history files. The key hint is the last four
+// characters of the presented bearer key when it has the local-key shape — the
+// same last-4 style the key issuer stores — never the full key. A rejection
+// before the key is parsed simply carries an empty hint or identity.
+func (api *harnessAPI) noteRejection(r *http.Request, code, model string, identity gateway.Identity) {
+	entry := Rejection{At: time.Now().UTC(), Code: code, Model: model}
+	if hint := keyHintFromAuthorization(r.Header.Get("Authorization")); hint != "" {
+		entry.KeyHint = hint
+	}
+	if identity.Account.ID != "" {
+		entry.ServiceAccountID = identity.Account.ID
+		entry.ServiceAccountName = identity.Account.Name
+	}
+	api.rejections.Record(entry)
+}
+
+// keyHintFromAuthorization extracts the last-four-character hint from a
+// well-formed local bearer key. It returns "" for absent, malformed, or
+// oversized values so arbitrary attacker-controlled bytes are never retained.
+func keyHintFromAuthorization(authorization string) string {
+	_, token, found := strings.Cut(authorization, " ")
+	if !found || !strings.HasPrefix(token, gateway.LocalKeyPrefix) {
+		return ""
+	}
+	if len(token) > len(gateway.LocalKeyPrefix)+128 {
+		return ""
+	}
+	hint := token[len(token)-4:]
+	if strings.ContainsAny(hint, " \t\r\n") {
+		return ""
+	}
+	return hint
+}
+
 func (api *harnessAPI) serveModels(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		w.Header().Set("Allow", http.MethodGet)
 		writeHarnessError(w, http.StatusMethodNotAllowed, "method not allowed", "invalid_request_error", "method_not_allowed")
+		api.noteRejection(r, "method_not_allowed", "", gateway.Identity{})
 		return
 	}
 	identity, ok := api.authenticate(w, r)
@@ -72,7 +115,7 @@ func (api *harnessAPI) serveModels(w http.ResponseWriter, r *http.Request) {
 	}
 	models, err := api.gateway.ListModels(r.Context(), identity)
 	if err != nil {
-		api.writeGatewayError(w, err)
+		api.writeGatewayError(w, r, err, identity, "")
 		return
 	}
 	data := make([]openAIModel, 0, len(models))
@@ -92,8 +135,10 @@ func (api *harnessAPI) authenticate(w http.ResponseWriter, r *http.Request) (gat
 	if err != nil {
 		if errors.Is(err, gateway.ErrUnauthenticated) {
 			writeHarnessError(w, http.StatusUnauthorized, "invalid or inactive local API key", "authentication_error", "invalid_api_key")
+			api.noteRejection(r, "invalid_api_key", "", gateway.Identity{})
 		} else {
 			writeHarnessError(w, http.StatusInternalServerError, "internal server error", "server_error", "internal_error")
+			api.noteRejection(r, "internal_error", "", gateway.Identity{})
 		}
 		return gateway.Identity{}, false
 	}
@@ -104,6 +149,7 @@ func (api *harnessAPI) serveResponses(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", http.MethodPost)
 		writeHarnessError(w, http.StatusMethodNotAllowed, "method not allowed", "invalid_request_error", "method_not_allowed")
+		api.noteRejection(r, "method_not_allowed", "", gateway.Identity{})
 		return
 	}
 	identity, ok := api.authenticate(w, r)
@@ -118,16 +164,19 @@ func (api *harnessAPI) serveResponses(w http.ResponseWriter, r *http.Request) {
 	default:
 		w.Header().Set("Retry-After", "1")
 		writeHarnessError(w, http.StatusServiceUnavailable, "all inference slots are busy; retry shortly", "server_error", "concurrent_request_limit")
+		api.noteRejection(r, "concurrent_request_limit", "", identity)
 		return
 	}
 	if api.recorder == nil || api.tokens == nil || api.adapter == nil {
 		writeHarnessError(w, http.StatusServiceUnavailable, "request recording or provider service is unavailable", "server_error", "service_unavailable")
+		api.noteRejection(r, "service_unavailable", "", identity)
 		return
 	}
 
 	requestController := http.NewResponseController(w)
 	if err := requestController.SetReadDeadline(time.Now().Add(30 * time.Second)); err != nil && !errors.Is(err, http.ErrNotSupported) {
 		writeHarnessError(w, http.StatusBadRequest, "the request body could not be read", "invalid_request_error", "invalid_request")
+		api.noteRejection(r, "invalid_request", "", identity)
 		return
 	}
 	limitedBody := http.MaxBytesReader(w, r.Body, maxResponseRequestBodySize)
@@ -138,24 +187,28 @@ func (api *harnessAPI) serveResponses(w http.ResponseWriter, r *http.Request) {
 		var tooLarge *http.MaxBytesError
 		if errors.As(err, &tooLarge) {
 			writeHarnessError(w, http.StatusRequestEntityTooLarge, "the request body exceeds the 64 MiB limit", "invalid_request_error", "request_too_large")
+			api.noteRejection(r, "request_too_large", "", identity)
 		} else {
 			writeHarnessError(w, http.StatusBadRequest, "the request body could not be read", "invalid_request_error", "invalid_request")
+			api.noteRejection(r, "invalid_request", "", identity)
 		}
 		return
 	}
 	var fields map[string]json.RawMessage
 	if !json.Valid(body) || json.Unmarshal(body, &fields) != nil || fields == nil {
 		writeHarnessError(w, http.StatusBadRequest, "the request body must be a JSON object", "invalid_request_error", "invalid_json")
+		api.noteRejection(r, "invalid_json", "", identity)
 		return
 	}
 	var modelName string
 	if modelRaw, exists := fields["model"]; !exists || json.Unmarshal(modelRaw, &modelName) != nil || strings.TrimSpace(modelName) == "" {
 		writeHarnessError(w, http.StatusBadRequest, "the request must include a non-empty model", "invalid_request_error", "model_required")
+		api.noteRejection(r, "model_required", "", identity)
 		return
 	}
 	route, err := api.gateway.ResolveRoute(r.Context(), identity, modelName, body)
 	if err != nil {
-		api.writeGatewayError(w, err)
+		api.writeGatewayError(w, r, err, identity, modelName)
 		return
 	}
 	preparation, err := api.tokens.BeginAccessTokenPreparation(r.Context(), route.Provider.ID)
@@ -165,6 +218,7 @@ func (api *harnessAPI) serveResponses(w http.ResponseWriter, r *http.Request) {
 		}
 		message, code := safeProviderAuthError(err)
 		writeHarnessError(w, http.StatusBadGateway, message, "server_error", code)
+		api.noteRejection(r, code, modelName, route.Identity)
 		return
 	}
 	preparationOpen := true
@@ -583,17 +637,25 @@ func writeBoundedResponse(controller *http.ResponseController, w http.ResponseWr
 	return controller.Flush()
 }
 
-func (api *harnessAPI) writeGatewayError(w http.ResponseWriter, err error) {
+func (api *harnessAPI) writeGatewayError(w http.ResponseWriter, r *http.Request, err error, identity gateway.Identity, model string) {
+	var code string
 	switch {
 	case errors.Is(err, gateway.ErrUnauthenticated):
-		writeHarnessError(w, http.StatusUnauthorized, "invalid or inactive local API key", "authentication_error", "invalid_api_key")
+		code = "invalid_api_key"
+		writeHarnessError(w, http.StatusUnauthorized, "invalid or inactive local API key", "authentication_error", code)
 	case errors.Is(err, config.ErrForbidden):
-		writeHarnessError(w, http.StatusForbidden, "model access is not permitted", "permission_error", "model_access_denied")
+		code = "model_access_denied"
+		writeHarnessError(w, http.StatusForbidden, "model access is not permitted", "permission_error", code)
 	case errors.Is(err, config.ErrNotFound):
-		writeHarnessError(w, http.StatusNotFound, "the requested model is not available", "invalid_request_error", "model_not_found")
+		code = "model_not_found"
+		writeHarnessError(w, http.StatusNotFound, "the requested model is not available", "invalid_request_error", code)
 	default:
-		writeHarnessError(w, http.StatusInternalServerError, "the request could not be resolved", "server_error", "internal_error")
+		code = "internal_error"
+		writeHarnessError(w, http.StatusInternalServerError, "the request could not be resolved", "server_error", code)
 	}
+	// Every gateway error here is a pre-admission rejection: the route
+	// resolution runs before recorder.Begin on both harness endpoints.
+	api.noteRejection(r, code, model, identity)
 }
 
 func safeProviderAuthError(err error) (string, string) {

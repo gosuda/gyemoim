@@ -3,7 +3,7 @@
 import { api } from "../api.js";
 import { state } from "../state.js";
 import { button, byId, element, showMessage } from "../dom.js";
-import { formatDate } from "../format.js";
+import { formatDate, formatUTC } from "../format.js";
 
 export async function loadUsers() {
   const list = byId("user-list");
@@ -52,6 +52,7 @@ function renderUser(user) {
   header.append(titleBlock, controls);
   card.append(header);
   card.append(element("p", "resource-copy", `Created ${formatDate(user.createdAt)}`));
+  card.append(element("p", "resource-copy", user.lastLoginAt ? `Last signed in ${formatUTC(user.lastLoginAt)}` : "Never signed in"));
   if (resetForm) card.append(resetForm);
   return card;
 }
