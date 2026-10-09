@@ -5,7 +5,7 @@ import { addQuery, api, beginHistoryFetch, historyFetchIsCurrent } from "../api.
 import { state } from "../state.js";
 import { button, byId, element, showMessage } from "../dom.js";
 import { formatBytes, formatDate, formatDurationNS, formatNumber, formatOffsetNS, historyErrorMessage, identityCell, outcomeDescription, outcomeLabel, outcomeLegend, outcomeTag, updatedStamp } from "../format.js";
-import { navigate } from "../nav.js";
+import { navigate, pageLink } from "../nav.js";
 
 // The shell's two status dots (topbar badge and sidebar footer) mirror the
 // most recent /api/status result (review A4): green when ready, red when the
@@ -223,6 +223,17 @@ function cacheRatioLabel(group) {
   return `Unavailable · ${reasons[group.cacheRatioUnavailableReason] || "counts inconsistent or unavailable"}`;
 }
 
+// M5: a usage-breakdown group links to Requests with the dimension's filter
+// param (account_id/model_id/provider_id/upstream_model — the same names the
+// /api/requests endpoint takes). Ungrouped or unknown-ID rows stay plain text.
+function usageGroupParams(dimension, group) {
+  if (dimension === "account" && group.accountId) return { account_id: group.accountId };
+  if (dimension === "model" && group.modelId) return { model_id: group.modelId };
+  if (dimension === "provider" && group.providerId) return { provider_id: group.providerId };
+  if (dimension === "upstream_model" && group.upstreamModel) return { upstream_model: group.upstreamModel };
+  return null;
+}
+
 function renderUsageGroups(report, dimension, hideEmpty = false) {
   const body = byId("overview-usage-groups");
   // Review B5: the first column header names the active dimension instead of
@@ -246,7 +257,17 @@ function renderUsageGroups(report, dimension, hideEmpty = false) {
   for (const group of report.groups) {
     const row = element("tr");
     const label = element("td");
-    label.append(element("strong", "", groupLabel(group, dimension)));
+    const params = usageGroupParams(dimension, group);
+    if (params) {
+      row.classList.add("clickable-row");
+      row.addEventListener("click", (event) => {
+        if (event.target.closest("button")) return;
+        navigate("requests", params);
+      });
+      label.append(pageLink(groupLabel(group, dimension), "requests", params));
+    } else {
+      label.append(element("strong", "", groupLabel(group, dimension)));
+    }
     row.append(label, element("td", "", formatNumber(group.clientRequests)), usageCountCell(group.inputTokens), usageCountCell(group.outputTokens), usageCountCell(group.cachedInputTokens), usageCountCell(group.reasoningOutputTokens), element("td", "", cacheRatioLabel(group)));
     body.append(row);
   }
@@ -279,10 +300,13 @@ function renderOverviewUsage(baseReport, breakdownReport, dimension) {
   for (const name of ["active", "interrupted", "completed", "failed", "cancelled", "incomplete"]) {
     const count = Number(outcomes[name]) || 0;
     const rate = totalRequests ? `${((count / totalRequests) * 100).toFixed(1)}%` : "—";
-    const row = element("div", "outcome-row");
-    const nameSpan = element("span", "", outcomeLabel(name));
-    nameSpan.title = outcomeDescription(name);
-    row.append(nameSpan, element("strong", "", `${formatNumber(count)} · ${rate} of ${formatNumber(totalRequests)} client requests`));
+    // M5: each outcome row is a button that opens Requests with the outcome
+    // filter pre-applied (#/requests?outcome=<value>).
+    const row = element("button", "outcome-row");
+    row.type = "button";
+    row.title = outcomeDescription(name);
+    row.addEventListener("click", () => navigate("requests", { outcome: name }));
+    row.append(element("span", "", outcomeLabel(name)), element("strong", "", `${formatNumber(count)} · ${rate} of ${formatNumber(totalRequests)} client requests`));
     outcomeList.append(row);
   }
   byId("overview-outcomes").replaceChildren(outcomeList, outcomeLegend());

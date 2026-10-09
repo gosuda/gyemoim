@@ -287,7 +287,15 @@ h5 { margin: 0; color: #3b4654; font-size: 11px; font-weight: 680; }
 .request-filters, .request-results, .request-detail-panel { margin-top: 16px; }
 .request-filter-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); align-items: end; gap: 12px; }
 .request-filter-grid .field { gap: 6px; }
-.request-filter-grid input, .request-filter-grid select { min-height: 36px; font-size: 10px; }
+.request-filter-grid input, .request-filter-grid select { min-height: 36px; font-size: 13px; }
+.filter-presets { grid-column: 1 / -1; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.filter-presets-label { color: #87919d; font-size: 10px; }
+.filter-message { grid-column: 1 / -1; margin: 0; }
+.filter-note-warning { color: #906c29; }
+.data-table tr.clickable-row { cursor: pointer; }
+#request-list.stale-results { opacity: .55; }
+button.outcome-row { width: 100%; cursor: pointer; background: none; font-family: inherit; text-align: left; }
+button.outcome-row:hover { border-color: #d6dce4; background: #f6f8fb; }
 .filter-actions { justify-content: flex-start; gap: 5px; }
 .request-table { min-width: 880px; }
 .request-table tr.selected-row td { background: #f3f6ff; }

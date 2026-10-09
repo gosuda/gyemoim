@@ -138,12 +138,23 @@ export function pageLink(text, page, params = null) {
   return link;
 }
 
+// Requests-page filter applies rewrite the hash without re-rendering: the
+// URL keeps matching the applied filters (shareable #/requests?… deep links)
+// while the page continues from its in-memory state. replaceState adds no
+// history entry; renderedHash is updated so the next real hashchange renders
+// the new hash instead of skipping it as a duplicate.
+export function replaceHashParams(page, params = null) {
+  const hash = buildHash(page, params);
+  renderedHash = hash;
+  if (window.location.hash !== hash) window.history.replaceState(null, "", hash);
+}
+
 export async function refreshPage(page = state.page, params = null) {
   if (page === "overview") return Promise.all([loadStatus(), loadOverviewHistory(), loadSetupHealth()]);
   if (page === "providers") return loadProviders();
   if (page === "service-accounts") return loadAccounts();
   if (page === "models") return loadModelsAndProviders();
-  if (page === "requests") return loadRequestHistory(params?.get("select") || "");
+  if (page === "requests") return loadRequestHistory(params?.get("select") || "", params);
   if (page === "storage") return loadStorage();
   if (page === "users") return loadUsers();
 }

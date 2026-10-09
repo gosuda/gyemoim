@@ -13,7 +13,8 @@ import {
 } from "../api.js";
 import { historyState, state } from "../state.js";
 import { button, byId, element, showMessage } from "../dom.js";
-import { formatDate, formatDurationNS, formatNumber, formatOffsetNS, historyErrorMessage, identityCell, outcomeTag } from "../format.js";
+import { formatDate, formatDurationNS, formatNumber, formatOffsetNS, formatUTC, historyErrorMessage, identityCell, outcomeTag } from "../format.js";
+import { replaceHashParams } from "../nav.js";
 
 function setRequestPageLoading(loading) {
   state.requestPageLoading = loading;
@@ -43,16 +44,75 @@ function populateRequestFilterOptions() {
   const upstreams = new Map();
   for (const model of state.models) if (model.upstreamModel) upstreams.set(model.upstreamModel, `${model.name} · ${model.upstreamModel}`);
   setDatalist("request-upstream-options", [...upstreams.entries()]);
+  updateIdentityHints();
+}
+
+// ---- Filter validation (review R1) ----
+// Parity with the backend (internal/httpapi/history.go parseHistoryTime): Go
+// time.Parse(time.RFC3339Nano, …) accepts exactly
+// YYYY-MM-DDTHH:MM:SS[.fraction] followed by Z or a ±hh:mm zone whose offset
+// is zero, over a valid calendar date — an uppercase T separator, mandatory
+// seconds, no space separator (Go's RFC3339 path is strict; the general
+// fallback requires the same literals), and any nonzero offset is rejected
+// after parsing. The client accepts exactly that set — deliberately as
+// strict as the server — and splits each failure into the one message that
+// names what to fix. Accepted-but-unusual values (a ±00:00 zone, fractional
+// seconds) are sent verbatim; the client never rewrites user input.
+const TIME_MESSAGE_ADD_TIME = "Add a time — use YYYY-MM-DDTHH:mm:ssZ (UTC).";
+const TIME_MESSAGE_INVALID = "That isn't a valid date and time.";
+const TIME_MESSAGE_ZONE = "End with Z for UTC — e.g. 2026-10-09T14:30:00Z.";
+const TIME_MESSAGE_SEPARATOR = "Use T between the date and time — e.g. 2026-10-09T14:30:00Z.";
+
+const strictTimePattern = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(\.\d+)?(Z|[+-]\d{2}:\d{2})$/;
+const dateOnlyPattern = /^\d{4}-\d{2}-\d{2}(Z|[+-]\d{2}:\d{2})?$/;
+const spaceTimePattern = /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})(\.\d+)?(Z|[+-]\d{2}:\d{2})$/;
+
+function validUTCCalendar(year, month, day, hour, minute, second) {
+  if (month < 1 || month > 12 || day < 1 || hour > 23 || minute > 59 || second > 59) return false;
+  const leap = (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0;
+  const daysInMonth = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][month - 1];
+  return day <= daysInMonth;
+}
+
+function historyTimeProblem(value) {
+  if (!value) return null;
+  if (dateOnlyPattern.test(value)) return TIME_MESSAGE_ADD_TIME;
+  const strict = value.match(strictTimePattern);
+  if (strict) {
+    if (!validUTCCalendar(Number(strict[1]), Number(strict[2]), Number(strict[3]), Number(strict[4]), Number(strict[5]), Number(strict[6]))) return TIME_MESSAGE_INVALID;
+    const zone = strict[8];
+    if (zone !== "Z") {
+      const sign = zone[0] === "-" ? -1 : 1;
+      const offsetMinutes = sign * (Number(zone.slice(1, 3)) * 60 + Number(zone.slice(4, 6)));
+      if (offsetMinutes !== 0) return TIME_MESSAGE_ZONE;
+    }
+    return null;
+  }
+  if (spaceTimePattern.test(value)) return TIME_MESSAGE_SEPARATOR;
+  // A date followed by a T-prefixed time with no zone suffix is a zone
+  // problem; everything else (missing seconds, impossible values, garbage)
+  // is an invalid date and time.
+  if (/^\d{4}-\d{2}-\d{2}T/.test(value) && !/(Z|[+-]\d{2}:\d{2})$/.test(value)) return TIME_MESSAGE_ZONE;
+  return TIME_MESSAGE_INVALID;
+}
+
+class RequestFilterError extends Error {
+  constructor(message, fields) {
+    super(message);
+    this.fields = fields;
+  }
 }
 
 function currentRequestFilters() {
   const from = byId("request-from").value.trim();
   const to = byId("request-to").value.trim();
-  const utcPattern = /(?:Z|\+00:00)$/i;
-  for (const [label, value] of [["Started from", from], ["Started before", to]]) {
-    if (value && (!utcPattern.test(value) || Number.isNaN(Date.parse(value)))) throw new Error(`${label} must include a UTC suffix such as Z.`);
+  for (const [value, fieldID] of [[from, "request-from"], [to, "request-to"]]) {
+    const problem = historyTimeProblem(value);
+    if (problem) throw new RequestFilterError(problem, [fieldID]);
   }
-  if (from && to && !(Date.parse(from) < Date.parse(to))) throw new Error("Started from must be earlier than Started before.");
+  if (from && to && !(Date.parse(from) < Date.parse(to))) {
+    throw new RequestFilterError("Started from must be earlier than Started before.", ["request-from", "request-to"]);
+  }
   return {
     from,
     to,
@@ -64,16 +124,156 @@ function currentRequestFilters() {
   };
 }
 
+// ---- Filter-panel errors, identity hints, and warnings (R1/R3/R4) ----
+const timeFieldIDs = ["request-from", "request-to"];
+
+function identityNote(inputID) {
+  const field = byId(inputID).closest(".field");
+  let note = field.querySelector(".filter-note");
+  if (!note) {
+    note = element("p", "field-hint filter-note");
+    field.append(note);
+  }
+  return note;
+}
+
+function setIdentityNote(inputID, text, warning = false) {
+  const note = identityNote(inputID);
+  note.textContent = text;
+  note.classList.toggle("filter-note-warning", warning);
+}
+
+// R3: an empty datalist must say so instead of silently offering nothing.
+function updateIdentityHints() {
+  const hints = [
+    ["request-account-id", state.accounts.length ? "" : "No service accounts are configured yet."],
+    ["request-model-id", state.models.length ? "" : "No Models configured yet."],
+    ["request-provider-id", state.providers.length ? "" : "No providers are configured yet."],
+    ["request-upstream-model", state.models.some((model) => model.upstreamModel) ? "" : "No upstream models are configured yet."],
+  ];
+  for (const [inputID, text] of hints) setIdentityNote(inputID, text);
+}
+
+// R3: an unrecognized identity value still searches — historical IDs are
+// valid queries — but says so instead of failing silently into an empty page.
+// A value that matches a configured entity by NAME only gets its own
+// warning: the backend compares IDs exactly, so a typed name would otherwise
+// dead-end silently (review R3's "typed name" case).
+const identityFields = [
+  ["request-account-id", "account_id", "service account",
+    (value) => state.accounts.find((account) => account.id === value),
+    (value) => state.accounts.find((account) => account.name.toLowerCase() === value.toLowerCase())],
+  ["request-model-id", "model_id", "Model",
+    (value) => state.models.find((model) => model.id === value),
+    (value) => state.models.find((model) => model.name.toLowerCase() === value.toLowerCase())],
+  ["request-provider-id", "provider_id", "provider",
+    (value) => state.providers.find((provider) => provider.id === value),
+    (value) => state.providers.find((provider) => provider.name.toLowerCase() === value.toLowerCase())],
+  ["request-upstream-model", "upstream_model", "upstream model",
+    (value) => state.models.find((model) => model.upstreamModel === value),
+    null],
+];
+
+function checkIdentityWarnings(filters) {
+  for (const [inputID, filterKey, label, byID, byName] of identityFields) {
+    const value = (filters[filterKey] || "").trim();
+    if (!value || byID(value)) continue;
+    const nameMatch = byName ? byName(value) : null;
+    if (nameMatch) {
+      setIdentityNote(inputID, `'${value}' is the name of the configured ${label} whose ID is ${nameMatch.id} — filters match IDs exactly; searching historical IDs anyway.`, true);
+    } else {
+      setIdentityNote(inputID, `No configured ${label} matches '${value}' — searching historical IDs anyway.`, true);
+    }
+  }
+}
+
+function clearFilterErrors() {
+  showMessage(byId("request-filter-message"));
+  for (const fieldID of timeFieldIDs) byId(fieldID).removeAttribute("aria-invalid");
+  updateIdentityHints();
+}
+
+// R4: filter problems render in the FILTERS panel next to the fields (with
+// aria-invalid on the offending fields) instead of in the results panel, and
+// the previous results gray out as stale until a query succeeds again.
+function showFilterError(message, fieldIDs = []) {
+  showMessage(byId("request-filter-message"), message, "error");
+  for (const fieldID of timeFieldIDs) {
+    if (fieldIDs.includes(fieldID)) byId(fieldID).setAttribute("aria-invalid", "true");
+    else byId(fieldID).removeAttribute("aria-invalid");
+  }
+  markResultsStale();
+}
+
+function markResultsStale() {
+  byId("request-list").classList.add("stale-results");
+}
+
+function clearResultsStale() {
+  byId("request-list").classList.remove("stale-results");
+}
+
+function appliedFiltersHaveAny(filters) {
+  return Boolean(filters && (filters.from || filters.to || filters.account_id || filters.model_id || filters.provider_id || filters.upstream_model || filters.outcome));
+}
+
+// R2: presets fill both UTC fields with correctly generated RFC3339 strings
+// (second precision — no fraction — which the backend accepts verbatim).
+function presetRange(kind) {
+  const now = new Date();
+  const stamp = (date) => `${date.toISOString().slice(0, 19)}Z`;
+  if (kind === "last-hour") return [stamp(new Date(now.getTime() - 3_600_000)), stamp(now)];
+  if (kind === "last-24-hours") return [stamp(new Date(now.getTime() - 86_400_000)), stamp(now)];
+  const midnight = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+  return [stamp(midnight), stamp(now)];
+}
+
+// ---- Deep-link filter params (M5 cross-links) ----
+// #/requests?outcome=…&account_id=…&model_id=…&provider_id=…&upstream_model=…
+// pre-apply filters on render (the names match the /api/requests query
+// params); `select` opens the detail panel separately. Unknown or empty
+// params are ignored.
+const requestPageFilterParams = ["outcome", "account_id", "model_id", "provider_id", "upstream_model"];
+
+function emptyRequestFilters() {
+  return { from: "", to: "", account_id: "", model_id: "", provider_id: "", upstream_model: "", outcome: "" };
+}
+
+function deepLinkFilters(params) {
+  if (!params) return null;
+  const filters = emptyRequestFilters();
+  let any = false;
+  for (const key of requestPageFilterParams) {
+    const value = (params.get(key) || "").trim();
+    if (value) {
+      filters[key] = value;
+      any = true;
+    }
+  }
+  return any ? filters : null;
+}
+
+function fillFilterForm(filters) {
+  byId("request-from").value = filters.from || "";
+  byId("request-to").value = filters.to || "";
+  byId("request-account-id").value = filters.account_id || "";
+  byId("request-model-id").value = filters.model_id || "";
+  byId("request-provider-id").value = filters.provider_id || "";
+  byId("request-upstream-model").value = filters.upstream_model || "";
+  byId("request-outcome").value = filters.outcome || "";
+}
+
 function resetRequestCursors() {
   state.requestCursors = [""];
   state.requestPageIndex = 0;
 }
 
-export async function loadRequestHistory(selectID = "") {
+export async function loadRequestHistory(selectID = "", params = null) {
   const token = beginHistoryFetch();
   const message = byId("request-list-message");
   showMessage(message, "Loading request history…");
   byId("request-list").replaceChildren();
+  clearResultsStale();
   byId("request-results-summary").textContent = "Loading a bounded page…";
   byId("request-page-previous").disabled = true;
   byId("request-page-next").disabled = true;
@@ -88,7 +288,15 @@ export async function loadRequestHistory(selectID = "") {
     state.models = models;
     state.providers = providers;
     populateRequestFilterOptions();
-    state.appliedRequestFilters = currentRequestFilters();
+    // Refresh re-fetches the LAST APPLIED filters — draft edits in the form
+    // are never promoted here (review R4). Deep-link params are the one
+    // exception: they define the applied filters on render. On a fresh page
+    // render the form is re-synced to the applied filters; the manual
+    // Refresh button passes no params and keeps draft edits visible.
+    const deep = deepLinkFilters(params);
+    state.appliedRequestFilters = deep || state.appliedRequestFilters || emptyRequestFilters();
+    if (params) fillFilterForm(state.appliedRequestFilters);
+    if (deep) checkIdentityWarnings(state.appliedRequestFilters);
     resetRequestCursors();
     await fetchRequestPage("", token, state.appliedRequestFilters);
   } catch (error) {
@@ -103,18 +311,47 @@ export async function loadRequestHistory(selectID = "") {
   if (selectID) await selectRequest(selectID);
 }
 
+// Backend 400s name raw query params ("from must be a UTC RFC3339
+// timestamp"); translate them to the field labels this form uses. Unknown
+// server messages pass through verbatim (explicit-errors invariant).
+const filterParamLabels = { from: "Started from", to: "Started before", account_id: "Service account", model_id: "Requested Model", provider_id: "Actual provider", upstream_model: "Upstream model", outcome: "Outcome" };
+
+function historyFilterServerMessage(error) {
+  const raw = error?.body?.error?.message || error?.message || "The filters were rejected.";
+  if (raw === "from must be earlier than to") return "Started from must be earlier than Started before.";
+  const fieldMessage = raw.match(/^(from|to|account_id|model_id|provider_id|upstream_model|outcome) (.+)$/);
+  if (fieldMessage) return `${filterParamLabels[fieldMessage[1]]} ${fieldMessage[2]}`;
+  if (raw === "history query parameters are invalid") return "These filter values are invalid.";
+  return raw;
+}
+
 async function fetchRequestPage(cursor, token, filters = state.appliedRequestFilters, onSuccess = null) {
   const path = addQuery("/api/requests", { ...(filters || {}), limit: 25, cursor });
   setRequestPageLoading(true);
   try {
     const page = await api(path, { signal: token.controller.signal });
     if (!historyFetchIsCurrent(token) || state.page !== "requests") return;
+    clearResultsStale();
     onSuccess?.();
     renderRequestPage(page);
-    showMessage(byId("request-list-message"), page.requests.length ? "Each page is bounded to 25 requests." : "No requests match these filters.");
+    const requests = page.requests || [];
+    // R4: the two empty states differ and appear exactly once per page —
+    // no filters + empty archive is a message-slot sentence, a filtered
+    // empty result lives in the table cell, never both.
+    if (!requests.length && appliedFiltersHaveAny(filters)) showMessage(byId("request-list-message"));
+    else if (!requests.length) showMessage(byId("request-list-message"), "No recorded requests yet. Requests appear here once the gateway handles traffic.");
+    else showMessage(byId("request-list-message"), "Each page is bounded to 25 requests.");
   } catch (error) {
     if (!historyFetchIsCurrent(token) || state.page !== "requests") return;
     setRequestPageLoading(false);
+    // R1: a 400 means the filters themselves were rejected — the server
+    // message becomes a filter error (never a page-level "unavailable"
+    // state) and the previous results gray out as stale.
+    if (error?.status === 400) {
+      showFilterError(historyFilterServerMessage(error));
+      byId("request-results-summary").textContent = "Filters were not applied — the results below are from the last successful query.";
+      return;
+    }
     showMessage(byId("request-list-message"), `Could not load requests: ${historyErrorMessage(error)}`, "error");
     byId("request-results-summary").textContent = "Request history is unavailable.";
   }
@@ -124,7 +361,7 @@ function renderRequestPage(page) {
   const list = byId("request-list");
   list.replaceChildren();
   const requests = page.requests || [];
-  if (!requests.length) {
+  if (!requests.length && appliedFiltersHaveAny(state.appliedRequestFilters)) {
     const row = element("tr");
     const cell = element("td", "empty-cell", "No requests match these filters.");
     cell.colSpan = 8;
@@ -135,6 +372,13 @@ function renderRequestPage(page) {
     const row = element("tr");
     if (state.selectedRequestID === request.requestId) row.classList.add("selected-row");
     row.dataset.requestId = request.requestId;
+    row.classList.add("clickable-row");
+    // R5: the whole row opens the detail; the Inspect button stays as the
+    // explicit, keyboard-reachable control in the Actions column.
+    row.addEventListener("click", (event) => {
+      if (event.target.closest("button")) return;
+      selectRequest(request.requestId);
+    });
     const provider = request.provider;
     const providerCell = element("td");
     if (provider) providerCell.append(identityCell(provider.name, provider.id), element("small", "", provider.upstream_model || "Upstream model unavailable"));
@@ -143,7 +387,11 @@ function renderRequestPage(page) {
     const outcomeCell = element("td");
     outcomeCell.append(outcomeTag(request.outcome));
     const inspect = button(state.selectedRequestID === request.requestId ? "Selected" : "Inspect", "quiet small", () => selectRequest(request.requestId));
-    row.append(element("td", "", formatDate(request.startedAt)), identityCell(request.serviceAccount?.name, request.serviceAccount?.id), identityCell(request.model?.name, request.model?.id), providerCell, outcomeCell, element("td", "", formatDurationNS(request.durationNs)), element("td", "", status));
+    // R2: the table shows UTC; the local rendering stays available as a
+    // tooltip (the detail panel shows both).
+    const startedCell = element("td", "", formatUTC(request.startedAt));
+    startedCell.title = `Local time: ${formatDate(request.startedAt)}`;
+    row.append(startedCell, identityCell(request.serviceAccount?.name, request.serviceAccount?.id), identityCell(request.model?.name, request.model?.id), providerCell, outcomeCell, element("td", "", formatDurationNS(request.durationNs)), element("td", "", status));
     const action = element("td");
     action.append(inspect);
     row.append(action);
@@ -151,7 +399,8 @@ function renderRequestPage(page) {
   }
   byId("request-list").dataset.nextCursor = page.nextCursor || "";
   const current = state.requestPageIndex + 1;
-  byId("request-results-summary").textContent = `${formatNumber(requests.length)} requests on this page · page ${current} · total archive count is not scanned.`;
+  // R4: honest summary without the "total archive count is not scanned" jargon.
+  byId("request-results-summary").textContent = `Page ${current} · up to 25 requests per page · pages load on demand, so no total is shown.`;
   setRequestPageLoading(false);
 }
 
@@ -170,6 +419,8 @@ function requestPageNext() {
     if (nextCursors.length >= 100) {
       nextCursors.shift();
       nextIndex -= 1;
+      // L5: the silent cursor-stack cap gets one tooltip.
+      byId("request-page-next").title = "Only the 100 most recent pages stay reachable with Previous page.";
     }
     nextCursors.push(nextCursor);
   }
@@ -194,22 +445,43 @@ function requestPagePrevious() {
 }
 
 async function applyRequestFilters() {
-  const token = beginHistoryFetch();
-  state.selectedRequestID = "";
-  byId("request-detail-panel").hidden = true;
   let filters;
   try {
     filters = currentRequestFilters();
   } catch (error) {
-    setRequestPageLoading(false);
-    showMessage(byId("request-list-message"), error.message, "error");
+    // R4: client validation errors land in the FILTERS panel next to the
+    // fields (aria-invalid on the offender), never fire a request, and gray
+    // the previous results as stale instead of hiding them.
+    showFilterError(error.message, error.fields || []);
     return;
   }
+  clearFilterErrors();
+  checkIdentityWarnings(filters);
   state.appliedRequestFilters = filters;
   resetRequestCursors();
+  syncRequestHash(filters);
+  const token = beginHistoryFetch();
+  state.selectedRequestID = "";
+  byId("request-detail-panel").hidden = true;
   byId("request-list").dataset.nextCursor = "";
   setRequestPageLoading(true);
   await fetchRequestPage("", token, filters);
+}
+
+// Keep the hash in sync with the applied filters (without select — applying
+// closes the detail panel) so filtered views are shareable deep links.
+// replaceHashParams uses replaceState: no history entry, no re-render.
+function syncRequestHash(filters) {
+  const params = {};
+  for (const key of requestPageFilterParams) if (filters[key]) params[key] = filters[key];
+  replaceHashParams("requests", params);
+}
+
+// R2: the detail panel shows UTC with the local rendering alongside; the
+// table stays UTC-only with the local time as a tooltip.
+function startedDisplay(value) {
+  if (!value) return "Unknown";
+  return `${formatUTC(value)} · local ${formatDate(value)}`;
 }
 
 function detailMetric(label, value) {
@@ -461,7 +733,7 @@ function renderRequestDetails(detail, token) {
     detailMetric("Actual upstream model", provider?.upstream_model || "Unknown"),
     detailMetric("Local request ID", summary.requestId || "Unknown"),
     detailMetric("Upstream request ID", summary.upstreamRequestId || "Unknown"),
-    detailMetric("Started", formatDate(summary.startedAt)),
+    detailMetric("Started", startedDisplay(summary.startedAt)),
     detailMetric("Outcome", summary.outcome || "Unknown"),
     detailMetric("Duration", formatDurationNS(summary.durationNs)),
     detailMetric("HTTP status", summary.httpStatus === 0 ? (summary.upstreamAttempts === 0 ? "0 · no transmission recorded" : "0 · no upstream HTTP status recorded") : formatNumber(summary.httpStatus)),
@@ -550,7 +822,7 @@ async function selectRequest(requestID) {
     const detail = await api(`/api/requests/${encodeURIComponent(requestID)}`, { signal: token.controller.signal });
     if (!historyFetchIsCurrent(token) || state.selectedRequestID !== requestID || state.page !== "requests") return;
     const summary = detail.request || {};
-    byId("request-detail-subtitle").textContent = `${summary.outcome || "unknown"} · started ${formatDate(summary.startedAt)} · local request ID ${summary.requestId || requestID}`;
+    byId("request-detail-subtitle").textContent = `${summary.outcome || "unknown"} · started ${formatUTC(summary.startedAt)} · local request ID ${summary.requestId || requestID}`;
     historyState.selectionToken = token;
     renderRequestDetails(detail, token);
     renderRequestPageSelection(requestID);
@@ -573,6 +845,22 @@ byId("request-filter-form").addEventListener("submit", (event) => {
 byId("request-filter-reset").addEventListener("click", () => {
   byId("request-filter-form").reset();
   applyRequestFilters();
+});
+// Decision 4: filter errors, aria-invalid, and identity warnings clear as
+// soon as any filter input changes.
+byId("request-filter-form").addEventListener("input", () => {
+  if (byId("request-filter-message").textContent) showMessage(byId("request-filter-message"));
+  for (const fieldID of timeFieldIDs) byId(fieldID).removeAttribute("aria-invalid");
+  updateIdentityHints();
+});
+byId("request-filter-form").addEventListener("change", () => updateIdentityHints());
+// R2: presets fill both UTC fields; Apply is still the explicit submit.
+document.querySelectorAll("#request-filter-form [data-preset]").forEach((item) => {
+  item.addEventListener("click", () => {
+    const [from, to] = presetRange(item.dataset.preset);
+    byId("request-from").value = from;
+    byId("request-to").value = to;
+  });
 });
 byId("request-refresh").addEventListener("click", () => {
   state.selectedRequestID = "";

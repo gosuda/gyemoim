@@ -982,3 +982,159 @@ the users handoff deliberately gets no beforeunload/in-app leave confirm
 toggle from the review's U1 prose was not added — the brief's scope asks
 for the toggle on the create form only; one throwaway user ("fresh-name")
 was created by a mistyped test step and deleted again via the UI.
+
+### Step 9 — Requests page (2026-10-09)
+
+Changes in `internal/httpui/assets/js/pages/requests.js`, `js/pages/overview.js`,
+`js/nav.js`, `assets/index.html`, and `assets/site.css`; no Go changes.
+
+**R1 — accurate split validation, exact backend parity (requests.js:60-133).**
+Decision documented: the client stays as strict as the backend. Reading
+`internal/httpapi/history.go` `parseHistoryTime` (:277) shows Go
+`time.Parse(time.RFC3339Nano, …)` — since Go 1.20 a strict RFC3339 parse with a
+general-layout fallback that requires the same literals — so the backend accepts
+exactly `YYYY-MM-DDTHH:mm:ss[.fraction]` + `Z` / `+00:00` / `-00:00` (any nonzero
+offset is rejected after parsing), over a valid calendar date, with mandatory
+seconds and an uppercase `T`; it does **not** tolerate space separators,
+lowercase `t`/`z`, date-only values, or missing seconds (contrary to the step
+brief's guess). The client accepts exactly that set (strict regex + component
+validation incl. leap years; accepted-but-unusual values such as `+00:00` and
+9-digit fractions are sent verbatim, never rewritten) and splits failures into
+accurate messages: (a) date-only / missing time → "Add a time — use
+YYYY-MM-DDTHH:mm:ssZ (UTC)."; (b) everything structurally invalid (impossible
+calendar values, missing seconds, garbage) → "That isn't a valid date and
+time."; (c) missing zone or nonzero offset → "End with Z for UTC — e.g.
+2026-10-09T14:30:00Z."; plus one refinement for the space-separator case (L3):
+(d) "Use T between the date and time — e.g. 2026-10-09T14:30:00Z." The
+from-earlier-than-to check keeps its label-based message. **Input choice
+(R2):** option (b) — text inputs kept, with concrete example hints under each
+field (index.html:191-192, `aria-describedby`) and example placeholders;
+`datetime-local` was rejected because its picker shows locale formatting with
+no timezone, needs seconds handling, and would still require full custom
+validation of partial states, while presets + hints remove most typing. On a
+backend 400, `fetchRequestPage` (requests.js:332) shows the server message as a
+FILTERS-panel error (never "Request history is unavailable."), grays the stale
+results, and sets the summary to "Filters were not applied — the results below
+are from the last successful query."; `historyFilterServerMessage`
+(requests.js:316) translates raw param names to labels ("from must be a UTC
+RFC3339 timestamp" → "Started from must be a UTC RFC3339 timestamp"; unknown
+server messages pass through verbatim per the explicit-errors invariant).
+
+**R1/R2 — presets:** three buttons ("Last hour", "Last 24 hours", "Today
+(UTC)", index.html:190) fill both fields with correctly generated UTC strings
+(second precision — `toISOString().slice(0,19) + "Z"`; Today uses UTC midnight
+→ now; requests.js:222). Fill-only; Apply remains the explicit submit.
+
+**R3 — identity warnings + datalist affordance (requests.js:137-201).** On
+Apply, each identity field whose value matches no configured entity (checked
+against `state.accounts/models/providers` and configured upstream models)
+shows a non-blocking amber warning under the field — "No configured service
+account matches '<value>' — searching historical IDs anyway." — and the query
+still fires. Refinement beyond the brief: a value matching a configured
+entity's **name only** (e.g. "pi work") gets its own warning naming the ID
+("'pi work' is the name of the configured service account whose ID is … —
+filters match IDs exactly; searching historical IDs anyway."), because the
+backend compares IDs exactly and a typed name would otherwise dead-end
+silently — R3's "typed name" case. Datalist affordance: all four identity
+placeholders now say "type to see suggestions" (index.html:193-196), and an
+empty datalist says so in a field hint ("No Models configured yet.", "No
+service accounts are configured yet.", "No providers are configured yet.",
+"No upstream models are configured yet.", requests.js:166). Warnings clear on
+input (decision 4).
+
+**R4 — feedback.** New `#request-filter-message` slot inside the filter form
+(index.html:199, `role="status" aria-live="polite", spans the grid row) holds
+all filter validation errors; offending from/to fields get
+`aria-invalid="true"`. Stale results **gray out** (documented choice over
+clearing: `.stale-results` opacity .55 on the table body, site.css:296) and
+stay grayed until the next successful fetch. Empty states: no filters + empty
+archive → "No recorded requests yet. Requests appear here once the gateway
+handles traffic." in the message slot with no table row; a filtered empty
+result → "No requests match these filters." in the table cell with the message
+slot cleared — exactly one instance per page either way
+(requests.js:341-344). Summary line: "Page N · up to 25 requests per page ·
+pages load on demand, so no total is shown." (requests.js:403; the "total
+archive count is not scanned" jargon is gone). Refresh re-fetches
+`state.appliedRequestFilters` — draft edits are never promoted
+(requests.js:281-307; the old draft recompute is gone).
+
+**R4/R5 — discoverability.** Table rows are clickable (`clickable-row`,
+cursor pointer; row click ignores button targets) and open the detail; the
+explicit Inspect button stays under a new "Actions" column header
+(index.html:205). Filter inputs 10px → 13px (site.css:290). UTC display: the
+table's Started column shows `formatUTC` with the local rendering as a title
+tooltip (requests.js:391-393); the detail panel shows both (`formatUTC … ·
+local …`, requests.js:482) and the detail subtitle is UTC.
+
+**M5 — Overview cross-links (overview.js:229-236, 259-273, 300-308).** Each
+Outcomes row is now a real `<button class="outcome-row">` (hover style in
+site.css:297-298) navigating to `#/requests?outcome=<value>`; usage-breakdown
+rows are clickable and their label cell is an accessible `pageLink` button
+with the dimension's param. Requests consumes the params on render
+(`deepLinkFilters`, requests.js:242): **param names are `outcome`,
+`account_id`, `model_id`, `provider_id`, `upstream_model`** — matching the
+`/api/requests` query params — alongside the existing `select`. Applying
+filters syncs the hash through the new `nav.js` `replaceHashParams`
+(nav.js:146): `history.replaceState` + `renderedHash` update, so the URL
+always matches the applied filters (shareable deep links) without adding a
+history entry or re-rendering (verified: Back after Apply skips straight past
+the replaced entry).
+
+**L3/L5.** Space separators: rejected with message (d), matching the backend.
+The 100-page cursor stack cap now sets a title tooltip on Next page when the
+stack first shifts ("Only the 100 most recent pages stay reachable with
+Previous page.", requests.js:423) — code-reviewed only; driving 100 page
+transitions in the stub harness was not practical.
+
+Behavior note: a fresh page render (any navigation into Requests) re-syncs the
+filter form from `state.appliedRequestFilters`; the manual Refresh button
+passes no params and keeps draft edits visible in the form while still
+fetching with the applied filters.
+
+Verification: `node --check` on all 14 modules OK (as `.mjs` copies); `go vet
+./...` OK; `CGO_ENABLED=0 go build -trimpath` OK (binary
+`/tmp/opencode/step9-bin`); `./scripts/build-release.sh` builds all four
+targets. Browser pass on a private instance (port 9971, XDG-isolated data dir
+`/tmp/opencode/step9-data`, seeded via API: provider "work-main", service
+account "pi work" with key+grant, Model `gpt-x` → `gpt-5.3`; admin password
+changed through the forced gate; history empty — `/api/requests*` stubbed via
+agent-browser network routes for data states, unrouted after each). Evidence:
+presets produce correct UTC strings verified against `Date.now` (Last hour
+from −60 min / to −1 s; Last 24 hours −24 h; Today = UTC midnight → now, all
+`…Z` second-precision); the three brief messages plus the separator message
+each rendered in the FILTERS panel with `form-message error`,
+`aria-invalid="true"` on the offending field only, stale graying applied, and
+**zero** `/api/requests` fetches across all six bad-input cases; parity sweep:
+`+00:00`, `-00:00`, 1- and 9-digit fractions, and a leap-day date are accepted
+(fire queries), while `2021-02-29`, second `:60`, lowercase `t`, missing
+seconds, `2026-13-01`, hour `24`, and bare dates are rejected with the right
+message — client and backend accept the same set; messages/aria-invalid clear
+on first input; backend-400 path (fetch-wrapper stub returning the real
+backend message) → "Started from must be a UTC RFC3339 timestamp" in the
+FILTERS panel, summary NOT flipped to "unavailable", stale graying, clean
+recovery after unstubbing; identity warnings for unknown account/model values
+(fire anyway), no warning for exact IDs, name-only match shows the ID-naming
+warning, clear on input; empty datalist hints ("No Models configured yet." /
+"No upstream models are configured yet.") with `/api/models` stubbed to [];
+no-filter empty state sentence appears once (zero table rows) and the
+filtered empty cell appears once with an empty message slot; stubbed results
+page: Actions header, UTC Started ("Oct 9, 2026, 11:45:00 AM UTC") with local
+tooltip, Failed `tag-danger` tag with definition tooltip, row click on a plain
+cell opens the detail panel (selected-row highlight), Inspect still works;
+`#/requests?outcome=failed` fresh load pre-applies the select and fetches
+`?outcome=failed`; the Overview Failed outcome button and a stubbed
+usage-breakdown row (Group by = Service account) land on
+`#/requests?outcome=failed` / `#/requests?account_id=<uuid>` with the field
+prefilled and the fetch carrying the param; Refresh with unapplied draft edits
+(outcome=completed + from=2020) fetched exactly `/api/requests?limit=25` (no
+draft params) and kept the draft in the form; Apply synced the hash
+(`#/requests?account_id=…`) with no history entry (Back → previous page); 13px
+computed on filter inputs; 390px viewport `scrollWidth == clientWidth` with
+presets/hints stacking (screenshot); all seven pages render with correct
+titles after the nav.js change; `?select=` deep link still auto-opens the
+detail (UTC subtitle); browser console and page-error buffers empty at end of
+session. Deviations: CSS additions to site.css (required by the brief's
+13px/row/stale/preset items); the extra space-separator message and the
+name-only identity warning (documented above); stale results gray out rather
+than clear (documented choice); hash sync on Apply (documented above); the
+cursor-cap tooltip has no browser proof (100-page drive impractical).
