@@ -25,8 +25,9 @@ const (
 	claimTimeout      = 30 * time.Second
 )
 
-// errEnrollmentUnavailable reports that the in-memory code registry is full.
-var errEnrollmentUnavailable = errors.New("too many pending enrollment codes")
+// ErrEnrollmentUnavailable reports that the in-memory code registry is full;
+// issuing can be retried shortly once pending codes expire or complete.
+var ErrEnrollmentUnavailable = errors.New("too many pending enrollment codes")
 
 // ErrNotSIWC reports that the provider cannot use Sign in with ChatGPT.
 var ErrNotSIWC = errors.New("provider does not support Sign in with ChatGPT")
@@ -34,7 +35,6 @@ var ErrNotSIWC = errors.New("provider does not support Sign in with ChatGPT")
 // Enrollment is the result of issuing a connect enrollment code.
 type Enrollment struct {
 	Code             string
-	ExpiresAt        time.Time
 	ExpiresInSeconds int
 }
 
@@ -53,8 +53,9 @@ func NewService(store *config.Store, oauth *siwc.Manager) *Service {
 
 // StartEnrollment issues a single-use enrollment code bound to the provider.
 // It is called only from the session-gated management API. Any earlier
-// unclaimed code for the same provider becomes invalid. A claimed code whose
-// flow later fails is dead regardless of the outcome; the admin issues a new one.
+// unclaimed, unreserved code for the same provider becomes invalid. If the
+// later claim's start fails, the code is released and can be claimed again
+// until it expires; the admin issues a new one only after that.
 func (s *Service) StartEnrollment(ctx context.Context, providerID string) (Enrollment, error) {
 	providerRecord, err := s.store.GetProvider(ctx, providerID)
 	if err != nil {
@@ -69,7 +70,6 @@ func (s *Service) StartEnrollment(ctx context.Context, providerID string) (Enrol
 	}
 	return Enrollment{
 		Code:             code,
-		ExpiresAt:        expiresAt,
 		ExpiresInSeconds: int(time.Until(expiresAt) / time.Second),
 	}, nil
 }
@@ -99,16 +99,21 @@ func (s *Service) ServeClaim(w http.ResponseWriter, r *http.Request) {
 		writeConnectError(w, http.StatusBadRequest)
 		return
 	}
-	providerID, ok := s.codes.claim(code, time.Now())
+	providerID, ok := s.codes.reserve(code, time.Now())
 	if !ok {
 		writeConnectError(w, http.StatusBadRequest)
 		return
 	}
+	// The code is reserved, not consumed: StartWithCallbackPort can block on
+	// the provider lock, which inference holds for the whole streaming
+	// response, and the code must not burn while it waits. On any failed
+	// start the reservation is released so the same code can be claimed
+	// again; once the start succeeds, release is a no-op.
+	defer s.codes.release(code)
 	ctx, cancel := context.WithTimeout(r.Context(), claimTimeout)
 	defer cancel()
 	authorizationURL, err := s.oauth.StartWithCallbackPort(ctx, providerID, *input.CallbackPort)
 	if err != nil {
-		// The code stays consumed: a failed start is a dead code.
 		writeConnectError(w, http.StatusBadRequest)
 		return
 	}
@@ -138,8 +143,8 @@ func (s *Service) ServeClaim(w http.ResponseWriter, r *http.Request) {
 // ServeComplete handles POST /connect/complete for the enrollment script. It
 // shares ServeClaim's guard exemption (see main.go and ServeClaim): the claimed
 // enrollment code plus the single-use OAuth state are the capability. The
-// enrollment code is consumed at claim time and stays consumed regardless of
-// the completion outcome.
+// enrollment code is consumed once its flow has started (see ServeClaim) and
+// stays consumed regardless of the completion outcome.
 func (s *Service) ServeComplete(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", http.MethodPost)
@@ -152,6 +157,12 @@ func (s *Service) ServeComplete(w http.ResponseWriter, r *http.Request) {
 		AuthorizationCode string  `json:"authorizationCode"`
 		ClientID          *string `json:"clientID"`
 		Error             *string `json:"error"`
+		// Query is the provider's raw loopback callback query string, forwarded
+		// by the current script. When present and parseable it wins over the
+		// parsed convenience fields below, which older scripts keep using: the
+		// server must see exactly what the provider sent, including repeated
+		// or blank parameters.
+		Query string `json:"query"`
 	}
 	if !decodeConnectJSON(w, r, &input) {
 		writeConnectError(w, http.StatusBadRequest)
@@ -159,10 +170,39 @@ func (s *Service) ServeComplete(w http.ResponseWriter, r *http.Request) {
 	}
 	code := strings.TrimSpace(input.Code)
 	state := strings.TrimSpace(input.State)
+	authorizationCode := input.AuthorizationCode
+	// A forwarded provider error ("access_denied" or any other non-empty value)
+	// is passed through; the completion path maps it to the status vocabulary.
+	authorizationError := ""
+	clientID, clientIDPresent := "", false
+	if input.ClientID != nil {
+		clientID, clientIDPresent = *input.ClientID, true
+	}
+	if input.Error != nil {
+		authorizationError = strings.TrimSpace(*input.Error)
+	}
+	if raw := strings.TrimSpace(input.Query); raw != "" {
+		if len(raw) > maxAuthCodeLen {
+			writeConnectError(w, http.StatusBadRequest)
+			return
+		}
+		if values, err := url.ParseQuery(raw); err == nil {
+			if v := values.Get("state"); v != "" {
+				state = strings.TrimSpace(v)
+			}
+			authorizationCode = values.Get("code")
+			if v := values.Get("error"); v != "" {
+				authorizationError = strings.TrimSpace(v)
+			}
+			if v := values.Get("client_id"); v != "" {
+				clientID, clientIDPresent = v, true
+			}
+		}
+	}
 	if code == "" || len(code) > maxCodeLen || state == "" || len(state) > maxStateLen ||
-		len(input.AuthorizationCode) > maxAuthCodeLen ||
-		(input.ClientID != nil && len(*input.ClientID) > maxClientIDLen) ||
-		(input.Error != nil && len(*input.Error) > maxErrorLen) {
+		len(authorizationCode) > maxAuthCodeLen ||
+		len(clientID) > maxClientIDLen ||
+		len(authorizationError) > maxErrorLen {
 		writeConnectError(w, http.StatusBadRequest)
 		return
 	}
@@ -174,19 +214,9 @@ func (s *Service) ServeComplete(w http.ResponseWriter, r *http.Request) {
 	// The code is dead from here on, whatever the outcome is.
 	defer s.codes.finish(code)
 
-	clientID, clientIDPresent := "", false
-	if input.ClientID != nil {
-		clientID, clientIDPresent = *input.ClientID, true
-	}
-	// A forwarded provider error ("access_denied" or any other non-empty value)
-	// is passed through; the completion path maps it to the status vocabulary.
-	authorizationError := ""
-	if input.Error != nil {
-		authorizationError = strings.TrimSpace(*input.Error)
-	}
 	ctx, cancel := context.WithTimeout(r.Context(), completionTimeout)
 	defer cancel()
-	status, err := s.oauth.CompleteConnectFlow(ctx, recordedState, input.AuthorizationCode, clientID, clientIDPresent, authorizationError)
+	status, err := s.oauth.CompleteConnectFlow(ctx, recordedState, authorizationCode, clientID, clientIDPresent, authorizationError)
 	if err != nil {
 		// Unknown, expired, or already consumed flow state: the same generic
 		// error as every other failure, with no distinguishing detail.

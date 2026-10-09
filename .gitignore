@@ -1,3 +1,4 @@
 /dist/
 /gyemoim
 /.gyemoim-build.*
+__pycache__/

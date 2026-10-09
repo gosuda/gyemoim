@@ -87,6 +87,8 @@ func (s *Store) ListUsers(ctx context.Context) ([]User, error) {
 
 // UpdateUserPassword replaces the stored password hash. The forced-change flag is
 // set explicitly so a password change can clear it while bootstrap can leave it set.
+// It changes nothing else; callers that must also revoke sessions atomically use
+// ChangeUserPassword instead.
 func (s *Store) UpdateUserPassword(ctx context.Context, id, passwordHash string, mustChange bool) error {
 	if passwordHash == "" {
 		return errors.New("user password hash is required")
@@ -117,14 +119,74 @@ func (s *Store) UpdateUserDisabled(ctx context.Context, id string, disabled bool
 	return requireAffected(result, "user", id)
 }
 
-// DeleteUser removes a User. Their sessions are removed by the sessions foreign
-// key's ON DELETE CASCADE (foreign keys are enabled in the store DSN).
-func (s *Store) DeleteUser(ctx context.Context, id string) error {
-	result, err := s.db.ExecContext(ctx, `DELETE FROM users WHERE id = ?`, id)
+// ChangeUserPassword replaces a user's password hash and revokes every other
+// session of that user in ONE transaction, so a failure cannot leave the password
+// changed while the user's other sessions survive. keepIDHash identifies the one
+// session that stays valid (the browser performing the change).
+func (s *Store) ChangeUserPassword(ctx context.Context, id, passwordHash string, mustChange bool, keepIDHash []byte) error {
+	if passwordHash == "" {
+		return errors.New("user password hash is required")
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin user password change: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	_, timestamp := nowText()
+	result, err := tx.ExecContext(ctx, `UPDATE users SET password_hash = ?, must_change_password = ?, updated_at = ? WHERE id = ?`,
+		passwordHash, boolInt(mustChange), timestamp, id)
+	if err != nil {
+		return fmt.Errorf("update user password: %w", err)
+	}
+	if err := requireAffected(result, "user", id); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM sessions WHERE user_id = ? AND id_hash <> ?`, id, keepIDHash); err != nil {
+		return fmt.Errorf("delete other sessions for user: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit user password change: %w", err)
+	}
+	return nil
+}
+
+// ErrLastUser reports a refused deletion of the last remaining management user.
+var ErrLastUser = errors.New("the last remaining management user cannot be deleted")
+
+// DeleteUserGuarded removes a User unless they are the last remaining one. The
+// delete and the count run in one transaction, so two concurrent deletes cannot
+// race between the check and the act and empty the users table. Sessions cascade
+// away with the user via the sessions foreign key. ErrLastUser reports the
+// refused last-user delete; ErrNotFound an unknown id.
+func (s *Store) DeleteUserGuarded(ctx context.Context, id string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin guarded user delete: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	result, err := tx.ExecContext(ctx, `DELETE FROM users WHERE id = ? AND (SELECT COUNT(*) FROM users) > 1`, id)
 	if err != nil {
 		return fmt.Errorf("delete user: %w", err)
 	}
-	return requireAffected(result, "user", id)
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("check user delete: %w", err)
+	}
+	if affected == 0 {
+		// Distinguish an unknown id from the refused last-user delete.
+		var count int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM users WHERE id = ?`, id).Scan(&count); err != nil {
+			return fmt.Errorf("count deleted user: %w", err)
+		}
+		if count == 0 {
+			return notFound("user", id)
+		}
+		return ErrLastUser
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit guarded user delete: %w", err)
+	}
+	return nil
 }
 
 // CreateSession stores a new login session keyed by its ID hash. The caller
@@ -140,6 +202,8 @@ func (s *Store) CreateSession(ctx context.Context, session Session) (Session, er
 		return Session{}, errors.New("session expiry is required")
 	}
 	now, timestamp := nowText()
+	// last_seen_at is informational only: it is stamped once at creation and
+	// never advanced. Sessions are never extended — expiry is absolute.
 	session.CreatedAt, session.LastSeenAt = now, now
 	_, err := s.db.ExecContext(ctx, `INSERT INTO sessions(id_hash, user_id, created_at, expires_at, last_seen_at) VALUES (?, ?, ?, ?, ?)`,
 		append([]byte(nil), session.IDHash...), session.UserID, timestamp, nullableTime(session.ExpiresAt), timestamp)
@@ -165,24 +229,6 @@ func (s *Store) GetSession(ctx context.Context, idHash []byte) (Session, error) 
 	return session, nil
 }
 
-// TouchSession advances last_seen_at. A missing session (pruned, expired, or
-// deleted) reports ErrNotFound so callers treat the presented ID as invalid.
-func (s *Store) TouchSession(ctx context.Context, idHash []byte) error {
-	_, timestamp := nowText()
-	result, err := s.db.ExecContext(ctx, `UPDATE sessions SET last_seen_at = ? WHERE id_hash = ?`, timestamp, idHash)
-	if err != nil {
-		return fmt.Errorf("touch session: %w", err)
-	}
-	affected, err := result.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("check session update: %w", err)
-	}
-	if affected == 0 {
-		return ErrNotFound
-	}
-	return nil
-}
-
 // DeleteSession removes one Session by its ID hash, for logout.
 func (s *Store) DeleteSession(ctx context.Context, idHash []byte) error {
 	result, err := s.db.ExecContext(ctx, `DELETE FROM sessions WHERE id_hash = ?`, idHash)
@@ -199,20 +245,12 @@ func (s *Store) DeleteSession(ctx context.Context, idHash []byte) error {
 	return nil
 }
 
-// DeleteOtherUserSessions revokes every Session of a User except the supplied one,
-// as required when a password change must log out other browsers.
-func (s *Store) DeleteOtherUserSessions(ctx context.Context, userID string, keepIDHash []byte) error {
-	if _, err := s.db.ExecContext(ctx, `DELETE FROM sessions WHERE user_id = ? AND id_hash <> ?`, userID, keepIDHash); err != nil {
-		return fmt.Errorf("delete other sessions for user: %w", err)
-	}
-	return nil
-}
-
 // DeleteAllUserSessions revokes every Session of a User with no exception, as
 // required when an administrator resets a password: the affected user must sign
-// in again everywhere with the reset password. (DeleteOtherUserSessions cannot
-// express this — a nil keep-hash would compare against SQL NULL and match
-// nothing.)
+// in again everywhere with the reset password. (The self-service password
+// change uses ChangeUserPassword instead, which keeps the acting session; a
+// plain "delete others" variant would need a non-NULL keep-hash sentinel and
+// was removed as dead code.)
 func (s *Store) DeleteAllUserSessions(ctx context.Context, userID string) error {
 	if _, err := s.db.ExecContext(ctx, `DELETE FROM sessions WHERE user_id = ?`, userID); err != nil {
 		return fmt.Errorf("delete all sessions for user: %w", err)

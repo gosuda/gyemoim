@@ -10,12 +10,18 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gosuda/gyemoim/internal/config"
 )
 
 const (
 	sessionLifetime = 24 * time.Hour
+
+	// maxLoginPasswordBytes bounds the password bytes that ever reach argon2id
+	// verification or hashing. It is a sanity bound against absurd bodies (the
+	// request body limit is 1 MiB), not a password policy (decision 1).
+	maxLoginPasswordBytes = 1024
 )
 
 // writeInvalidCredentials answers every failed login and current-password check
@@ -47,6 +53,16 @@ func (api *managementAPI) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	username := strings.TrimSpace(input.Username)
+	// Sanity bounds, not policy (decision 1): over-long usernames and passwords
+	// get the same generic 401 as any other failure, so nothing is leaked and no
+	// expensive work runs. The username cap matches the one enforced at creation
+	// (maxUsernameLength), keeping the backoff map and the stderr failure log
+	// free of attacker-sized entries; every real username fits. The password cap
+	// keeps huge inputs from reaching argon2id at all.
+	if utf8.RuneCountInString(username) > maxUsernameLength || len(input.Password) > maxLoginPasswordBytes {
+		writeInvalidCredentials(w)
+		return
+	}
 	if username == "" || input.Password == "" {
 		writeInvalidCredentials(w)
 		return
@@ -146,11 +162,10 @@ func (api *managementAPI) changePassword(w http.ResponseWriter, r *http.Request,
 		writeManagementFailure(w, err)
 		return
 	}
-	if err := api.store.UpdateUserPassword(r.Context(), user.ID, hash, false); err != nil {
-		writeManagementFailure(w, err)
-		return
-	}
-	if err := api.store.DeleteOtherUserSessions(r.Context(), user.ID, session.IDHash); err != nil {
+	// One transaction: the password change and the revocation of every other
+	// session succeed or fail together, so a canceled request cannot leave the
+	// password changed while other sessions survive.
+	if err := api.store.ChangeUserPassword(r.Context(), user.ID, hash, false, session.IDHash); err != nil {
 		writeManagementFailure(w, err)
 		return
 	}

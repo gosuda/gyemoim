@@ -230,6 +230,10 @@ func (api *managementAPI) startProviderConnect(w http.ResponseWriter, r *http.Re
 		writeManagementError(w, http.StatusBadRequest, "This provider cannot use Sign in with ChatGPT.", "connect_unavailable")
 		return
 	}
+	if errors.Is(err, connect.ErrEnrollmentUnavailable) {
+		writeManagementError(w, http.StatusServiceUnavailable, "Too many pending enrollment codes; try again shortly.", "service_unavailable")
+		return
+	}
 	if err != nil {
 		writeManagementFailure(w, err)
 		return

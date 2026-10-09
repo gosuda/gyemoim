@@ -5,6 +5,7 @@
 package httpapi
 
 import (
+	"errors"
 	"net/http"
 	"strings"
 	"unicode"
@@ -66,7 +67,11 @@ func (api *managementAPI) users(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// user deletes a management user; their sessions cascade away with them.
+// user deletes a management user; their sessions cascade away with them. The
+// last-user guard runs inside the store's delete transaction (DeleteUserGuarded),
+// so no check-then-act race can let two concurrent deletes empty the users table;
+// the former ListUsers pre-check is dropped as redundant — the store maps the
+// refused delete to the same 400.
 func (api *managementAPI) user(w http.ResponseWriter, r *http.Request, id string, actor config.User) {
 	if r.Method != http.MethodDelete {
 		methodNotAllowed(w, http.MethodDelete)
@@ -76,16 +81,11 @@ func (api *managementAPI) user(w http.ResponseWriter, r *http.Request, id string
 		writeManagementError(w, http.StatusBadRequest, "you cannot delete the account you are signed in with", "invalid_request")
 		return
 	}
-	users, err := api.store.ListUsers(r.Context())
-	if err != nil {
-		writeManagementFailure(w, err)
-		return
-	}
-	if len(users) <= 1 {
-		writeManagementError(w, http.StatusBadRequest, "the last remaining user cannot be deleted", "invalid_request")
-		return
-	}
-	if err := api.store.DeleteUser(r.Context(), id); err != nil {
+	if err := api.store.DeleteUserGuarded(r.Context(), id); err != nil {
+		if errors.Is(err, config.ErrLastUser) {
+			writeManagementError(w, http.StatusBadRequest, "the last remaining user cannot be deleted", "invalid_request")
+			return
+		}
 		writeManagementFailure(w, err)
 		return
 	}

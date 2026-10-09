@@ -12,10 +12,10 @@ import (
 )
 
 const (
-	// enrollmentTTL bounds both unclaimed and claimed codes. Claimed codes get
-	// a fresh TTL at claim time, which is also when the underlying OAuth flow
-	// (its own 10-minute pending lifetime) starts, so a claimed code never
-	// expires before its flow does.
+	// enrollmentTTL bounds both unclaimed and claimed codes. The claimed
+	// code's fresh window starts at recordState time, when the underlying
+	// OAuth flow (its own 10-minute pending lifetime) actually exists, so a
+	// claimed code never expires before its flow does.
 	enrollmentTTL = 10 * time.Minute
 	// maxCodes bounds memory; expired entries are swept before the cap is
 	// enforced, matching the siwc pending-flow behavior.
@@ -27,8 +27,9 @@ const (
 
 type enrollmentRecord struct {
 	providerID string
-	claimed    bool
-	state      string // recorded at claim time; empty until the flow starts
+	reserved   bool   // a claim start is in flight; the code is unusable meanwhile
+	claimed    bool   // the start succeeded and the flow state is linked
+	state      string // empty until the flow starts
 	expiresAt  time.Time
 }
 
@@ -45,8 +46,9 @@ func newCodeStore() *codeStore {
 }
 
 // issue creates a fresh code for the provider and invalidates any earlier
-// unclaimed code for the same provider. Claimed codes stay until their flow
-// completes or they expire.
+// unclaimed, unreserved code for the same provider. Claimed codes stay until
+// their flow completes or they expire. When the registry is full the call has
+// no side effects: nothing is invalidated and no code is issued.
 func (c *codeStore) issue(providerID string, now time.Time) (string, time.Time, error) {
 	value := make([]byte, codeBytes)
 	if _, err := rand.Read(value); err != nil {
@@ -57,22 +59,24 @@ func (c *codeStore) issue(providerID string, now time.Time) (string, time.Time, 
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.sweepLocked(now)
+	if len(c.codes) >= maxCodes {
+		return "", time.Time{}, ErrEnrollmentUnavailable
+	}
 	for existing, record := range c.codes {
-		if record.providerID == providerID && !record.claimed {
+		if record.providerID == providerID && !record.claimed && !record.reserved {
 			delete(c.codes, existing)
 		}
-	}
-	if len(c.codes) >= maxCodes {
-		return "", time.Time{}, errEnrollmentUnavailable
 	}
 	c.codes[code] = enrollmentRecord{providerID: providerID, expiresAt: expiresAt}
 	return code, expiresAt, nil
 }
 
-// claim consumes a live unclaimed code (constant-time compare so response
-// timing cannot probe codes) and returns its provider ID. The record stays
-// behind, marked claimed, so the completion step can find the flow's state.
-func (c *codeStore) claim(code string, now time.Time) (string, bool) {
+// reserve atomically marks a live unclaimed code as reserved for an in-flight
+// start and returns its provider ID. A reserved code cannot be claimed again
+// or completed, and it is not swept, because its claim goroutine always ends
+// by either recording the started flow (recordState) or releasing it
+// (release). Until then it keeps its original expiry.
+func (c *codeStore) reserve(code string, now time.Time) (string, bool) {
 	if code == "" || len(code) > maxCodeLen {
 		return "", false
 	}
@@ -86,19 +90,42 @@ func (c *codeStore) claim(code string, now time.Time) (string, bool) {
 		if subtle.ConstantTimeCompare([]byte(existing), []byte(code)) != 1 {
 			continue
 		}
-		if record.claimed || !now.Before(record.expiresAt) {
+		if record.reserved || record.claimed || !now.Before(record.expiresAt) {
 			return "", false
 		}
-		// Reset the TTL at claim time: this is when the OAuth flow starts.
-		record.claimed = true
-		record.expiresAt = now.Add(enrollmentTTL)
+		record.reserved = true
 		c.codes[existing] = record
 		return record.providerID, true
 	}
 	return "", false
 }
 
-// recordState links a claimed code to the OAuth flow state it started.
+// release undoes a reservation after a failed start so the same code can be
+// claimed again. It is a no-op for a code that was already recorded claimed,
+// and a released code that is never reclaimed still expires by its original
+// TTL.
+func (c *codeStore) release(code string) {
+	if code == "" || len(code) > maxCodeLen {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for existing, record := range c.codes {
+		if subtle.ConstantTimeCompare([]byte(existing), []byte(code)) != 1 {
+			continue
+		}
+		if record.reserved && !record.claimed {
+			record.reserved = false
+			c.codes[existing] = record
+		}
+		return
+	}
+}
+
+// recordState atomically marks a reserved code claimed and links it to the
+// OAuth flow state its start produced. The claimed code's fresh completion
+// window starts here — when the flow actually exists — not at reserve time,
+// so the code cannot expire while its flow is still live.
 func (c *codeStore) recordState(code, state string, now time.Time) bool {
 	if code == "" || len(code) > maxCodeLen || state == "" {
 		return false
@@ -109,10 +136,13 @@ func (c *codeStore) recordState(code, state string, now time.Time) bool {
 		if subtle.ConstantTimeCompare([]byte(existing), []byte(code)) != 1 {
 			continue
 		}
-		if !record.claimed || !now.Before(record.expiresAt) {
+		if !record.reserved || record.claimed {
 			return false
 		}
+		record.claimed = true
+		record.reserved = false
 		record.state = state
+		record.expiresAt = now.Add(enrollmentTTL)
 		c.codes[existing] = record
 		return true
 	}
@@ -157,8 +187,11 @@ func (c *codeStore) finish(code string) {
 
 func (c *codeStore) sweepLocked(now time.Time) {
 	for code, record := range c.codes {
-		if !now.Before(record.expiresAt) {
-			delete(c.codes, code)
+		// Reserved codes belong to an in-flight claim; their goroutine always
+		// records or releases them, so they are never swept out from under it.
+		if record.reserved || now.Before(record.expiresAt) {
+			continue
 		}
+		delete(c.codes, code)
 	}
 }

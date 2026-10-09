@@ -33,16 +33,22 @@
     const message = document.getElementById("login-message");
     loginForm.addEventListener("submit", async (event) => {
       event.preventDefault();
+      const submit = loginForm.querySelector('[type="submit"]');
+      submit.disabled = true;
       showMessage(message, "Signing in…");
-      const result = await postJSON("/api/auth/login", {
-        username: document.getElementById("login-username").value,
-        password: document.getElementById("login-password").value,
-      });
-      if (result.ok) {
-        window.location.assign("/");
-        return;
+      try {
+        const result = await postJSON("/api/auth/login", {
+          username: document.getElementById("login-username").value,
+          password: document.getElementById("login-password").value,
+        });
+        if (result.ok) {
+          window.location.assign("/");
+          return;
+        }
+        showMessage(message, result.data?.error?.message || `Sign-in failed (${result.status})`);
+      } finally {
+        submit.disabled = false;
       }
-      showMessage(message, result.data?.error?.message || `Sign-in failed (${result.status})`);
     });
   }
 

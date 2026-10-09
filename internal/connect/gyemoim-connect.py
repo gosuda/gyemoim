@@ -131,6 +131,7 @@ class Capture:
     def __init__(self):
         self.event = threading.Event()
         self.params = {}
+        self.raw_query = ""
 
 
 def make_handler(capture):
@@ -145,6 +146,9 @@ def make_handler(capture):
                 return
             query = urllib.parse.parse_qs(parsed.query)
             capture.params = {key: values[0] for key, values in query.items() if values}
+            # The raw query is forwarded verbatim so the server sees exactly
+            # what the provider sent, including repeated or blank parameters.
+            capture.raw_query = parsed.query
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(CLOSE_PAGE)))
@@ -182,6 +186,10 @@ def main(argv=None):
     if not code or len(code) > 128:
         print("Error: an enrollment code from the Gyemoim web UI is required.", file=sys.stderr)
         return 1
+    parsed_url = urllib.parse.urlsplit(server_url)
+    if parsed_url.scheme == "http" and parsed_url.hostname not in ("localhost", "127.0.0.1", "::1"):
+        print("Warning: %s uses plain HTTP, so the enrollment code and the forwarded "
+              "authorization code will travel unencrypted." % server_url, file=sys.stderr)
 
     capture = Capture()
     server = HTTPServer(("127.0.0.1", 0), make_handler(capture))
@@ -219,10 +227,11 @@ def main(argv=None):
 
         params = capture.params
         if "error" in params:
-            outcome = post_json(
-                server_url + "/connect/complete",
-                {"code": code, "state": params.get("state", ""), "error": params["error"]},
-            )
+            payload = {
+                "code": code,
+                "state": params.get("state", ""),
+                "error": params["error"],
+            }
         else:
             payload = {
                 "code": code,
@@ -231,7 +240,9 @@ def main(argv=None):
             }
             if "client_id" in params:
                 payload["clientID"] = params["client_id"]
-            outcome = post_json(server_url + "/connect/complete", payload)
+        if capture.raw_query:
+            payload["query"] = capture.raw_query
+        outcome = post_json(server_url + "/connect/complete", payload)
 
         status = outcome.get("status") if isinstance(outcome, dict) else None
         exit_code, message = OUTCOMES.get(

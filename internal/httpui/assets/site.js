@@ -11,6 +11,7 @@
     currentUserID: "",
     editingModel: null,
     catalogRequest: 0,
+    usersRequest: 0,
     sensitiveCleanup: new Set(),
     pendingRequestID: "",
     requestCursors: [""],
@@ -72,6 +73,12 @@
       if (data?.error?.code === "password_change_required") {
         window.location.assign("/change-password");
         throw new Error("A password change is required before using the management interface.");
+      }
+      // An expired 24-hour management session sends the stale tab back to the
+      // sign-in page; the path guard keeps a redirect loop impossible.
+      if (data?.error?.code === "unauthenticated" && window.location.pathname !== "/login") {
+        window.location.assign("/login");
+        throw new Error("Your management session has expired. Sign in again.");
       }
       const message = data?.error?.message || `Request failed (${response.status})`;
       throw new Error(message);
@@ -240,23 +247,49 @@
 
   async function loadProviders() {
     const list = byId("provider-list");
+    // Snapshot the open enrollment panels before the list DOM is replaced so
+    // they can be re-attached after the refresh.
+    const open = collectConnectPanels(list);
     list.replaceChildren(element("p", "muted", "Loading providers…"));
     try {
       state.providers = await api("/api/providers");
-      renderProviders();
+      renderProviders(open);
     } catch (error) {
       list.replaceChildren(element("p", "empty-state", `Could not load providers: ${error.message}`));
     }
   }
 
-  function renderProviders() {
+  // collectConnectPanels remembers each open enrollment panel's provider and
+  // remaining code lifetime so renderProviders can rebuild the panels on the
+  // fresh cards.
+  function collectConnectPanels(list) {
+    const open = new Map();
+    list.querySelectorAll(".connect-panel").forEach((panel) => {
+      const data = panel.connectData;
+      panel.connectStop?.();
+      if (data && data.expiresAt > Date.now()) open.set(data.providerID, data);
+    });
+    return open;
+  }
+
+  function renderProviders(open = new Map()) {
     const list = byId("provider-list");
     list.replaceChildren();
     if (state.providers.length === 0) {
       list.append(element("div", "empty-state", "No providers yet. Add one to prepare a Model route."));
       return;
     }
-    for (const provider of state.providers) list.append(renderProvider(provider));
+    for (const provider of state.providers) {
+      const card = renderProvider(provider);
+      const data = open.get(provider.id);
+      if (data) {
+        card.append(buildConnectPanel(provider, {
+          ...data.enrollment,
+          expiresInSeconds: Math.ceil((data.expiresAt - Date.now()) / 1000),
+        }));
+      }
+      list.append(card);
+    }
   }
 
   function providerStatusLabel(status) {
@@ -302,18 +335,23 @@
       window.clearInterval(ticker);
     };
     panel.connectStop = stop;
+    panel.connectData = { providerID: provider.id, enrollment, expiresAt: expiryAt };
 
-    const finishWithStatus = async (status) => {
+    // finishWithStatus swaps out only this provider's card so that other
+    // open enrollment panels keep their codes and polls; a full re-render
+    // here would silently destroy them.
+    const finishWithStatus = (updated) => {
+      const card = panel.closest(".resource-card");
       stop();
       panel.remove();
-      await loadProviders();
+      if (card) card.replaceWith(renderProvider(updated));
       const notice = byId("provider-oauth-message");
       notice.hidden = false;
-      if (status === "connected") {
+      if (updated.status === "connected") {
         showMessage(notice, "OpenAI account connected. Direct inference access is ready.", "success");
       } else {
-        const label = providerStatusLabel(status);
-        const description = providerStatusDescription(status);
+        const label = providerStatusLabel(updated.status);
+        const description = providerStatusDescription(updated.status);
         showMessage(notice, `Connection attempt finished: ${description.startsWith(label) ? description : `${label}. ${description}`}`, "error");
       }
     };
@@ -328,9 +366,10 @@
       try {
         const providers = await api("/api/providers");
         if (stopped || !panel.isConnected || state.page !== "providers") return;
+        if (Array.isArray(providers)) state.providers = providers;
         const current = Array.isArray(providers) ? providers.find((item) => item.id === provider.id) : null;
         if (current && current.status !== provider.status) {
-          await finishWithStatus(current.status);
+          finishWithStatus(current);
           return;
         }
       } catch { /* Transient errors are retried on the next tick. */ }
@@ -342,13 +381,17 @@
     const heading = element("h5", "", "Connect with the enrollment script");
     const instructions = element("p", "muted", "Run the script on the machine with your web browser — where you sign in to ChatGPT. The script opens the browser; after signing in, return here and this card updates automatically.");
     const codeRow = element("div", "connect-code-row");
-    const countdown = element("span", "muted connect-expiry", "");
+    const countdown = element("span", "muted", "");
     codeRow.append(element("strong", "connect-label", "Enrollment code (single use)"), countdown);
     const code = element("code", "connect-code", enrollment.code);
     code.tabIndex = 0;
 
-    const command = String(enrollment.command || "").replace("SERVER_URL", window.location.origin);
-    const commandLine = element("pre", "connect-command", command);
+    const rawCommand = String(enrollment.command || "");
+    const command = rawCommand.includes("SERVER_URL")
+      ? rawCommand.replaceAll("SERVER_URL", window.location.origin)
+      : "";
+    const commandLine = element("pre", "connect-command inline-error", command
+      || "The enrollment command is unavailable: the script template is missing its SERVER_URL placeholder. Download the script and follow its instructions.");
     const actions = element("div", "card-actions");
     const download = element("a", "button primary small", "Download script");
     download.href = enrollment.scriptUrl || "/api/connect/script";
@@ -357,6 +400,10 @@
     actions.append(
       download,
       button("Copy command", "quiet small", async () => {
+        if (!command) {
+          copyMessage.textContent = "No enrollment command is available to copy.";
+          return;
+        }
         try {
           await navigator.clipboard.writeText(command);
           copyMessage.textContent = "Command copied.";
@@ -616,13 +663,16 @@
 
   async function loadUsers() {
     const list = byId("user-list");
+    const requestId = ++state.usersRequest;
     list.replaceChildren(element("p", "muted", "Loading users…"));
     try {
       const [users, me] = await Promise.all([api("/api/users"), api("/api/auth/me")]);
+      if (requestId !== state.usersRequest) return;
       state.users = users;
       state.currentUserID = me.id;
       renderUsers();
     } catch (error) {
+      if (requestId !== state.usersRequest) return;
       list.replaceChildren(element("p", "empty-state", `Could not load users: ${error.message}`));
     }
   }
@@ -645,38 +695,67 @@
     if (user.id === state.currentUserID) badges.append(element("span", "tag", "You"));
     titleBlock.append(badges);
     const controls = element("div", "card-actions");
+    let resetForm = null;
     if (user.id !== state.currentUserID) {
       controls.append(button(disabled ? "Enable" : "Disable", "quiet small", () => setUserEnabled(user, !disabled)));
-      controls.append(button("Reset password", "quiet small", () => resetUserPassword(user)));
+      resetForm = buildPasswordResetForm(user);
+      controls.append(button("Reset password", "quiet small", () => {
+        resetForm.hidden = !resetForm.hidden;
+        if (!resetForm.hidden) resetForm.querySelector("input").focus();
+      }));
       controls.append(button("Delete", "danger quiet small", () => deleteUser(user)));
     }
     header.append(titleBlock, controls);
     card.append(header);
     card.append(element("p", "resource-copy", `Created ${formatDate(user.createdAt)}`));
+    if (resetForm) card.append(resetForm);
     return card;
+  }
+
+  // buildPasswordResetForm renders the expandable inline password reset form
+  // for one user card. Setting a password signs the user out everywhere and
+  // forces a password change at their next sign-in.
+  function buildPasswordResetForm(user) {
+    const form = element("form", "inline-form");
+    form.hidden = true;
+    const input = element("input");
+    input.type = "password";
+    input.name = "newPassword";
+    input.autocomplete = "new-password";
+    input.required = true;
+    input.setAttribute("aria-label", `New password for ${user.username}`);
+    const save = element("button", "button primary small", "Set password");
+    save.type = "submit";
+    const cancel = button("Cancel", "quiet small", () => {
+      input.value = "";
+      showMessage(message);
+      form.hidden = true;
+    });
+    const message = element("p", "form-message");
+    message.setAttribute("aria-live", "polite");
+    form.append(input, save, cancel, message);
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      save.disabled = true;
+      showMessage(message);
+      try {
+        await api(`/api/users/${encodeURIComponent(user.id)}/password`, {
+          method: "POST", body: JSON.stringify({ newPassword: input.value }),
+        });
+        await loadUsers();
+      } catch (error) {
+        showMessage(message, error.message, "error");
+      } finally {
+        save.disabled = false;
+      }
+    });
+    return form;
   }
 
   async function setUserEnabled(user, disable) {
     try {
       await api(`/api/users/${encodeURIComponent(user.id)}/${disable ? "disable" : "enable"}`, {
         method: "POST", body: JSON.stringify({}),
-      });
-      await loadUsers();
-    } catch (error) {
-      window.alert(error.message);
-    }
-  }
-
-  async function resetUserPassword(user) {
-    const newPassword = window.prompt(`Set a new password for “${user.username}”. Their sessions are signed out and the password must be changed again at the next sign-in.`);
-    if (newPassword === null) return;
-    if (newPassword === "") {
-      window.alert("The new password must not be empty.");
-      return;
-    }
-    try {
-      await api(`/api/users/${encodeURIComponent(user.id)}/password`, {
-        method: "POST", body: JSON.stringify({ newPassword }),
       });
       await loadUsers();
     } catch (error) {

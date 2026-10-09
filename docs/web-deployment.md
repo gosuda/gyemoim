@@ -1,6 +1,6 @@
 # Web deployment plan
 
-Status: implemented (steps 1–7b, 2026-10-09); deployment notes below. This
+Status: implemented (all steps 1–8, 2026-10-09); deployment notes below. This
 document records the confirmed decisions for running Gyemoim as an always-on
 web service behind a reverse nginx proxy, reachable by remote agents from
 multiple locations. The decisions have been folded into `design.md` and
@@ -42,7 +42,7 @@ browsers / remote agents
 - TLS, HTTP→HTTPS redirect, and any network-level rate limiting stay in nginx.
   Required nginx settings for SSE: `proxy_buffering off`, `proxy_cache off`,
   `proxy_read_timeout 3600s` (reasoning models may stay silent for minutes) and
-  `proxy_set_header Host $host`. The application **ignores all forwarded
+  `proxy_set_header Host $http_host`. The application **ignores all forwarded
   headers** (see decision 9), so `X-Forwarded-For` / `X-Forwarded-Proto`
   configuration is optional and only useful for nginx's own logging.
 - The nginx→gyemoim hop is plain HTTP over the LAN. The firewall on the gyemoim
@@ -57,8 +57,11 @@ browsers / remote agents
    no length or composition policy — only emptiness is rejected (decided
    2026-10-09, superseding the original minimum-length-12 rule).
 2. **Sessions: 24 h absolute expiry, no sliding renewal.** Cookie
-   `gym_session` carries a 256-bit random ID; only its SHA-256 hash is stored
-   (same pattern as `local_keys`). Cookie flags: `HttpOnly`, `SameSite=Lax`
+   `__Host-gym_session` (the `__Host-` prefix makes browsers refuse the cookie
+   unless it is Secure, Path=/, and Domain-less, closing sibling-subdomain
+   cookie injection) carries a 256-bit random ID; only its SHA-256 hash is
+   stored (same pattern as `local_keys`). Cookie flags: `HttpOnly`,
+   `SameSite=Lax`
    (so the OAuth result landing survives the provider's top-level redirect),
    and `Secure` **always** (the UI is meant to be reached via the https nginx;
    browsers treat `http://localhost` as trustworthy so local use and curl-based
@@ -155,7 +158,9 @@ CREATE TABLE sessions (
 ```
 
 `PRAGMA user_version` migration follows the existing pattern; opening an older
-database must keep working.
+database must keep working. (The implementation deliberately deviates from this
+sketch by storing the timestamp columns as TEXT RFC3339Nano, following the v1
+convention — see the Step 2 note in the implementation log.)
 
 ## Implementation log
 
@@ -186,9 +191,9 @@ database must keep working.
   hash-agnostic. `POST /api/auth/login|logout|password` under the existing
   management guard (login CSRF comes from the token injected into served
   HTML); generic 401 for unknown user, wrong password, and disabled accounts.
-  Session cookie `gym_session` (256-bit base64url ID, only its SHA-256 hash
-  stored) with `HttpOnly; Secure; SameSite=Lax; Path=/`, 24 h absolute expiry,
-  re-issued per login. Session middleware gates every `/api/` path except
+  Session cookie `__Host-gym_session` (256-bit base64url ID, only its SHA-256
+  hash stored) with `HttpOnly; Secure; SameSite=Lax; Path=/`, 24 h absolute
+  expiry, re-issued per login. Session middleware gates every `/api/` path except
   login/logout and every UI page except `/login` + `/assets/`; a
   `must_change_password` user is restricted to the password change (403
   `password_change_required`) and gets page redirects to `/change-password`.
@@ -222,20 +227,38 @@ database must keep working.
   not logged. Verified: first wrong attempt costs argon2id (~0.16 s), later
   rejects ~0.4 ms, correct password during a window rejected cheaply and
   accepted after it, different usernames independent, restart resets state.
-- **Step 6 — done (2026-10-09).** User management API (`GET/POST /api/users`,
-  `DELETE /api/users/{id}`, `POST .../disable|enable`, `POST
-  .../password` with full session revocation, `GET /api/auth/me` reachable
-  through the forced-change gate) plus the Users panel (list, add form,
-  disable/enable, reset password, delete with confirm), a header logout
-  button, and the forced-change redirect inside the UI's `api()` helper.
-  Self-rules: no self-disable/self-delete; the last remaining user cannot be
-  deleted. pi-config no longer carries any server-derived base URL — the UI
-  injects `baseUrl` from `window.location.origin + "/v1"` (decision 4). New
-  users start with `must_change_password`. Verified: vet/build/`node --check`
-  clean; full curl pass (201/409/400 paths, disable kills sessions
-  immediately, reset forces change, self/last-user rules, unauthenticated
-  401); real-browser pass (login, Users panel add/delete, logout, redirect
-  after logout).
+- **Step 6 — done (2026-10-09).** User management API under the session guard
+  (every signed-in user has full management rights): `GET /api/users`
+  (hash-free), `POST /api/users` (username: trimmed, 1–64 Unicode characters,
+  no whitespace inside; created with `must_change_password`; duplicate → 409),
+  `POST /api/users/{id}/disable|enable`, `DELETE /api/users/{id}` (sessions
+  cascade), and `POST /api/users/{id}/password` (admin reset: sets
+  `must_change_password` and revokes ALL of that user's sessions via the new
+  `DeleteAllUserSessions` store method — `DeleteOtherUserSessions` cannot
+  express this because a nil keep-hash would compare against SQL NULL and
+  delete nothing). A user cannot disable or delete themselves and the last
+  remaining user cannot be deleted (400s). New `GET /api/auth/me` returns the
+  signed-in user and is exempt from the forced-change gate so the
+  change-password page can display the username. Main UI: Users panel (list,
+  add form, disable/enable, prompt-based password reset, confirm-based delete;
+  self-actions hidden), header Log out button, and the `api()` helper
+  redirects to `/change-password` whenever a response carries
+  `password_change_required`. Pi config (decision 4): the server no longer
+  derives any base URL — the `baseUrl` field is gone from the endpoint's JSON
+  and the UI injects `window.location.origin + "/v1"` into the provider entry
+  before copy/download. Verified: vet/build/`node --check` clean; full curl
+  pass — bootstrap → login → forced change clears gate; create bob (201),
+  duplicate 409, short password 400 (tested under the original
+  minimum-length-12 rule, which a separate later commit superseded with the
+  emptiness-only policy — see decision 1), whitespace/empty username 400; bob
+  forced-change flow, disable kills bob's live session immediately, disabled
+  login → generic 401, enable restores login; self-disable/self-delete 400;
+  second-to-last delete works, last-remaining delete 400; admin reset of bob's
+  password revokes bob's sessions and forces a change; pi-config JSON contains
+  no 127.0.0.1 or port and the UI-built fragment carries the browser origin;
+  logout works; forged Origin 403; missing CSRF 403; unauthenticated
+  `/api/users` 401; real-browser pass (login, Users panel add/delete, logout,
+  redirect after logout).
 - **Step 7 — done (2026-10-09).** Remote enrollment flow (decision 7):
   single-use enrollment codes in `internal/connect` (128-bit, ~10 min TTL,
   consumed at claim, later start invalidates earlier unclaimed code);
@@ -268,34 +291,30 @@ database must keep working.
   feedback channel. Verified: vet/build/`node --check` clean; real-browser
   pass (panel render, countdown, origin substitution, close) plus the
   implementer's end-to-end enrollment dry-run and forced-status change test.
-- **Step 6 — done (2026-10-09).** User management API under the session guard
-  (every signed-in user has full rights): `GET /api/users` (hash-free),
-  `POST /api/users` (username: trimmed, 1–64 Unicode characters, no whitespace
-  inside; password ≥ 12 chars; created with `must_change_password`; duplicate →
-  409), `POST /api/users/{id}/disable|enable`, `DELETE /api/users/{id}`
-  (sessions cascade), and `POST /api/users/{id}/password` (admin reset: sets
-  `must_change_password` and revokes ALL of that user's sessions via the new
-  `DeleteAllUserSessions` store method — `DeleteOtherUserSessions` cannot
-  express this because a nil keep-hash would compare against SQL NULL and
-  delete nothing). A user cannot disable or delete themselves and the last
-  remaining user cannot be deleted (400s). New `GET /api/auth/me` returns the
-  signed-in user and is exempt from the forced-change gate so the
-  change-password page can display the username. Main UI: Users panel
-  (list, add form, disable/enable, prompt-based password reset, confirm-based
-  delete; self-actions hidden), header Log out button, and the `api()` helper
-  redirects to `/change-password` whenever a response carries
-  `password_change_required`. Pi config (decision 4): the server no longer
-  derives any base URL — the `baseUrl` field is gone from the endpoint's JSON
-  and the UI injects `window.location.origin + "/v1"` into the provider entry
-  before copy/download. Verified: vet/build clean; full curl pass — bootstrap →
-  login → forced change clears gate; create bob (201), duplicate 409, short
-  password 400, whitespace/empty username 400; bob forced-change flow, disable
-  kills bob's live session immediately, disabled login → generic 401, enable
-  restores login; self-disable/self-delete 400; second-to-last delete works,
-  last-remaining delete 400; admin reset of bob's password revokes bob's
-  sessions and forces a change; pi-config JSON contains no 127.0.0.1 or port
-  and the UI-built fragment carries the browser origin; logout works; forged
-  Origin 403; missing CSRF 403; unauthenticated `/api/users` 401.
+- **Review-fix batch — done (2026-10-09).** Five parallel review tracks
+  (auth/session security, OAuth/connect flow, store/concurrency, UI, wiring/
+  invariants) over `8026e16..f554266` confirmed the refactor's behavioral
+  equivalence, the migration chain, lock ordering, and the capability model,
+  and produced findings that are all fixed here: login username/password
+  length sanity caps (generic 401, no argon2 work — closes the backoff-map
+  memory/log amplification); atomic `ChangeUserPassword` (hash update +
+  other-session revocation in one transaction); conditional last-user delete
+  (`DeleteUserGuarded` + `ErrLastUser`, closing the check-then-act race);
+  `__Host-gym_session` cookie prefix (one-time session invalidation on
+  rollout); dead `TouchSession` and `DeleteOtherUserSessions` removed;
+  enrollment claim redesigned to reserve → start → confirm/release so a busy
+  provider no longer burns a valid code (TTL now resets when the flow actually
+  starts; capacity check ordered before invalidation; exhaustion surfaces as
+  503); the connect script forwards the provider's raw query string and warns
+  on plain-HTTP server URLs; the UI keeps concurrent enrollment panels alive
+  across card updates and manual refresh (per-card replacement instead of a
+  full re-render), `loadUsers` gained a request-ordering guard, expired
+  sessions redirect to `/login`, the reset-password prompt became a masked
+  inline form, login double-submit is disabled in flight, autofocus added;
+  `docs/oauth.md` callback paragraph rewritten for the removed Host guard and
+  the enrollment entry point; nginx recipe switched to `proxy_set_header Host
+  $http_host` so request-relative Origin checks work on non-443 ports; the
+  stray committed `__pycache__` bytecode removed and ignored.
 
 ## Work breakdown
 
@@ -416,7 +435,11 @@ server {
         proxy_buffering off;
         proxy_cache off;
         proxy_read_timeout 3600s;
-        proxy_set_header Host $host;
+        # $http_host preserves the host:port the browser used; the app's
+        # request-relative Origin checks compare the Origin's port against the
+        # request Host's port, so $host (which strips the port) would 403 every
+        # mutation on any non-443 port.
+        proxy_set_header Host $http_host;
         # The app ignores X-Forwarded-* entirely (its checks are
         # request-relative); set them only for nginx's own logging.
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;

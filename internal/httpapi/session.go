@@ -16,7 +16,11 @@ import (
 	"github.com/gosuda/gyemoim/internal/config"
 )
 
-const sessionCookieName = "gym_session"
+// sessionCookieName uses the __Host- prefix: browsers only accept such cookies
+// when they are Secure, Path=/, and Domain-less, closing sibling-subdomain
+// cookie injection. Cookies set under the previous "gym_session" name simply
+// stop being sent, so sessions invalidate once at rollout — accepted.
+const sessionCookieName = "__Host-gym_session"
 
 // newSessionID returns a fresh 256-bit session ID as base64url (43 characters).
 // Only its SHA-256 hash is ever stored; the plaintext ID lives in the cookie.
