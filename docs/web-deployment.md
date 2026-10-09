@@ -1,21 +1,19 @@
-# Web deployment plan
+# Web deployment
 
-Status: implemented (all steps 1–8, 2026-10-09); deployment notes below. This
-document records the confirmed decisions for running Gyemoim as an always-on
-web service behind a reverse nginx proxy, reachable by remote agents from
-multiple locations. The decisions have been folded into `design.md` and
-`oauth.md`.
+This document describes running Gyemoim as an always-on web service behind a
+reverse nginx proxy, reachable by remote agents from multiple locations. For
+local-only use, the defaults (loopback WebUI, no ceremony) apply and none of
+this is required.
 
-## Confirmed constraints
+## Constraints
 
 - **Sign in with ChatGPT accepts only loopback redirect URIs.** The dynamic
   registration flow (`client_id=dynamic_agent_client`) rejects any non-loopback
-  `redirect_uri`. Verified live on 2026-10-08: an authorization request with
-  `redirect_uri=http://<LAN-IP>:<port>/auth/callback` fails with
-  `invalid_authorize_request` / `param: "redirect_uri"`. The documentation
-  confirms: the scheme, host, and path (`/auth/callback`) are fixed; only the
-  port may vary; `localhost` must not be substituted. Static client IDs with
-  custom redirect URIs are limited to commercial partners (waitlist).
+  `redirect_uri` with `invalid_authorize_request` / `param: "redirect_uri"`.
+  The documentation confirms: the scheme, host, and path (`/auth/callback`)
+  are fixed; only the port may vary; `localhost` must not be substituted.
+  Static client IDs with custom redirect URIs are limited to commercial
+  partners (waitlist).
 - **The official procedure for headless/remote hosts is credential transfer**
   (`Self-hosted VMs`, developers.openai.com/siwc): complete OAuth on a machine
   with a browser, transfer the credential record to the server over a secure
@@ -35,63 +33,62 @@ browsers / remote agents
    gyemoim (--listen :9092, firewall restricted to the nginx host)
         ├─ /login, /assets/*   session auth not required
         ├─ / , /api/*          session required (management UI + API)
-        ├─ /auth/callback      no session (top-level provider redirect, unchanged)
-        └─ /v1/*               Bearer only (service accounts, unchanged)
+        ├─ /auth/callback      no session (top-level provider redirect)
+        └─ /v1/*               Bearer only (service accounts)
 ```
 
 - TLS, HTTP→HTTPS redirect, and any network-level rate limiting stay in nginx.
   Required nginx settings for SSE: `proxy_buffering off`, `proxy_cache off`,
   `proxy_read_timeout 3600s` (reasoning models may stay silent for minutes) and
   `proxy_set_header Host $http_host`. The application **ignores all forwarded
-  headers** (see decision 9), so `X-Forwarded-For` / `X-Forwarded-Proto`
-  configuration is optional and only useful for nginx's own logging.
+  headers**, so `X-Forwarded-For` / `X-Forwarded-Proto` configuration is
+  optional and only useful for nginx's own logging.
 - The nginx→gyemoim hop is plain HTTP over the LAN. The firewall on the gyemoim
   host must allow :9092 only from the nginx host; any further hardening of this
-  hop is out of scope for now.
+  hop is out of scope.
 
-## Decisions
+## Behavior
 
 1. **Multi-user management login.** All logged-in users have full management
-   rights (personal-tool scope; a future `is_admin` column can refine this).
-   Passwords hashed with argon2id (pure Go, respects the CGO constraint);
-   no length or composition policy — only emptiness is rejected (decided
-   2026-10-09, superseding the original minimum-length-12 rule).
-2. **Sessions: 24 h absolute expiry, no sliding renewal.** Cookie
-   `gym_session` (plain name, no `__Host-` prefix and no `Secure` flag —
-   owner decision 2026-10-09: plain-HTTP LAN access is the primary usage
-   mode, and a `__Host-`/`Secure` cookie would be dropped by browsers on
-   plain HTTP) carries a 256-bit random ID; only its SHA-256 hash is
-   stored (same pattern as `local_keys`). Cookie flags: `HttpOnly`,
-   `SameSite=Lax`, `Path=/`
-   (`SameSite=Lax` keeps baseline cross-site POST protection while the
-   OAuth result landing survives the provider's top-level redirect). The
-   session ID is re-issued at login (fixation defense). Changing a
-   password revokes all of that user's other sessions. Expired sessions are
-   pruned opportunistically.
-3. **Bootstrap.** On first start with an empty `users` table, create user
-   `admin` with a generated random password printed once to stderr (journald
-   collects it) and `must_change_password` set; the UI forces a password change
-   before any other screen. No web-based setup page (race on a public host).
+   rights (personal-tool scope). Passwords are hashed with argon2id (pure Go,
+   respects the CGO constraint); there is no length or composition policy —
+   only emptiness is rejected.
+2. **Sessions: 24 h absolute expiry, no sliding renewal.** The cookie is
+   `gym_session` (plain name, no `__Host-` prefix, no `Secure` flag —
+   plain-HTTP LAN access is the primary usage mode, and a `__Host-`/`Secure`
+   cookie would be dropped by browsers on plain HTTP) and carries a 256-bit
+   random ID; only its SHA-256 hash is stored (same pattern as `local_keys`).
+   Cookie flags: `HttpOnly`, `SameSite=Lax`, `Path=/` (`SameSite=Lax` keeps
+   baseline cross-site POST protection while the OAuth result landing survives
+   the provider's top-level redirect). The session ID is re-issued at login
+   (fixation defense). Changing a password revokes all of that user's other
+   sessions. Expired sessions are pruned opportunistically.
+3. **Bootstrap.** On first start with an empty `users` table, the server
+   creates user `admin` with a generated random password printed once to
+   stderr (journald collects it) and `must_change_password` set; the UI forces
+   a password change before any other screen. There is no web-based setup page
+   (race on a public host).
 4. **No public-URL flag, no forwarded-header trust.** URLs are derived from
    each request: the OAuth redirect URI stays the hardcoded loopback form, and
    the pi-config base URL is built **client-side** by the UI from
    `window.location.origin` (the browser knows the real scheme; the server
-   does not need to). The Host guard (421 on anything but `127.0.0.1:<port>`)
-   is removed entirely. Forwarded headers (`X-Forwarded-For`,
+   does not need to). Forwarded headers (`X-Forwarded-For`,
    `X-Forwarded-Proto`, ...) are **never trusted**: client identity is the TCP
    peer only (the nginx host for all proxied traffic), so nothing in the app
    (backoff, logs) can be spoofed via headers.
-5. **Browser-origin validation removed (supersedes the original
-   request-relative Origin + CSRF design).** Owner decision 2026-10-09: the
-   entire browser-facing web security layer — CSRF token, Origin and
-   Sec-Fetch-Site checks, and the security header set (CSP, CORP,
-   Referrer-Policy, X-Content-Type-Options, X-Frame-Options) — is gone;
-   plain-HTTP LAN access is the primary mode. Session authentication, login
-   backoff, and the bearer-authenticated `/v1` surface are unchanged.
-6. **Listener.** New `--listen <addr>` flag, default `127.0.0.1:9092`
-   (current behavior). `--port` remains as an alias for the port-only form.
-   The deployed server binds `:9092` (all interfaces) so the remote nginx can
-   reach it; the firewall restricts the port to the nginx host.
+5. **No browser-facing web security layer.** There is no CSRF token, no
+   Origin/Sec-Fetch-Site check, and no security header set (CSP, CORP,
+   Referrer-Policy, X-Content-Type-Options, X-Frame-Options); plain-HTTP LAN
+   access is the primary mode. Session authentication, login backoff, and the
+   bearer-authenticated `/v1` surface are unaffected. Residual risk: a
+   malicious page in the same browser can drive mutations; `SameSite=Lax` on
+   the session cookie retains baseline cross-site POST protection, and the
+   auth value is still required for every action.
+6. **Listener.** `--listen <addr>` sets the bind address, default
+   `127.0.0.1:9092`; `--port` remains an alias for the port-only form
+   (`--listen` wins when both are given). A deployed server binds `:9092`
+   (all interfaces) so the remote nginx can reach it; the firewall restricts
+   the port to the nginx host.
 7. **Credential transfer via a server-distributed Python script.** The admin
    logs into the server UI, presses *Connect OpenAI account*, and the UI issues
    a **single-use enrollment code** (random, ~10 min TTL, bound to the target
@@ -105,9 +102,8 @@ browsers / remote agents
       loopback HTTP server on `127.0.0.1:<ephemeral-port>`.
    2. The script asks the server to start the connect flow for the code's
       provider with `redirect_uri=http://127.0.0.1:<port>/auth/callback`
-      (only the port varies from the normal flow — the one change needed in
-      `siwc` is parameterizing the pending flow's redirect URI). The server
-      returns the authorization URL.
+      (only the port varies from the normal flow). The server returns the
+      authorization URL.
    3. The script opens the system browser (printing the URL as fallback).
       OpenAI redirects to `127.0.0.1:<port>/auth/callback?code=...&state=...`.
    4. The script forwards `code` + `state` to the server endpoint. The server
@@ -125,25 +121,25 @@ browsers / remote agents
      local redirect.
    - No manual file upload and no export endpoint; there is exactly one
      transfer path, protected by the one-time code.
-   - The existing in-server OAuth start/callback flow stays unchanged
-     (loopback) for users who run the UI locally.
+   - The in-server OAuth start/callback flow (loopback) stays available for
+     users who run the UI locally.
+   - A failed exchange leaves the provider `disconnected`; the connect panel
+     reports failure at code expiry, and the script's terminal output is the
+     immediate feedback channel.
 8. **Login brute-force defense.** In-memory per-username exponential backoff
-   after repeated failures (reset on process restart is acceptable); there is
-   no per-IP dimension because client IPs are not trusted (decision 9).
-   Constant-time comparisons; failures logged to stderr, not to history.
-9. **Forwarded headers are ignored everywhere.** No XFF parsing, no
-   X-Forwarded-Proto scheme detection, and no forwarded-header trust anywhere
-   in the app; the pi-config URL is built client-side. There are no
-   browser-origin checks to feed (owner decision 2026-10-09 removed them),
-   but untrusted headers still cannot influence backoff, logs, or identity.
-10. **Re-authentication state is surfaced.** When a provider's refresh fails
-    with `require_reauthentication` (or the connection otherwise lapses), the
-    provider card in the UI shows the state and a *Connect* action pointing at
-    the connect-script flow; the flow notes that usage attribution and remote
-    revocation for transferred sessions are upstream limitations, so a later
-    re-authorization repeats the local flow.
+   after repeated failures (1 s base doubled per consecutive failure, capped
+   at 15 min; reset on process restart is acceptable); there is no per-IP
+   dimension because client IPs are not trusted. Rejections inside a window
+   are cheap and do not extend it. Constant-time comparisons; failures are
+   logged to stderr, not to history.
+9. **Re-authentication state is surfaced.** When a provider's refresh fails
+   with `require_reauthentication` (or the connection otherwise lapses), the
+   provider card in the UI shows the state and a *Connect* action pointing at
+   the connect-script flow; the flow notes that usage attribution and remote
+   revocation for transferred sessions are upstream limitations, so a later
+   re-authorization repeats the local flow.
 
-## Schema migration (v1 → v2)
+## Database schema (v2)
 
 ```sql
 CREATE TABLE users (
@@ -157,198 +153,12 @@ CREATE TABLE sessions (
 );
 ```
 
-`PRAGMA user_version` migration follows the existing pattern; opening an older
-database must keep working. (The implementation deliberately deviates from this
-sketch by storing the timestamp columns as TEXT RFC3339Nano, following the v1
-convention — see the Step 2 note in the implementation log.)
-
-## Implementation log
-
-- **Step 1 — done (2026-10-09).** `--listen` flag added (`--listen` wins over
-  `--port`; port-only `--port` alias kept), Host guard and its plumbing removed,
-  Origin checks now compare host:port against the request's own Host
-  (scheme-agnostic, case-insensitive, portless matches only portless).
-  Listener switched `tcp4`→`tcp` for IPv6 `--listen` support. Verified:
-  `go vet` clean, build clean, default loopback behavior unchanged (200),
-  arbitrary Host accepted (421 gone), forged Origin 403, matching Origin passes
-  the guard, port mismatch 403, Origin-with-path 403, Sec-Fetch-Site kept,
-  missing CSRF 403, `--listen :9092` reachable via loopback and LAN IP.
-- **Step 2 — done (2026-10-09).** Schema v2 (`users`, `sessions` + index
-  `sessions_by_user`) behind a stepwise `migrate()` chain (v0 → v1+v2 in one
-  transaction; v1 → v2 in place). Timestamps follow the v1 TEXT RFC3339Nano
-  convention (deviation from the plan's INTEGER sketch, justified by
-  lexicographic expiry comparison); foreign keys were already enabled in the
-  DSN so `ON DELETE CASCADE` works as declared. Typed accessors in
-  `internal/config/users.go` (hash-bearing getters for login, hash-free list,
-  explicit `mustChange` flag on password update, delete-other-sessions,
-  expired-prune). Verified: vet/build clean; fresh DB lands at v2; a real v1 DB
-  (seeded provider/service-account/key/model/grant) migrates with every row
-  preserved value-by-value; accessors exercised via a throwaway `go run`
-  probe (duplicate username → ErrConflict, cascade delete, prune count).
-- **Step 3 — done (2026-10-09).** Argon2id hashing (PHC string, 16-byte salt,
-  32-byte key, m=64 MiB/t=3/p=1, constant-time verify, malformed stored hashes
-  are a failure not a panic) in `internal/config/password.go`; the store stays
-  hash-agnostic. `POST /api/auth/login|logout|password` under the existing
-  management guard (login CSRF comes from the token injected into served
-  HTML); generic 401 for unknown user, wrong password, and disabled accounts.
-  Session cookie `__Host-gym_session` (256-bit base64url ID, only its SHA-256
-  hash stored) with `HttpOnly; Secure; SameSite=Lax; Path=/`, 24 h absolute
-  expiry, re-issued per login. Session middleware gates every `/api/` path except
-  login/logout and every UI page except `/login` + `/assets/`; a
-  `must_change_password` user is restricted to the password change (403
-  `password_change_required`) and gets page redirects to `/change-password`.
-  Minimal server-rendered `/login` and `/change-password` pages with a small
-  fetch-based JS. `/v1/` and
-  `/auth/callback` untouched. Review hardenings: verification rejects stored
-  hash parameters outside safe bounds (threads ≤ 255, memory ≤ 1 GiB) instead
-  of trusting them, and every 401 path costs one argon2id verification
-  (unknown usernames verify against a fixed dummy hash, disabled accounts
-  verify before the disabled check) so login timing cannot enumerate users.
-  Verified: vet/build clean; full curl pass —
-  cookie flags, 43-char value, per-login re-issue, forced-change gate,
-  other-session revocation on password change, forged Origin/missing CSRF
-  still 403, `/v1/` and `/auth/callback` behavior unchanged.
-- **Step 4 — done (2026-10-09).** `EnsureBootstrapAdmin` in
-  `internal/config/bootstrap.go`: when the users table is empty, one `admin`
-  user is created inside a single transaction with a 128-bit base64url
-  generated password (22 chars) and `must_change_password`; main prints the
-  password to stderr exactly once and the plaintext is never persisted or
-  logged. Bootstrap deliberately repeats if all users are ever deleted
-  (documented). Verified: fresh start prints the banner once; login with the
-  printed password works, the step-3 gate blocks the API until the password is
-  changed, then clears; restart prints nothing; grep of the data directory
-  finds no plaintext.
-- **Step 5 — done (2026-10-09).** In-memory per-username exponential backoff
-  in `internal/httpapi/backoff.go`: 1 s base doubled per consecutive real
-  failure, capped at 15 min; successful login clears state. Requests rejected
-  inside a window are cheap and do NOT extend it (spam cannot lock an account
-  forever). Memory bounded by stale-entry sweep plus a 1024-entry cap.
-  Real failures log one stderr line each (decision 8); backoff rejects are
-  not logged. Verified: first wrong attempt costs argon2id (~0.16 s), later
-  rejects ~0.4 ms, correct password during a window rejected cheaply and
-  accepted after it, different usernames independent, restart resets state.
-- **Step 6 — done (2026-10-09).** User management API under the session guard
-  (every signed-in user has full management rights): `GET /api/users`
-  (hash-free), `POST /api/users` (username: trimmed, 1–64 Unicode characters,
-  no whitespace inside; created with `must_change_password`; duplicate → 409),
-  `POST /api/users/{id}/disable|enable`, `DELETE /api/users/{id}` (sessions
-  cascade), and `POST /api/users/{id}/password` (admin reset: sets
-  `must_change_password` and revokes ALL of that user's sessions via the new
-  `DeleteAllUserSessions` store method — `DeleteOtherUserSessions` cannot
-  express this because a nil keep-hash would compare against SQL NULL and
-  delete nothing). A user cannot disable or delete themselves and the last
-  remaining user cannot be deleted (400s). New `GET /api/auth/me` returns the
-  signed-in user and is exempt from the forced-change gate so the
-  change-password page can display the username. Main UI: Users panel (list,
-  add form, disable/enable, prompt-based password reset, confirm-based delete;
-  self-actions hidden), header Log out button, and the `api()` helper
-  redirects to `/change-password` whenever a response carries
-  `password_change_required`. Pi config (decision 4): the server no longer
-  derives any base URL — the `baseUrl` field is gone from the endpoint's JSON
-  and the UI injects `window.location.origin + "/v1"` into the provider entry
-  before copy/download. Verified: vet/build/`node --check` clean; full curl
-  pass — bootstrap → login → forced change clears gate; create bob (201),
-  duplicate 409, short password 400 (tested under the original
-  minimum-length-12 rule, which a separate later commit superseded with the
-  emptiness-only policy — see decision 1), whitespace/empty username 400; bob
-  forced-change flow, disable kills bob's live session immediately, disabled
-  login → generic 401, enable restores login; self-disable/self-delete 400;
-  second-to-last delete works, last-remaining delete 400; admin reset of bob's
-  password revokes bob's sessions and forces a change; pi-config JSON contains
-  no 127.0.0.1 or port and the UI-built fragment carries the browser origin;
-  logout works; forged Origin 403; missing CSRF 403; unauthenticated
-  `/api/users` 401; real-browser pass (login, Users panel add/delete, logout,
-  redirect after logout).
-- **Step 7 — done (2026-10-09).** Remote enrollment flow (decision 7):
-  single-use enrollment codes in `internal/connect` (128-bit, ~10 min TTL,
-  consumed at claim, later start invalidates earlier unclaimed code);
-  `siwc.StartWithCallbackPort` builds the loopback redirect URI with the
-  script's port and `siwc.CompleteConnectFlow` extracts the post-callback core
-  so `ServeCallback` (browser, byte-identical behavior) and the script-facing
-  completion share one path. `POST /connect/claim` and `/connect/complete` are
-  mounted outside the session/CSRF guards by design (the script is not a
-  browser; the single-use code + single-use OAuth state are the capability;
-  every failure answers one generic error). The stdlib-only Python script
-  `internal/connect/gyemoim-connect.py` is embedded and served session-gated
-  at `GET /api/connect/script`. Verified: vet/build/py_compile clean; curl
-  pass (code lifecycle, generic-failure indistinguishability, attachment
-  headers); end-to-end script dry-run — claim → authorize URL with the
-  script's ephemeral port → simulated provider redirect → server attempts the
-  real exchange → `failed` → clean exit 1, provider stays disconnected;
-  loopback `oauth/start` unchanged; `/v1/` bearer-only unchanged.
-- **Step 7b — done (2026-10-09).** Provider cards carry the enrollment UI:
-  an inline connect panel (single-use code with live countdown, script
-  download link, command line with `SERVER_URL` filled from
-  `window.location.origin`, copy button) plus 3 s status polling that closes
-  the panel on any status change or code expiry and stops when the panel is
-  removed or the page is left. Status labels/badges improved
-  (`require_reauthentication` and `plan_usage_disabled` as danger states with
-  action-oriented descriptions, per decision 10). The card's Connect entry
-  point is now the enrollment flow only; the loopback in-server OAuth flow
-  remains intact server-side. Known limitation (documented): a failed
-  exchange leaves the provider `disconnected`, so the panel reports failure
-  only at code expiry — the script's terminal output is the immediate
-  feedback channel. Verified: vet/build/`node --check` clean; real-browser
-  pass (panel render, countdown, origin substitution, close) plus the
-  implementer's end-to-end enrollment dry-run and forced-status change test.
-- **Review-fix batch — done (2026-10-09).** Five parallel review tracks
-  (auth/session security, OAuth/connect flow, store/concurrency, UI, wiring/
-  invariants) over `8026e16..f554266` confirmed the refactor's behavioral
-  equivalence, the migration chain, lock ordering, and the capability model,
-  and produced findings that are all fixed here: login username/password
-  length sanity caps (generic 401, no argon2 work — closes the backoff-map
-  memory/log amplification); atomic `ChangeUserPassword` (hash update +
-  other-session revocation in one transaction); conditional last-user delete
-  (`DeleteUserGuarded` + `ErrLastUser`, closing the check-then-act race);
-  `__Host-gym_session` cookie prefix (one-time session invalidation on
-  rollout); dead `TouchSession` and `DeleteOtherUserSessions` removed;
-  enrollment claim redesigned to reserve → start → confirm/release so a busy
-  provider no longer burns a valid code (TTL now resets when the flow actually
-  starts; capacity check ordered before invalidation; exhaustion surfaces as
-  503); the connect script forwards the provider's raw query string and warns
-  on plain-HTTP server URLs; the UI keeps concurrent enrollment panels alive
-  across card updates and manual refresh (per-card replacement instead of a
-  full re-render), `loadUsers` gained a request-ordering guard, expired
-  sessions redirect to `/login`, the reset-password prompt became a masked
-  inline form, login double-submit is disabled in flight, autofocus added;
-  `docs/oauth.md` callback paragraph rewritten for the removed Host guard and
-  the enrollment entry point; nginx recipe switched to `proxy_set_header Host
-  $http_host` so request-relative Origin checks work on non-443 ports; the
-  stray committed `__pycache__` bytecode removed and ignored.
-- **Web security layer removed — done (2026-10-09).** Owner decision: the
-  entire browser-facing web security layer is gone — `internal/websecurity`
-  deleted (CSRF token, Origin/Sec-Fetch-Site checks, security headers incl.
-  CSP), the CSRF meta tag and `X-Gyemoim-CSRF` header removed from the UI
-  assets, and the session cookie is now plain `gym_session`
-  (`HttpOnly; SameSite=Lax; Path=/`, no `__Host-` prefix, no `Secure`) so
-  plain-HTTP LAN access keeps a login. Login backoff, forced password
-  change, 24 h absolute sessions, session revocation, argon2id hashing,
-  bearer auth on `/v1`, and the process lock are unchanged. Residual risk
-  accepted by the owner: a malicious page in the same browser can drive
-  mutations; `SameSite=Lax` retains baseline cross-site POST protection, and
-  the session value is still required for every action. Verified: vet/build/
-  release-build/`node --check` clean; curl pass over `http://<LAN-IP>:9990` —
-  login without CSRF header, cookie without Secure, `/api/auth/me` 200,
-  provider create 201 with no Origin header **and** with hostile
-  `Origin: http://evil.example` (no accidental 403); real-browser pass —
-  initial password login → forced change → overview → provider create +
-  delete, console clean, cookie `gym_session` persisted over plain HTTP.
-
-## Work breakdown
-
-| # | Task | Verification |
-|---|---|---|
-| 1 | `--listen` flag (+ `--port` alias); remove Host guard; request-relative Origin checks | curl: arbitrary Host accepted; forged Origin still 403; loopback behavior unchanged |
-| 2 | Schema v2 migration (users, sessions) | open existing v1 DB and a fresh DB; `go vet` |
-| 3 | argon2id hashing; login/logout/change-password endpoints (login CSRF, password change revokes other sessions); session middleware and routing | curl: unauthenticated access blocked, cookie flags, 24 h expiry, CSRF still enforced |
-| 4 | Bootstrap (first-start random password to stderr, forced change) | first run prints password; APIs blocked until change |
-| 5 | Login failure backoff (per-username) | repeated failures slow down |
-| 6 | UI: login screen, forced change, user management, logout; pi-config URL built client-side from `window.location.origin` | manual browser pass; `node --check internal/httpui/assets/site.js` |
-| 7 | Enrollment codes; connect-flow start with parameterized redirect port in `siwc`; code-forward completion endpoint; embedded Python connect script + authenticated download route | live round-trip: connect from a laptop, credential lands on server, run inference (**operator-verified live with a real ChatGPT account, 2026-10-09**); forged/expired/reused code rejected |
-| 7b | UI connect page: enrollment code display, script download, status polling; re-authentication state on provider cards | browser pass on the UI page; provider card shows re-auth state after forced expiry |
-| 8 | Deployment notes (nginx on separate host, firewall, systemd unit) in this document; update `design.md` / `oauth.md` | docs review |
-
-Steps 4–7 need a real ChatGPT account for full live verification.
+Timestamp columns are stored as TEXT RFC3339Nano following the v1 convention
+(so expiry comparison is lexicographic), and foreign keys are enabled in the
+DSN so `ON DELETE CASCADE` works as declared. Schema migrations run
+automatically at startup and are forward-only: an older database version is
+migrated in place, and a database written by a newer version is rejected with
+an explicit error instead of being downgraded.
 
 ## Deployment
 
@@ -453,11 +263,10 @@ server {
         proxy_buffering off;
         proxy_cache off;
         proxy_read_timeout 3600s;
-        # $http_host preserves the host:port the browser used. The app no
-        # longer performs origin checks, but keep the full host:port anyway so
-        # proxied requests are indistinguishable from direct access (any
-        # Host-derived behavior, logs, and diagnostics see the real value);
-        # $host (which strips the port) would change the seen host:port.
+        # $http_host preserves the host:port the browser used, so proxied
+        # requests are indistinguishable from direct access (any Host-derived
+        # behavior, logs, and diagnostics see the real value); $host (which
+        # strips the port) would change the seen host:port.
         proxy_set_header Host $http_host;
         # The app ignores X-Forwarded-* entirely; set them only for nginx's
         # own logging.
@@ -519,18 +328,13 @@ automatically at startup and are forward-only: an older database version is
 migrated in place, and a database written by a newer version is rejected with
 an explicit error instead of being downgraded.
 
-## Open items / not yet verified
+## Known limitations and unverified upstream behaviors
 
-- ~~Live round-trip of the connect flow (Python script on Windows/macOS →
-  server) with a real ChatGPT account.~~ **Verified by the operator
-  (2026-10-09): the live connect flow with a real ChatGPT account works.**
 - Whether OpenAI accepts a redirect_uri whose port differs between start and
   callback (docs say only the port may vary; the thin-bridge flow keeps them
   identical by construction — the server uses the script's port for both).
-- Live refresh of a transferred session on the server (officially supported by
-  the self-hosted VMs procedure; still needs a live pass).
+- Live refresh of a transferred session on the server is officially supported
+  by the self-hosted VMs procedure but has not been exercised end-to-end.
 - Behavior when the same ChatGPT account is connected on several servers (one
   issued client ID per registration — confirm refresh does not invalidate the
   other host's session).
-- Whether login backoff state should also rate-limit by connection count at the
-  admission layer (P2; nginx covers the first line).

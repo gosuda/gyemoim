@@ -4,7 +4,7 @@ Gyemoim follows OpenAI's [Sign in with ChatGPT registration and sign-in flow](ht
 
 ## Authorization flow
 
-For each start, Gyemoim loads the OpenID discovery document from `https://auth.openai.com/.well-known/openid-configuration` through a 30 second, no-redirect HTTPS client restricted to `auth.openai.com`. It checks the issuer and the authorization, token, JWKS, and revocation endpoints against the expected Sign in with ChatGPT URLs. T08 also uses this validated endpoint for best-effort refresh-token revocation when a user disconnects.
+For each start, Gyemoim loads the OpenID discovery document from `https://auth.openai.com/.well-known/openid-configuration` through a 30 second, no-redirect HTTPS client restricted to `auth.openai.com`. It checks the issuer and the authorization, token, JWKS, and revocation endpoints against the expected Sign in with ChatGPT URLs. The same validated endpoint is used for best-effort refresh-token revocation when a user disconnects.
 
 The first sign-in uses `client_id=dynamic_agent_client`, `agent_name_hint=Gyemoim`, and the persistent local `ext_agent_host_id` URN. On its callback, Gyemoim requires the provider-issued `client_id` and saves it before the token exchange. An unsuccessful first exchange therefore keeps that issued registration identifier for a later attempt. Later sign-ins use the issued ID, omit `agent_name_hint`, and may include the last stored ID token as `id_token_hint` and the verified email as `login_hint`.
 

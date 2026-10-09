@@ -32,7 +32,8 @@ One Go module, one executable (`cmd/gyemoim/main.go`); all code lives under `int
 ## Behavioral invariants — do not weaken these
 
 - Model aliases route to exactly one provider + upstream model; service accounts need explicit grants (never auto-grant); no automatic retries or fallback.
-- Upstream OpenAI requests always go out with `stream=true, store=false`; non-streaming client requests are collected. Unsupported request capabilities produce explicit errors — never silently drop them.
+- Upstream OpenAI requests always go out with `stream=true, store=false`; non-streaming client requests are collected. Unsupported request capabilities are classified: benign fields and unsupported tool types are dropped and recorded in history (`request_end.dropped_fields`); `role:"system"` items are rewritten to `developer`; `previous_response_id` and `conversation` produce explicit 400 errors (never silent context loss; no gateway-side state store). Untranslatable requests produce explicit errors. See `docs/harness-compatibility.md`.
+- `/v1/chat/completions` is served by translating to the Responses upstream (never forwarded natively); chat-path history stores the chat JSON as `incoming_request` and the translated Responses JSON as `effective_request`, with no schema change.
 - If request recording fails, new inference is blocked (no unlogged bypass); already-admitted requests continue. Admission (with the bounded 8-inference semaphore) happens before body reads.
 - Limits: 8 concurrent inferences, 64 MiB incoming body and per-SSE-frame, 30 s body-read/downstream-write deadlines, no total SSE timeout. History queries use a 30 s deadline and return an explicit timeout, not partial results.
 
@@ -45,7 +46,7 @@ One Go module, one executable (`cmd/gyemoim/main.go`); all code lives under `int
 
 ## Docs
 
-`docs/` is authoritative: `design.md` (confirmed product decisions), `responses-contract.md`, `history-format.md`, `history-query.md`, `oauth.md`, `web-deployment.md` (remote web deployment decisions and deployment notes), `pi.md` (Pi agent config export), `implementation-plan.md` (task-by-task verification evidence). `next-session.md` and `code-review.md` are historical handoff/review records — their machine-specific paths (e.g. `/home/deploy/...`, worktrees, skill paths) refer to a previous environment, not this one.
+`docs/` is authoritative: `design.md` (system specification), `responses-contract.md`, `harness-compatibility.md` (request-compatibility rules and the Chat Completions translation contract), `history-format.md`, `history-query.md`, `oauth.md`, `web-deployment.md` (web deployment and deployment notes), `pi.md` (Pi agent config export), `config-store.md`. Docs describe the current system only — keep them free of dated decision records; git history is the record of change.
 
 Docs and UI text are in English.
 

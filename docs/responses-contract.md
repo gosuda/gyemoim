@@ -1,6 +1,6 @@
 # OpenAI Responses provider contract
 
-T09 implements the SIWC request boundary in `internal/provider`. The adapter has no
+The SIWC request boundary lives in `internal/provider`. The adapter has no
 credential-store dependency: the gateway executor passes the current managed access
 token to `Send`. `Adapter` is a Go interface so another provider can implement the
 same request preparation and streaming response contract without a plugin system.
@@ -89,7 +89,7 @@ Terminal events retain the full raw event JSON, the nested raw `response` object
 input and reasoning output counts are exposed as subsets, never added to totals.
 Missing counts remain nil; a reported zero remains a pointer to zero.
 
-## Timing data for T10
+## Timing data
 
 Create `Trace` with the executor's monotonic `time.Now()` admission origin and pass
 it to `Send`. `GetConn` and `GotConn` capture connection acquisition and whether the
@@ -102,7 +102,7 @@ do not count as first output. `NewTraceWithElapsed` accepts the recorder handle'
 `Trace.Snapshot` returns offsets from that clock; the executor maps them into history
 timing fields and adds authentication preparation and downstream delivery timings.
 
-## T10 gateway lifecycle
+## Gateway lifecycle
 
 `POST /v1/responses` authenticates the local bearer key, admits at most eight inferences,
 then reads a request body capped at 64 MiB (with a 30-second body-read deadline). It
