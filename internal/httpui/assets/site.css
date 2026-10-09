@@ -338,3 +338,20 @@ h5 { margin: 0; color: #3b4654; font-size: 11px; font-weight: 680; }
 .auth-heading { border-bottom: 0; padding-bottom: 0; }
 .auth-heading h1 { font-size: 19px; }
 .auth-heading .card-icon { width: 42px; height: 42px; border-radius: 11px; font-size: 19px; font-weight: 750; }
+
+/* Step-5 shared feedback/link utilities. .card-highlight is the brief
+   scroll-into-view highlight (feedback.js); under prefers-reduced-motion it
+   falls back to a static, non-animated outline for the same short window.
+   .link-button is the decision-5 inline link styled like .setup-link but
+   inheriting the surrounding text size. */
+.card-highlight { animation: card-highlight 1.5s ease-out; }
+@keyframes card-highlight {
+  0% { box-shadow: 0 0 0 2px #3867dc66; }
+  60% { box-shadow: 0 0 0 2px #3867dc33; }
+  100% { box-shadow: 0 0 0 2px transparent; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .card-highlight { animation: none; box-shadow: 0 0 0 2px #3867dc40; }
+}
+.link-button { padding: 0; border: 0; color: var(--accent); background: none; font: inherit; font-size: 11px; font-weight: 650; text-decoration: underline; }
+.link-button:hover { color: #2d58c3; }

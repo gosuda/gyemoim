@@ -10,7 +10,7 @@
 // module evaluation.
 import { cancelHistoryFetches } from "./api.js";
 import { state } from "./state.js";
-import { byId } from "./dom.js";
+import { byId, element } from "./dom.js";
 import { loadSetupHealth, loadStatus, loadOverviewHistory, startOverviewAutoRefresh, stopOverviewAutoRefresh } from "./pages/overview.js";
 import { loadProviders } from "./pages/providers.js";
 import { loadAccounts } from "./pages/service-accounts.js";
@@ -96,6 +96,17 @@ export function navigate(page, params = null) {
   if (window.location.hash === hash) return;
   window.location.hash = hash;
   renderRoute();
+}
+
+// pageLink builds the decision-5 inline links used by empty states and
+// next-step prose: a real button (keyboard and screen-reader semantics for
+// free) styled like a text link, navigating through the same hash router as
+// the sidebar. navigate() already no-ops when the hash matches the target.
+export function pageLink(text, page, params = null) {
+  const link = element("button", "link-button", text);
+  link.type = "button";
+  link.addEventListener("click", () => navigate(page, params));
+  return link;
 }
 
 export async function refreshPage(page = state.page, params = null) {

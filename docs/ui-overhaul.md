@@ -500,3 +500,99 @@ session. Deviations: strip-above-checklist as described; dots reflect the last
 `/api/status` observation (no polling on other pages); the legend renders
 wherever the outcome list renders (with zero history the consolidated empty
 state takes that slot).
+
+### Step 5 — Shared feedback/error/link utilities (2026-10-09)
+
+Three new/extended shared modules plus the one allowed page-level application.
+
+**`js/errors.js` (new, error humanization — decision 3).**
+`humanizeApiError(status, body, context)` maps one failed management-API
+response (body = parsed `{error: {message, code}}` envelope or null) to a
+human sentence, keyed by status + error code, with
+`context = {kind, name, action}` from the caller. Table contents:
+
+- 409 `conflict` + `action: "create"`/`"rename"`: per-kind sentences —
+  provider → `A provider named “X” already exists. Choose another name.`,
+  service-account → same shape, Model → `A Model named “X” already exists.
+  Choose another name.`, user → `Username “X” is already taken.`
+  (unknown kind or empty name → null).
+- 409 `conflict` + `action: "delete"`: `This <kind> is still in use. Remove
+  the items that point to it first.` — deliberately generic because the
+  server's `writeManagementFailure` collapses `ErrConflict`/`ErrReferenced`
+  into one message and never says what references the resource (review P3/P7).
+- 400 JSON-field leaks (message patterns, tolerant of a trailing period and
+  the `metadata.` prefix used by the Pi endpoint): `providerId and
+  upstreamModel are required` → `Choose a provider and an upstream model.`;
+  `contextWindow|maxTokens must be a positive whole number|integer` →
+  `Context window|Max tokens must be a positive whole number of tokens.`
+- Everything else → `null`: callers keep the server message verbatim
+  (explicit-errors invariant; no retry, no 5xx masking). Convenience wrapper
+  `formErrorText(error, context)` returns the humanized sentence for known
+  errors, otherwise `error.message` unchanged. To feed it, `api()` (api.js)
+  now attaches `status` and `body` to the thrown Error (message unchanged),
+  so every existing catch keeps working byte-identically.
+
+**`js/feedback.js` (new — decision 4).** `withBusy(buttonEl, fn)` disables the
+button and sets `aria-busy` for the duration of an async action, restoring
+both in `finally` (double submit dies: the first handler disables the button
+synchronously before its first await); `announceSuccess(messageEl, text)`
+fills an existing form-message slot with the "success" kind
+(`.form-message.success` already existed) and adds `aria-live="polite"` only
+when the slot lacks one; `clearMessageOnInput(form, messageEl)` clears any
+non-empty message on the form's `input`/`change` events (never writes);
+`scrollCardIntoView(cardEl)` smooth-scrolls (instant under
+prefers-reduced-motion) and applies a brief `.card-highlight` class
+(restarted on repeat calls via reflow, removed after 1.5 s / 1.2 s reduced).
+
+**`js/nav.js`: `pageLink(text, page, params)` (decision 5).** A real
+`<button type="button">` (keyboard/AT semantics for free) styled as a text
+link via a new `.link-button` CSS class (same visual convention as the
+step-4 `.setup-link`, but `font: inherit` so it blends into surrounding
+empty-state text), clicking `navigate(page, params)`. `navigate()` itself
+was confirmed sufficient for in-page links (no-op when the hash already
+matches, builds `#/page?query`).
+
+**`site.css`.** `.card-highlight` (2 px accent box-shadow pulse via
+keyframes) with a `@media (prefers-reduced-motion: reduce)` fallback that
+disables the animation and shows a static outline for the same short window;
+`.link-button`. CSS additions are required by the brief (highlight class +
+link-styled builder consume them); no existing rules changed.
+
+**Representative application (the only page-level change):** the provider
+create form in `pages/providers.js` now goes through `withBusy` + a single
+message slot cleared on input, success via `announceSuccess`, and errors via
+`formErrorText(error, {kind: "provider", action: "create", name: <input>})`
+so a duplicate-name 409 renders the human sentence. The rename form,
+connect/disconnect/delete flows, and every other page module are untouched.
+
+Verification: `node --check` on all changed modules OK (as `.mjs` copies);
+`go vet ./...` OK; `CGO_ENABLED=0 go build -trimpath` OK;
+`./scripts/build-release.sh` builds all four targets. Browser pass on a
+private instance (port 9966, fresh XDG-isolated data dir, admin password
+changed via the forced gate): creating provider "work-main" succeeds
+("Provider added. Sign in when ready.") and a second submit shows
+`A provider named “work-main” already exists. Choose another name.` (never
+"resource conflicts…"); a rapid double-click on Add provider fired exactly
+one POST `/api/providers` (request-log delta before=3 after=4) and the
+button settles with `disabled=false`, `aria-busy` absent; typing in the
+name field after the error (and after success) cleared the message on the
+first keystroke; unknown-error passthrough — `network route` cannot set a
+status code, so a CDP fetch wrapper stubbed POST `/api/providers` with a 500
+and alien body `{"error":{"message":"Kx-99 void overflow: quux/flurb
+disengaged","code":"weird_unknown_code"}}` — the message rendered verbatim
+and the button restored (stub then disabled); user create with an existing
+username still shows the raw `resource conflicts with existing
+configuration` (untouched form, as expected until step 8);
+`scrollCardIntoView` via dynamic `import()` on a provider card added
+`card-highlight` with `animationName: card-highlight` and removed it after
+1.7 s; with real CDP emulation (`set media light reduced-motion`) the same
+call reports `animationName: none`, shows only the static
+`rgba(56,103,220,0.25)` outline, and cleans up after 1.4 s;
+`pageLink("Go to Models", "models")` renders `button.link-button` and
+navigates to `#/models` on click, with params producing
+`#/requests?outcome=failed` + correct title. Browser console clean across
+the whole session. Deviations: CSS additions to `site.css` (outside the
+stated `js/**` ownership, required by the brief); the 500-stub used a CDP
+fetch wrapper instead of `network route` (which cannot set status codes);
+the `contextWindow`/`maxTokens` leak patterns are covered in the table but
+not yet wired to the Models page's client-side validator (later step).

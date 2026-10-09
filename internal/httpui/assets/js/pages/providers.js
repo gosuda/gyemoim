@@ -3,6 +3,8 @@
 import { api } from "../api.js";
 import { state } from "../state.js";
 import { button, byId, element, showMessage } from "../dom.js";
+import { formErrorText } from "../errors.js";
+import { announceSuccess, clearMessageOnInput, withBusy } from "../feedback.js";
 
 export async function loadProviders() {
   const list = byId("provider-list");
@@ -311,21 +313,23 @@ async function deleteProvider(provider) {
   }
 }
 
-byId("provider-create-form").addEventListener("submit", async (event) => {
+// Representative application of the step-5 shared layer (duplicate-name 409
+// humanization + withBusy). Other forms keep today's behavior until their own
+// page steps wire them.
+const providerCreateForm = byId("provider-create-form");
+const providerCreateMessage = byId("provider-create-message");
+clearMessageOnInput(providerCreateForm, providerCreateMessage);
+providerCreateForm.addEventListener("submit", (event) => {
   event.preventDefault();
   const form = event.currentTarget;
   const submit = form.querySelector('[type="submit"]');
-  const message = byId("provider-create-message");
-  submit.disabled = true;
-  showMessage(message);
-  try {
+  withBusy(submit, async () => {
+    showMessage(providerCreateMessage);
     await api("/api/providers", { method: "POST", body: JSON.stringify({ name: form.elements.name.value, type: "openai" }) });
     form.reset();
-    showMessage(message, "Provider added. Sign in when ready.", "success");
+    announceSuccess(providerCreateMessage, "Provider added. Sign in when ready.");
     await loadProviders();
-  } catch (error) {
-    showMessage(message, error.message, "error");
-  } finally {
-    submit.disabled = false;
-  }
+  }).catch((error) => {
+    showMessage(providerCreateMessage, formErrorText(error, { kind: "provider", action: "create", name: form.elements.name.value }), "error");
+  });
 });

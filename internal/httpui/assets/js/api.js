@@ -38,7 +38,12 @@ export async function api(path, options = {}) {
       throw new Error("Your management session has expired. Sign in again.");
     }
     const message = data?.error?.message || `Request failed (${response.status})`;
-    throw new Error(message);
+    // status/body ride along (message stays verbatim) so the errors.js
+    // humanization layer can look up known responses by (status, code).
+    const failure = new Error(message);
+    failure.status = response.status;
+    failure.body = data;
+    throw failure;
   }
   return data;
 }
