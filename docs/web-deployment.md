@@ -326,7 +326,7 @@ convention — see the Step 2 note in the implementation log.)
 | 4 | Bootstrap (first-start random password to stderr, forced change) | first run prints password; APIs blocked until change |
 | 5 | Login failure backoff (per-username) | repeated failures slow down |
 | 6 | UI: login screen, forced change, user management, logout; pi-config URL built client-side from `window.location.origin` | manual browser pass; `node --check internal/httpui/assets/site.js` |
-| 7 | Enrollment codes; connect-flow start with parameterized redirect port in `siwc`; code-forward completion endpoint; embedded Python connect script + authenticated download route | live round-trip: connect from a laptop, credential lands on server, run inference; forged/expired/reused code rejected |
+| 7 | Enrollment codes; connect-flow start with parameterized redirect port in `siwc`; code-forward completion endpoint; embedded Python connect script + authenticated download route | live round-trip: connect from a laptop, credential lands on server, run inference (**operator-verified live with a real ChatGPT account, 2026-10-09**); forged/expired/reused code rejected |
 | 7b | UI connect page: enrollment code display, script download, status polling; re-authentication state on provider cards | browser pass on the UI page; provider card shows re-auth state after forced expiry |
 | 8 | Deployment notes (nginx on separate host, firewall, systemd unit) in this document; update `design.md` / `oauth.md` | docs review |
 
@@ -502,8 +502,9 @@ an explicit error instead of being downgraded.
 
 ## Open items / not yet verified
 
-- Live round-trip of the connect flow (Python script on Windows/macOS →
-  server) with a real ChatGPT account.
+- ~~Live round-trip of the connect flow (Python script on Windows/macOS →
+  server) with a real ChatGPT account.~~ **Verified by the operator
+  (2026-10-09): the live connect flow with a real ChatGPT account works.**
 - Whether OpenAI accepts a redirect_uri whose port differs between start and
   callback (docs say only the port may vary; the thin-bridge flow keeps them
   identical by construction — the server uses the script's port for both).
