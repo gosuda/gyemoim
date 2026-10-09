@@ -115,7 +115,7 @@ function renderModel(model) {
   const controls = element("div", "card-actions");
   controls.append(button("Edit", "quiet small", () => beginModelEdit(model)));
   controls.append(button("Delete", "danger quiet small", async () => {
-    if (!window.confirm(`Delete Model “${model.name}”? Service account grants for this Model will be removed.`)) return;
+    if (!window.confirm(`Delete Model “${model.name}”? Service account grants must be removed first.`)) return;
     try {
       await api(`/api/models/${encodeURIComponent(model.id)}`, { method: "DELETE" });
       if (state.editingModel?.id === model.id) cancelModelEdit();

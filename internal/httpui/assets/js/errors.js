@@ -28,6 +28,15 @@ const nameConflictSentences = {
   user: (name) => `Username “${name}” is already taken.`,
 };
 
+// 409 "conflict" sentences for delete, per kind. The server's conflict message
+// does not say what references the resource, so the default sentence stays
+// honest and generic; kinds where the referencing items are known and fixed
+// (a Model can only be referenced by explicit service-account grants) name
+// them instead of guessing.
+const deleteConflictSentences = {
+  model: () => "This Model is still in use. Remove the service account grants that point to it first.",
+};
+
 // JSON-field leaks: patterns over error.message mapping the server's field
 // names to the labels the forms actually show. The trailing period and the
 // "metadata." prefix are optional because both the server and client-side
@@ -52,8 +61,10 @@ export function humanizeApiError(status, body, context = {}) {
   if (status === 409 && code === "conflict") {
     if (context.action === "delete") {
       const label = kindLabels[context.kind];
-      // The server does not say what references the resource, so the sentence
-      // stays honest and generic instead of guessing the referencing kind.
+      // Kinds with a fixed, known referencing item get a specific sentence;
+      // everything else stays generic because the server does not say what
+      // references the resource.
+      if (deleteConflictSentences[context.kind]) return deleteConflictSentences[context.kind]();
       return label ? `This ${label} is still in use. Remove the items that point to it first.` : null;
     }
     const sentence = nameConflictSentences[context.kind];

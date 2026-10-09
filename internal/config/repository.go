@@ -623,13 +623,44 @@ func (s *Store) UpdateModel(ctx context.Context, model Model) error {
 	return requireAffected(result, "model", model.ID)
 }
 
-// DeleteModel removes the model and its explicit grants.
+// DeleteModel removes a Model. Explicit service-account grants referencing it
+// prevent deletion, so agents never lose access behind the UI's back. The
+// guarded delete and the grant check run in one transaction, mirroring
+// DeleteUserGuarded: two concurrent calls cannot race between the check and
+// the act, and a concurrent grant is serialized against the delete. (The
+// grants themselves would cascade away via the model_grants foreign key, but
+// the guard makes that unreachable.) ErrReferenced reports the refused delete
+// — the same sentinel DeleteProvider produces for its referenced delete — and
+// ErrNotFound an unknown id.
 func (s *Store) DeleteModel(ctx context.Context, id string) error {
-	result, err := s.db.ExecContext(ctx, `DELETE FROM models WHERE id = ?`, id)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin guarded model delete: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	result, err := tx.ExecContext(ctx, `DELETE FROM models WHERE id = ? AND (SELECT COUNT(*) FROM model_grants WHERE model_id = ?) = 0`, id, id)
 	if err != nil {
 		return fmt.Errorf("delete model: %w", err)
 	}
-	return requireAffected(result, "model", id)
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("check model delete: %w", err)
+	}
+	if affected == 0 {
+		// Distinguish an unknown id from the refused referenced delete.
+		var count int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM models WHERE id = ?`, id).Scan(&count); err != nil {
+			return fmt.Errorf("count deleted model: %w", err)
+		}
+		if count == 0 {
+			return notFound("model", id)
+		}
+		return ErrReferenced
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit guarded model delete: %w", err)
+	}
+	return nil
 }
 
 // GetModel returns one model configuration.

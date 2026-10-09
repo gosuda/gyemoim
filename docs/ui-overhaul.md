@@ -1321,3 +1321,57 @@ because the decision-4 feedback standard is binding acceptance criteria.
 (5) The regression instance's "pi work" account briefly referenced a
 deleted Model (see 2); the page renders correctly ("0 of 0 Models
 granted"). Nothing broken found outside step 11's own files.
+
+## Post-overhaul backlog
+
+### Item 4 — Model deletion blocked by active grants (2026-10-09)
+
+Step 11's deviation (2) above recorded the inconsistency; this item fixes it.
+`DeleteModel` (internal/config/repository.go) was a bare
+`DELETE FROM models WHERE id = ?` — the `model_grants` foreign key cascaded
+the grants away, agents requesting the deleted Model then failed with
+`model_not_found`, and the Models page confirm honestly promised grant removal
+while the Providers page refused an equivalent delete with a 409. Model
+deletion now mirrors Provider deletion (option (a): block):
+
+- **Store.** `DeleteModel` takes the `DeleteUserGuarded` transaction shape: one
+  transaction runs `DELETE FROM models WHERE id = ? AND (SELECT COUNT(*) FROM
+  model_grants WHERE model_id = ?) = 0`, and zero affected rows distinguish an
+  unknown id (`ErrNotFound` via the same `notFound` path, unchanged 404) from a
+  refused referenced delete, which returns **`ErrReferenced` — the same
+  sentinel `DeleteProvider` produces** — so the existing
+  `writeManagementFailure` mapping (`ErrReferenced`/`ErrConflict` → 409
+  `conflict`) covers the model case with no new error vocabulary. The guard in
+  the WHERE clause serializes concurrent grants against the delete (no
+  check-then-act race).
+- **HTTP layer.** No change: the delete-model handler already funnels through
+  `writeManagementFailure`; verified the granted-model DELETE returns the same
+  `409 {"code":"conflict","message":"resource conflicts with existing
+  configuration"}` envelope as the provider case.
+- **UI.** The delete confirm (models.js) no longer promises grant removal; it
+  matches the provider pattern unconditionally (curly quotes, as in the
+  provider confirm): `Delete Model “X”? Service account grants must be
+  removed first.` The 409 humanizes to `This Model is still in use. Remove
+  the service account grants that point to it first.` — errors.js gained a
+  `deleteConflictSentences` per-kind table (the Model entry names the
+  referencing item because it is fixed and known); kinds without an entry
+  keep the generic `Remove the items that point to it first.` sentence.
+
+Verification: `gofmt -l` clean on the changed Go files (JS is not a gofmt
+target); `go vet ./...` OK; `CGO_ENABLED=0 go build -trimpath` OK;
+`./scripts/build-release.sh` builds all four targets; `node --check` on
+errors.js and pages/models.js OK. curl pass on a private instance (port 9980,
+fresh XDG-isolated data dir, bootstrap admin + forced password change):
+granted-model DELETE → 409 `conflict` with the model and its grants still
+intact afterwards; revoking the grant (`PUT grants` with `{"modelIds":[]}`) →
+DELETE → 204; unknown model id → 404 `not_found`; provider regression: a
+provider targeted by a Model still deletes with 409 `conflict`, and deletes
+cleanly (204) once the targeting Model is removed. Browser pass (same
+instance, seeded provider + Model `coding` + account/key/grant via API):
+Models-page Delete confirm read back verbatim as the new text (dialog
+dismissed first); accepting the delete rendered the role="alert" sentence
+`This Model is still in use. Remove the service account grants that point to
+it first.` on the card; after unchecking the grant on the Service accounts
+page ("Model access saved."), Delete → confirm → the card disappeared
+("No Models configured…" empty state); browser console clean. Deviations:
+none.

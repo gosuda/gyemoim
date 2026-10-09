@@ -290,6 +290,7 @@ Implementation is split into T01 through T17 and tracked in [implementation-plan
 - The initial pi integration targets pi agent 1.0.0 and exposes reasoning models through `models.json`.
 - Optional advanced Model metadata consists of `contextWindow`, `maxTokens`, `input`, `reasoning`, and `supportedReasoningEfforts`. Populate fields only from exact metadata, do not guess values, and generate `models.json` only when the metadata is complete.
 - The gateway implements the provider-supported Responses API contract for reasoning and non-reasoning models. pi's initial metadata limitation does not narrow the gateway contract.
+- Deleting a Model is refused while explicit service-account grants reference it — the same guarded-delete rule as Provider deletion — so grants must be removed first and are never removed behind the caller's back.
 
 ## Acceptance Criteria
 
