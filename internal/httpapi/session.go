@@ -16,11 +16,11 @@ import (
 	"github.com/gosuda/gyemoim/internal/config"
 )
 
-// sessionCookieName uses the __Host- prefix: browsers only accept such cookies
-// when they are Secure, Path=/, and Domain-less, closing sibling-subdomain
-// cookie injection. Cookies set under the previous "gym_session" name simply
-// stop being sent, so sessions invalidate once at rollout — accepted.
-const sessionCookieName = "__Host-gym_session"
+// sessionCookieName is a plain name (no __Host- prefix, no Secure flag):
+// plain-HTTP LAN access is the primary usage mode by explicit owner decision
+// (2026-10-09), and __Host-/Secure cookies are dropped by browsers on plain
+// HTTP. SameSite=Lax is kept as the baseline cross-site protection.
+const sessionCookieName = "gym_session"
 
 // newSessionID returns a fresh 256-bit session ID as base64url (43 characters).
 // Only its SHA-256 hash is ever stored; the plaintext ID lives in the cookie.
@@ -38,15 +38,15 @@ func sessionIDHash(id string) []byte {
 }
 
 func setSessionCookie(w http.ResponseWriter, id string, expires time.Time) {
-	// Secure is always set: the UI is meant to be reached via the https reverse
-	// proxy, and browsers treat http://localhost as trustworthy for local use.
+	// Secure is deliberately not set: the UI is reached over plain HTTP on the
+	// LAN (explicit owner decision), and a Secure cookie would never be stored
+	// or sent there.
 	http.SetCookie(w, &http.Cookie{
 		Name:     sessionCookieName,
 		Value:    id,
 		Path:     "/",
 		Expires:  expires,
 		HttpOnly: true,
-		Secure:   true,
 		SameSite: http.SameSiteLaxMode,
 	})
 }
@@ -59,7 +59,6 @@ func clearSessionCookie(w http.ResponseWriter) {
 		Expires:  time.Unix(0, 0),
 		MaxAge:   -1,
 		HttpOnly: true,
-		Secure:   true,
 		SameSite: http.SameSiteLaxMode,
 	})
 }

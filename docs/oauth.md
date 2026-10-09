@@ -18,7 +18,7 @@ The complete token set, verified subject/email, registration ID, scopes, expiry,
 
 The requested scope list is not treated as proof that the account granted those scopes. A nonempty authoritative `token.scope` must include `chatgpt.tokens.use.direct` before the Provider is marked `connected`. When `scope` is absent, a validated identity and token set can still be retained, but the Provider is marked `plan_usage_disabled` because the grant cannot be inferred. If a reported scope set lacks `offline_access`, or the response has no refresh token, the Provider is marked `require_reauthentication`. A connected status means the direct-use scope was granted. Internal callers obtain a bearer token only for a connected OpenAI provider with both direct-use and offline scopes. The token manager refreshes on demand when the access token has 60 seconds or less remaining; it does not refresh at startup or on a timer.
 
-The provider card's Connect/Reconnect entry point is the enrollment-script flow (see [Remote enrollment](#remote-enrollment) below). Callback results redirect to the local root with a fixed result code. The UI maps only those fixed codes to messages and removes the query string. The callback applies no Origin or CSRF checks — it is a top-level provider redirect — and its protection is the single-use, server-side state that is consumed at the callback; there is no Host guard (the listener accepts any Host). The loopback `oauth/start` flow (`POST /api/providers/{id}/oauth/start`) remains available as an API for local and API use, and its redirect also lands on `/?oauth_result=...`. The management guard permits only the callback's fixed, read-only result query on `/` through Fetch Metadata's cross-site navigation check. Callback responses set no-store, no-referrer, nosniff, and restrictive CSP headers. OAuth codes, errors, token values, and upstream error bodies are not returned in callback pages or logs.
+The provider card's Connect/Reconnect entry point is the enrollment-script flow (see [Remote enrollment](#remote-enrollment) below). Callback results redirect to the local root with a fixed result code. The UI maps only those fixed codes to messages and removes the query string. The callback requires no session — it is a top-level provider redirect — and its protection is the single-use, server-side state that is consumed at the callback; the listener accepts any Host. The loopback `oauth/start` flow (`POST /api/providers/{id}/oauth/start`) remains available as an API for local and API use, and its redirect also lands on `/?oauth_result=...`. Callback responses set no-store. OAuth codes, errors, token values, and upstream error bodies are not returned in callback pages or logs.
 
 
 ## Remote enrollment
@@ -50,7 +50,7 @@ runs `python3 gyemoim-connect.py <server-url> <code>`:
    credentials. The script only prints the outcome.
 
 The script is a thin bridge with no OAuth logic. The claim/complete endpoints
-sit outside the session and CSRF guards by design: the script is not a
+sit outside the management session gate by design: the script is not a
 browser, and the single-use enrollment code plus the single-use OAuth state
 recorded at claim time are the capability; every failure answers the same
 generic error. Registration uses the server's own persistent

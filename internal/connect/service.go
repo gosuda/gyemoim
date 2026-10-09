@@ -75,7 +75,7 @@ func (s *Service) StartEnrollment(ctx context.Context, providerID string) (Enrol
 }
 
 // ServeClaim handles POST /connect/claim for the enrollment script. It is
-// deliberately mounted OUTSIDE the session and CSRF guards (see main.go): the
+// deliberately mounted OUTSIDE the session gate (see main.go): the
 // script is not a browser, and the single-use enrollment code is the capability.
 // Every failure answers with the same generic JSON error, so the endpoint never
 // reveals whether a code existed, expired, or was already used.

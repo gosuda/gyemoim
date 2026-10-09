@@ -209,7 +209,7 @@ clearMessageOnInput(userCreateForm, userCreateMessage);
 userCreateUsername.addEventListener("input", () => userCreateUsername.removeAttribute("aria-invalid"));
 
 // U1: accessible show/hide for the temporary password, so the admin can read
-// it back before handing it over. No inline JS (strict CSP); state is mirrored
+// it back before handing it over. No inline JS; state is mirrored
 // in aria-pressed and the accessible name.
 const passwordToggle = byId("user-create-password-toggle");
 passwordToggle.addEventListener("click", () => {

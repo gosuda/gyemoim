@@ -1,17 +1,12 @@
-// Fetch helpers: the api() wrapper with CSRF handling and error unwrapping,
-// the query-string builder, and the abort-token machinery that bounds the
+// Fetch helpers: the api() wrapper with error unwrapping, the query-string
+// builder, and the abort-token machinery that bounds the
 // history queries (Overview, Requests, Storage).
 import { historyState } from "./state.js";
-
-const csrfToken = document.querySelector('meta[name="csrf-token"]')?.content ?? "";
 
 export async function api(path, options = {}) {
   const headers = new Headers(options.headers ?? {});
   headers.set("Accept", "application/json");
   if (options.body !== undefined) headers.set("Content-Type", "application/json");
-  if (options.method && !["GET", "HEAD"].includes(options.method.toUpperCase())) {
-    headers.set("X-Gyemoim-CSRF", csrfToken);
-  }
   const response = await fetch(path, {
     ...options,
     headers,

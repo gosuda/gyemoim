@@ -1,10 +1,8 @@
 // Login and forced password-change pages. These forms cannot send custom
-// headers natively, so submissions go through fetch with the CSRF token that
-// the server injected into the page, matching the main UI's api() helper.
+// headers natively, so submissions go through fetch, matching the main UI's
+// api() helper.
 (() => {
   "use strict";
-
-  const csrfToken = document.querySelector('meta[name="csrf-token"]')?.content ?? "";
 
   async function postJSON(path, body) {
     const response = await fetch(path, {
@@ -12,7 +10,6 @@
       headers: {
         "Accept": "application/json",
         "Content-Type": "application/json",
-        "X-Gyemoim-CSRF": csrfToken,
       },
       credentials: "same-origin",
       cache: "no-store",

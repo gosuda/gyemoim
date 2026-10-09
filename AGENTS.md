@@ -22,12 +22,12 @@ Then exercise changes by hand: run the binary (listens on http://127.0.0.1:9092/
 
 One Go module, one executable (`cmd/gyemoim/main.go`); all code lives under `internal/`:
 
-- `httpapi` — routes: `/api/` management (CSRF-guarded), `/v1/` harness-facing Responses API, `/auth/callback` OAuth
+- `httpapi` — routes: `/api/` management, `/v1/` harness-facing Responses API, `/auth/callback` OAuth
 - `gateway` — service-account authentication and single-target model routing
 - `provider` — OpenAI Responses adapter; `siwc` — Sign in with ChatGPT OAuth
 - `config` — SQLite `config.db` holds providers, OAuth credentials, key hashes, model routes, grants — the only SQLite data
 - `history` — request history as NDJSON under `history/` (not SQLite): recorder, rotation, external zstd compression, date deletion, queries
-- `httpui` (embedded UI), `websecurity` (CSRF/host guards), `processlock`, `datadir`
+- `httpui` (embedded UI), `processlock`, `datadir`
 
 ## Behavioral invariants — do not weaken these
 

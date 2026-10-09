@@ -26,10 +26,11 @@ while preserving everything on the review's keep-list.
 
 - Assets are embedded via `go:embed` in `internal/httpui/ui.go` and served as static
   files; `index.html`/`login.html`/`change-password.html` are parsed by `html/template`
-  (CSRF injection). Rebuild the binary to see asset changes.
-- Strict CSP `script-src 'self'` (plus `style-src 'self'`): no inline scripts/styles,
-  no inline event handlers, no import maps (inline JSON). ES modules with **relative
-  imports** work fine under this CSP.
+  (template rendering). Rebuild the binary to see asset changes.
+- No inline scripts/styles, no inline event handlers, no import maps (inline
+  JSON). ES modules with **relative imports**. (The CSP header that once
+  enforced this was removed with the web security layer, owner decision
+  2026-10-09; the asset conventions remain.)
 - UI text in English. No `*_test.go`; verification is `go vet`, builds,
   `node --check` per changed JS file, and manual browser/API passes.
 
@@ -42,7 +43,7 @@ while preserving everything on the review's keep-list.
    is rejected: it needs server route changes for no additional benefit. Deep links
    replace the `state.pendingRequestID` side channel.
 2. **Module split, no bundler.** `site.js` (2,199 lines) is split into ES modules
-   under `assets/js/` — `api.js` (fetch/CSRF helpers), `dom.js` (helpers, show/hide),
+   under `assets/js/` — `api.js` (fetch helpers), `dom.js` (helpers, show/hide),
    `format.js` (date/bytes/UTC), `state.js` (shared mutable state), `nav.js`
    (routing/nav), `pages/{overview,providers,accounts,models,requests,storage,users}.js`,
    `app.js` (entry; index.html loads `<script type="module" src="/assets/js/app.js">`).
@@ -91,8 +92,8 @@ per page, Back/Forward/reload/bookmark verified. Log out and login redirects sti
 land sensibly (`/` → `#/overview`).
 
 ### Step 2 — Module split (pure refactor)
-Move site.js into the step-2 module layout above; zero behavior change. CSP-safe
-relative imports; `node --check` every module; full manual walk of all seven pages
+Move site.js into the step-2 module layout above; zero behavior change. Relative
+imports; `node --check` every module; full manual walk of all seven pages
 plus login/change-password; compare behavior against step 1 (panel survival, polling,
 countdowns, confirm dialogs).
 
@@ -100,7 +101,8 @@ countdowns, confirm dialogs).
 (a) `local_keys.label` nullable text (schema migration in the existing chain; API
 accepts/returns optional label; UI wiring comes in step 7); (b) users API gains
 `lastLoginAt`, updated transactionally at successful login; (c) auth-rejection ring
-buffer + `GET /api/rejections` (CSRF/GET-only read like other management endpoints).
+buffer + `GET /api/rejections` (GET-only read behind the management session
+gate like other management endpoints).
 Invariants: rejection recording happens only after the admission decision, never
 blocks or gates inference, and adds no allocation on the hot path beyond the ring
 push. curl verification for each.
@@ -234,7 +236,7 @@ Final layout (line counts):
   formatDurationNS/formatDate` plus the shared presentational builders
   `identity/identityCell/outcomeTag` and `historyErrorMessage` (used by Overview and
   Requests; placed here rather than in a page module to keep them shared).
-- `js/api.js` (101) — `api()` (CSRF header, error unwrapping, forced-change and
+- `js/api.js` (101) — `api()` (error unwrapping, forced-change and
   session-expiry redirects), `addQuery`, and the bounded-history abort-token
   machinery (`beginHistoryFetch`, `beginHistoryChild`, `finishHistoryChild`,
   `historyFetchIsCurrent`, `historyChildIsCurrent`, `cancelHistoryFetches`,
@@ -721,7 +723,7 @@ and `assets/site.css`; no Go changes.
   granted" note gains " Grant access on the Service accounts page.
   [Service accounts]" via a module-level append in models.js:233-239
   (index.html text unchanged; the link is a `pageLink` button because the
-  CSP forbids inline handlers and the router is hash-based).
+  router is hash-based).
 - **S3 (collapsed summary made stateful) — choice documented: the summary
   line, not the header readiness dot.** A header readiness color would
   require eagerly fetching keys+grants for every account card, which the
@@ -923,8 +925,7 @@ takes a kind and sets the class (login.js:31-34).
   are wrapped as "Password change failed: <message>." Both error-styled.
 - **C3:** "Wrong account? Sign out" below the form
   (change-password.html:31) POSTs `/api/auth/logout` through the page's
-  existing fetch helper (which already sends the template-injected CSRF
-  header) and lands on `/login` regardless of the call's outcome
+  existing fetch helper) and lands on `/login` regardless of the call's outcome
   (login.js:109-118; the endpoint accepts stale sessions server-side).
 - **C4:** the verb is "Set a new password" everywhere — `<title>`, h1, and
   submit button (change-password.html:7,16,28); the sessions note moved out
@@ -1258,7 +1259,7 @@ Changes in `internal/httpui/assets/{index.html,site.css}`, `js/format.js`,
   "Only the Pi agent setup export uses these fields. Leave them empty if you
   don't use Pi — the Model works without them." followed by the pageLink
   "The Pi setup panel is on the [Service accounts] page." (pageLink button,
-  models.js:279-283, same CSP-safe convention as the S1 grant note).
+  models.js:279-283, same convention as the S1 grant note).
 - **M5/M6 leftovers.** `#model-catalog-message` 9px → 11px (site.css:183).
   Model form submit runs through `withBusy` (models.js:243), the form is
   wired with `clearMessageOnInput` (models.js:266), create/edit errors go
@@ -1533,8 +1534,7 @@ fact. This item adds a read-only preview endpoint and wires it into the
 Storage page's destructive chain.
 
 **Backend.** New `GET /api/storage/delete-preview?first=<date>&last=<date>`
-(management session gate, GET-only — plain GET semantics are CSRF-safe like the
-other reads). `history.QueryService.DeletePreview` (new
+(management session gate, GET-only like the other reads). `history.QueryService.DeletePreview` (new
 `internal/history/preview.go`) answers exactly "how many records would
 `DeleteDateRange` remove for this inclusive UTC date range?":
 

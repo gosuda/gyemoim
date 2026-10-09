@@ -46,7 +46,7 @@ type HistoryReadiness interface {
 }
 
 // New constructs the embedded UI handler.
-func New(dataDirectory string, port int, startedAt time.Time, csrfToken string, database DatabaseReadiness, historyStatus HistoryReadiness) (http.Handler, error) {
+func New(dataDirectory string, port int, startedAt time.Time, database DatabaseReadiness, historyStatus HistoryReadiness) (http.Handler, error) {
 	assets, err := fs.Sub(embedded, "assets")
 	if err != nil {
 		return nil, fmt.Errorf("open embedded UI assets: %w", err)
@@ -70,7 +70,7 @@ func New(dataDirectory string, port int, startedAt time.Time, csrfToken string, 
 	renderPage := func(name string) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			if err := page.ExecuteTemplate(w, name, struct{ CSRFToken string }{CSRFToken: csrfToken}); err != nil {
+			if err := page.ExecuteTemplate(w, name, nil); err != nil {
 				// The response may already be committed; logging belongs at the server boundary later.
 				return
 			}

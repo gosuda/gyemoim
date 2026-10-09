@@ -769,8 +769,8 @@ func decodeOptionalJSON(w http.ResponseWriter, r *http.Request, target any) bool
 }
 
 // rejections returns the newest-first snapshot of the pre-admission harness
-// rejections ring. Like other management reads it is GET-only, sits behind the
-// session gate, and mutates nothing — plain GET semantics are CSRF-safe.
+// rejections ring. Like other management reads it is GET-only and sits behind
+// the session gate.
 func (api *managementAPI) listRejections(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		methodNotAllowed(w, http.MethodGet)

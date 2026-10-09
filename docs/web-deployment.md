@@ -57,16 +57,15 @@ browsers / remote agents
    no length or composition policy — only emptiness is rejected (decided
    2026-10-09, superseding the original minimum-length-12 rule).
 2. **Sessions: 24 h absolute expiry, no sliding renewal.** Cookie
-   `__Host-gym_session` (the `__Host-` prefix makes browsers refuse the cookie
-   unless it is Secure, Path=/, and Domain-less, closing sibling-subdomain
-   cookie injection) carries a 256-bit random ID; only its SHA-256 hash is
+   `gym_session` (plain name, no `__Host-` prefix and no `Secure` flag —
+   owner decision 2026-10-09: plain-HTTP LAN access is the primary usage
+   mode, and a `__Host-`/`Secure` cookie would be dropped by browsers on
+   plain HTTP) carries a 256-bit random ID; only its SHA-256 hash is
    stored (same pattern as `local_keys`). Cookie flags: `HttpOnly`,
-   `SameSite=Lax`
-   (so the OAuth result landing survives the provider's top-level redirect),
-   and `Secure` **always** (the UI is meant to be reached via the https nginx;
-   browsers treat `http://localhost` as trustworthy so local use and curl-based
-   testing still work, but plain-http LAN access to the UI will not keep a
-   login). The session ID is re-issued at login (fixation defense). Changing a
+   `SameSite=Lax`, `Path=/`
+   (`SameSite=Lax` keeps baseline cross-site POST protection while the
+   OAuth result landing survives the provider's top-level redirect). The
+   session ID is re-issued at login (fixation defense). Changing a
    password revokes all of that user's other sessions. Expired sessions are
    pruned opportunistically.
 3. **Bootstrap.** On first start with an empty `users` table, create user
@@ -82,12 +81,13 @@ browsers / remote agents
    `X-Forwarded-Proto`, ...) are **never trusted**: client identity is the TCP
    peer only (the nginx host for all proxied traffic), so nothing in the app
    (backoff, logs) can be spoofed via headers.
-5. **Origin validation becomes request-relative.** When an `Origin` header is
-   present it must match the request's own Host (host:port, scheme-agnostic
-   because the app sees plain HTTP behind nginx). Userinfo/path/query checks
-   and the Sec-Fetch-Site logic are unchanged. CSRF header checking is
-   unchanged. DNS-rebinding defense therefore rests on origin checks + CSRF,
-   consistent with the original threat model.
+5. **Browser-origin validation removed (supersedes the original
+   request-relative Origin + CSRF design).** Owner decision 2026-10-09: the
+   entire browser-facing web security layer — CSRF token, Origin and
+   Sec-Fetch-Site checks, and the security header set (CSP, CORP,
+   Referrer-Policy, X-Content-Type-Options, X-Frame-Options) — is gone;
+   plain-HTTP LAN access is the primary mode. Session authentication, login
+   backoff, and the bearer-authenticated `/v1` surface are unchanged.
 6. **Listener.** New `--listen <addr>` flag, default `127.0.0.1:9092`
    (current behavior). `--port` remains as an alias for the port-only form.
    The deployed server binds `:9092` (all interfaces) so the remote nginx can
@@ -132,10 +132,10 @@ browsers / remote agents
    no per-IP dimension because client IPs are not trusted (decision 9).
    Constant-time comparisons; failures logged to stderr, not to history.
 9. **Forwarded headers are ignored everywhere.** No XFF parsing, no
-   X-Forwarded-Proto scheme detection; request-relative Origin checks already
-   work scheme-agnostic, cookies are always `Secure`, and the pi-config URL is
-   client-side. Login CSRF defense: the login page carries the same injected
-   CSRF token mechanism and `/api/auth/login` requires the header.
+   X-Forwarded-Proto scheme detection, and no forwarded-header trust anywhere
+   in the app; the pi-config URL is built client-side. There are no
+   browser-origin checks to feed (owner decision 2026-10-09 removed them),
+   but untrusted headers still cannot influence backoff, logs, or identity.
 10. **Re-authentication state is surfaced.** When a provider's refresh fails
     with `require_reauthentication` (or the connection otherwise lapses), the
     provider card in the UI shows the state and a *Connect* action pointing at
@@ -198,7 +198,7 @@ convention — see the Step 2 note in the implementation log.)
   `must_change_password` user is restricted to the password change (403
   `password_change_required`) and gets page redirects to `/change-password`.
   Minimal server-rendered `/login` and `/change-password` pages with a small
-  fetch-based JS (inline scripts are blocked by the CSP). `/v1/` and
+  fetch-based JS. `/v1/` and
   `/auth/callback` untouched. Review hardenings: verification rejects stored
   hash parameters outside safe bounds (threads ≤ 255, memory ≤ 1 GiB) instead
   of trusting them, and every 401 path costs one argon2id verification
@@ -315,6 +315,24 @@ convention — see the Step 2 note in the implementation log.)
   the enrollment entry point; nginx recipe switched to `proxy_set_header Host
   $http_host` so request-relative Origin checks work on non-443 ports; the
   stray committed `__pycache__` bytecode removed and ignored.
+- **Web security layer removed — done (2026-10-09).** Owner decision: the
+  entire browser-facing web security layer is gone — `internal/websecurity`
+  deleted (CSRF token, Origin/Sec-Fetch-Site checks, security headers incl.
+  CSP), the CSRF meta tag and `X-Gyemoim-CSRF` header removed from the UI
+  assets, and the session cookie is now plain `gym_session`
+  (`HttpOnly; SameSite=Lax; Path=/`, no `__Host-` prefix, no `Secure`) so
+  plain-HTTP LAN access keeps a login. Login backoff, forced password
+  change, 24 h absolute sessions, session revocation, argon2id hashing,
+  bearer auth on `/v1`, and the process lock are unchanged. Residual risk
+  accepted by the owner: a malicious page in the same browser can drive
+  mutations; `SameSite=Lax` retains baseline cross-site POST protection, and
+  the session value is still required for every action. Verified: vet/build/
+  release-build/`node --check` clean; curl pass over `http://<LAN-IP>:9990` —
+  login without CSRF header, cookie without Secure, `/api/auth/me` 200,
+  provider create 201 with no Origin header **and** with hostile
+  `Origin: http://evil.example` (no accidental 403); real-browser pass —
+  initial password login → forced change → overview → provider create +
+  delete, console clean, cookie `gym_session` persisted over plain HTTP.
 
 ## Work breakdown
 
@@ -435,13 +453,14 @@ server {
         proxy_buffering off;
         proxy_cache off;
         proxy_read_timeout 3600s;
-        # $http_host preserves the host:port the browser used; the app's
-        # request-relative Origin checks compare the Origin's port against the
-        # request Host's port, so $host (which strips the port) would 403 every
-        # mutation on any non-443 port.
+        # $http_host preserves the host:port the browser used. The app no
+        # longer performs origin checks, but keep the full host:port anyway so
+        # proxied requests are indistinguishable from direct access (any
+        # Host-derived behavior, logs, and diagnostics see the real value);
+        # $host (which strips the port) would change the seen host:port.
         proxy_set_header Host $http_host;
-        # The app ignores X-Forwarded-* entirely (its checks are
-        # request-relative); set them only for nginx's own logging.
+        # The app ignores X-Forwarded-* entirely; set them only for nginx's
+        # own logging.
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto https;
     }

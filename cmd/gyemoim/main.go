@@ -2,8 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
@@ -25,7 +23,6 @@ import (
 	"github.com/gosuda/gyemoim/internal/processlock"
 	"github.com/gosuda/gyemoim/internal/provider"
 	"github.com/gosuda/gyemoim/internal/siwc"
-	"github.com/gosuda/gyemoim/internal/websecurity"
 )
 
 const (
@@ -129,21 +126,16 @@ func run(args []string) error {
 		}
 	}()
 
-	csrfToken, err := randomToken()
-	if err != nil {
-		return fmt.Errorf("create management request token: %w", err)
-	}
 	startedAt := time.Now().UTC()
 	// Diagnostics-only in-memory tracker of successful local-key
 	// authentications; the gateway records into it on the request path and the
 	// periodic flusher below persists it to config.db off the request path.
 	keyUsage := gateway.NewKeyUsageTracker()
-	uiHandler, err := httpui.New(dataDirectory, listenPort, startedAt, csrfToken, store, historyRecorder)
+	uiHandler, err := httpui.New(dataDirectory, listenPort, startedAt, store, historyRecorder)
 	if err != nil {
 		return err
 	}
 
-	guard := websecurity.New(csrfToken)
 	oauthManager := siwc.NewManager(store, listenPort)
 	connectService := connect.NewService(store, oauthManager)
 	responsesAdapter := provider.NewOpenAIResponsesAdapter()
@@ -151,27 +143,24 @@ func run(args []string) error {
 	// harness records into it and the management API reads it.
 	rejectionLog := httpapi.NewRejectionLog()
 	mux := http.NewServeMux()
-	// Browser-origin protections cover the UI and management JSON API; the
-	// bearer-authenticated /v1 harness routes sit outside them. Management
-	// session enforcement lives inside each handler: /api/ routes gate
-	// themselves in httpapi (login and logout opt out), while UI page requests
-	// redirect to /login. /auth/callback and /v1/ need no session.
-	mux.Handle("/api/", guard.Management(httpapi.NewManagement(store, uiHandler, oauthManager, connectService, historyRecorder, rejectionLog)))
-	mux.Handle("GET /auth/callback", guard.Callback(http.HandlerFunc(oauthManager.ServeCallback)))
-	// The connect endpoints sit deliberately OUTSIDE the session and CSRF
-	// guards, wrapped only in security headers: they serve the enrollment
-	// script running on the admin's browser machine, which is not a browser
-	// session and can carry neither the session cookie nor the CSRF token.
+	// /api/ and the UI pages gate themselves on a management session inside
+	// their handlers (login and logout opt out; page requests redirect to
+	// /login). /auth/callback and /v1/ need no session.
+	mux.Handle("/api/", httpapi.NewManagement(store, uiHandler, oauthManager, connectService, historyRecorder, rejectionLog))
+	mux.Handle("GET /auth/callback", http.HandlerFunc(oauthManager.ServeCallback))
+	// The connect endpoints sit deliberately OUTSIDE the session gate: they
+	// serve the enrollment script running on the admin's browser machine,
+	// which is not a browser session and cannot carry the session cookie.
 	// The single-use enrollment code is the capability instead — 128 bits of
 	// randomness, a ~10-minute TTL, consumed at the first claim, bound to one
 	// provider. Both endpoints answer every failure with the same generic JSON
 	// error and never reveal whether a code existed, expired, or was already
 	// used; completing a flow additionally requires the single-use OAuth state
 	// recorded at claim time. See docs/web-deployment.md decision 7.
-	mux.Handle("POST /connect/claim", guard.Callback(http.HandlerFunc(connectService.ServeClaim)))
-	mux.Handle("POST /connect/complete", guard.Callback(http.HandlerFunc(connectService.ServeComplete)))
+	mux.Handle("POST /connect/claim", http.HandlerFunc(connectService.ServeClaim))
+	mux.Handle("POST /connect/complete", http.HandlerFunc(connectService.ServeComplete))
 	mux.Handle("/v1/", httpapi.NewHarness(gateway.New(store, keyUsage), historyRecorder, oauthManager, responsesAdapter, rejectionLog))
-	mux.Handle("/", guard.Management(httpapi.RequireManagementSession(store, uiHandler)))
+	mux.Handle("/", httpapi.RequireManagementSession(store, uiHandler))
 
 	// Local-key last-used flusher. The gateway records successful local-key
 	// authentications only in memory (constant-time, process-local, like the
@@ -268,14 +257,6 @@ func run(args []string) error {
 		}
 		return nil
 	}
-}
-
-func randomToken() (string, error) {
-	var value [32]byte
-	if _, err := rand.Read(value[:]); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(value[:]), nil
 }
 
 // flushKeyUsage persists one tracker snapshot off the request path. A failed

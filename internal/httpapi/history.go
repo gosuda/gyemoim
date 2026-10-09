@@ -70,8 +70,8 @@ func (api *managementAPI) deleteStorageHistory(w http.ResponseWriter, r *http.Re
 
 // previewStorageDelete answers "how much would the date-range deletion
 // remove?" without changing any history file. Like the other history reads it
-// is GET-only behind the management session gate — plain GET semantics are
-// CSRF-safe — and reuses the bounded-query failure mapping.
+// is GET-only behind the management session gate, and reuses the bounded-query
+// failure mapping.
 func (api *managementAPI) previewStorageDelete(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		methodNotAllowed(w, http.MethodGet)

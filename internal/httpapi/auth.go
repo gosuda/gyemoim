@@ -1,7 +1,6 @@
 // Management authentication endpoints: login, logout, and self-service password
-// change. They run under guard.Management, so Origin and CSRF checks apply to
-// them like every other mutation; the login form uses the CSRF token injected
-// into the served HTML. Session middleware for the remaining management surface
+// change. The login form posts JSON through fetch, like every other mutation
+// the UI makes. Session middleware for the remaining management surface
 // lives in session.go.
 package httpapi
 

@@ -268,7 +268,7 @@ clearMessageOnInput(byId("model-form"), byId("model-form-message"));
 // Review S1: the grant note bridges to the other half of the key+grant
 // invariant — the Model form's "not automatically granted" warning links to
 // the page where grants are made. The link is a pageLink button because the
-// strict CSP forbids inline anchors with handlers and the router is hash-based.
+// router is hash-based.
 {
   const note = byId("model-form-heading").parentElement.querySelector(".muted");
   note.append(" Grant access on the ", pageLink("Service accounts", "service-accounts"), " page.");

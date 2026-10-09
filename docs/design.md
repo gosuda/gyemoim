@@ -65,8 +65,7 @@ The agreed decisions, summarized:
   `document.title` and works with Back/Forward/reload/bookmarks.
 - **Module split.** `site.js` was split into dependency-free ES modules under
   `assets/js/` (state, dom, format, api, errors, feedback, nav, one module per
-  page, `app.js` entry). Still vanilla JS with relative imports under the
-  strict CSP; no bundler.
+  page, `app.js` entry). Still vanilla JS with relative imports; no bundler.
 - **Error humanization.** A shared mapping module translates a small set of
   known generic/conflict responses (duplicate-name 409s, JSON-field leaks)
   into labeled, actionable sentences; server messages that are already
@@ -247,7 +246,7 @@ The first version provides history browsing, request details, basic usage aggreg
 
 Store Providers and their credentials, issued OAuth client IDs, the host ID, ServiceAccounts and local key hashes, Models and strategy settings, ServiceAccount Model permissions, and storage settings in SQLite.
 
-Create the application data directory automatically. Apply owner-only directory and file permissions. The loopback WebUI opens directly without an administrator login, password, or initial approval step. Protect WebUI mutations with Origin and CSRF validation; these protections must not introduce an administrator sign-in flow.
+Create the application data directory automatically. Apply owner-only directory and file permissions. The loopback WebUI opens directly without an administrator login, password, or initial approval step. WebUI mutations require an authenticated management session (login, backoff, and session rules as decided for the web deployment).
 
 Request bodies and usage history are stored in log files rather than SQLite. In-memory aggregates are disposable and can be rebuilt from the logs.
 
@@ -291,6 +290,7 @@ Implementation is split into T01 through T17 and tracked in [implementation-plan
 - Optional advanced Model metadata consists of `contextWindow`, `maxTokens`, `input`, `reasoning`, and `supportedReasoningEfforts`. Populate fields only from exact metadata, do not guess values, and generate `models.json` only when the metadata is complete.
 - The gateway implements the provider-supported Responses API contract for reasoning and non-reasoning models. pi's initial metadata limitation does not narrow the gateway contract.
 - Deleting a Model is refused while explicit service-account grants reference it — the same guarded-delete rule as Provider deletion — so grants must be removed first and are never removed behind the caller's back.
+- The browser-facing web security layer (CSRF token, Origin/Sec-Fetch-Site checks, the security header set including CSP, and the `__Host-`/`Secure` session cookie) was removed by owner decision (2026-10-09). Plain-HTTP LAN access is the primary usage mode, so the session cookie is the plain `gym_session` (`HttpOnly; SameSite=Lax; Path=/`). Residual risk: a malicious page in the same browser can drive mutations; `SameSite=Lax` on the session cookie retains baseline cross-site POST protection, and the auth value is still required for every action.
 
 ## Acceptance Criteria
 
