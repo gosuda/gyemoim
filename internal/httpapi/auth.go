@@ -162,6 +162,18 @@ func (api *managementAPI) changePassword(w http.ResponseWriter, r *http.Request,
 	writeJSON(w, http.StatusOK, updated)
 }
 
+// me returns the signed-in user (hash-free) so the UI knows the current
+// identity — the change-password page displays the username, and the user
+// panel marks the account the browser is signed in with. It deliberately stays
+// reachable while a forced password change is pending.
+func (api *managementAPI) me(w http.ResponseWriter, r *http.Request, user config.User) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w, http.MethodGet)
+		return
+	}
+	writeJSON(w, http.StatusOK, user)
+}
+
 // authenticate resolves the session for every management path except the auth
 // endpoints that opt out, writing the JSON error response itself on failure.
 func (api *managementAPI) authenticate(w http.ResponseWriter, r *http.Request) (config.User, config.Session, bool) {

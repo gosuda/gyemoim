@@ -208,6 +208,18 @@ func (s *Store) DeleteOtherUserSessions(ctx context.Context, userID string, keep
 	return nil
 }
 
+// DeleteAllUserSessions revokes every Session of a User with no exception, as
+// required when an administrator resets a password: the affected user must sign
+// in again everywhere with the reset password. (DeleteOtherUserSessions cannot
+// express this — a nil keep-hash would compare against SQL NULL and match
+// nothing.)
+func (s *Store) DeleteAllUserSessions(ctx context.Context, userID string) error {
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM sessions WHERE user_id = ?`, userID); err != nil {
+		return fmt.Errorf("delete all sessions for user: %w", err)
+	}
+	return nil
+}
+
 // DeleteExpiredSessions prunes Sessions past their expiry and returns how many
 // rows were removed; callers run it opportunistically. The RFC3339Nano TEXT
 // timestamps are fixed-width, so lexicographic comparison matches time order.

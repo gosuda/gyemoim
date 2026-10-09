@@ -220,6 +220,48 @@ database must keep working.
   not logged. Verified: first wrong attempt costs argon2id (~0.16 s), later
   rejects ~0.4 ms, correct password during a window rejected cheaply and
   accepted after it, different usernames independent, restart resets state.
+- **Step 6 — done (2026-10-09).** User management API (`GET/POST /api/users`,
+  `DELETE /api/users/{id}`, `POST .../disable|enable`, `POST
+  .../password` with full session revocation, `GET /api/auth/me` reachable
+  through the forced-change gate) plus the Users panel (list, add form,
+  disable/enable, reset password, delete with confirm), a header logout
+  button, and the forced-change redirect inside the UI's `api()` helper.
+  Self-rules: no self-disable/self-delete; the last remaining user cannot be
+  deleted. pi-config no longer carries any server-derived base URL — the UI
+  injects `baseUrl` from `window.location.origin + "/v1"` (decision 4). New
+  users start with `must_change_password`. Verified: vet/build/`node --check`
+  clean; full curl pass (201/409/400 paths, disable kills sessions
+  immediately, reset forces change, self/last-user rules, unauthenticated
+  401); real-browser pass (login, Users panel add/delete, logout, redirect
+  after logout).
+- **Step 6 — done (2026-10-09).** User management API under the session guard
+  (every signed-in user has full rights): `GET /api/users` (hash-free),
+  `POST /api/users` (username: trimmed, 1–64 Unicode characters, no whitespace
+  inside; password ≥ 12 chars; created with `must_change_password`; duplicate →
+  409), `POST /api/users/{id}/disable|enable`, `DELETE /api/users/{id}`
+  (sessions cascade), and `POST /api/users/{id}/password` (admin reset: sets
+  `must_change_password` and revokes ALL of that user's sessions via the new
+  `DeleteAllUserSessions` store method — `DeleteOtherUserSessions` cannot
+  express this because a nil keep-hash would compare against SQL NULL and
+  delete nothing). A user cannot disable or delete themselves and the last
+  remaining user cannot be deleted (400s). New `GET /api/auth/me` returns the
+  signed-in user and is exempt from the forced-change gate so the
+  change-password page can display the username. Main UI: Users panel
+  (list, add form, disable/enable, prompt-based password reset, confirm-based
+  delete; self-actions hidden), header Log out button, and the `api()` helper
+  redirects to `/change-password` whenever a response carries
+  `password_change_required`. Pi config (decision 4): the server no longer
+  derives any base URL — the `baseUrl` field is gone from the endpoint's JSON
+  and the UI injects `window.location.origin + "/v1"` into the provider entry
+  before copy/download. Verified: vet/build clean; full curl pass — bootstrap →
+  login → forced change clears gate; create bob (201), duplicate 409, short
+  password 400, whitespace/empty username 400; bob forced-change flow, disable
+  kills bob's live session immediately, disabled login → generic 401, enable
+  restores login; self-disable/self-delete 400; second-to-last delete works,
+  last-remaining delete 400; admin reset of bob's password revokes bob's
+  sessions and forces a change; pi-config JSON contains no 127.0.0.1 or port
+  and the UI-built fragment carries the browser origin; logout works; forged
+  Origin 403; missing CSRF 403; unauthenticated `/api/users` 401.
 
 ## Work breakdown
 

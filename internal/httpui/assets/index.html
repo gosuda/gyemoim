@@ -24,6 +24,7 @@
         <button class="nav-item" type="button" data-page="models"><span class="nav-icon" aria-hidden="true">▦</span>Models</button>
         <button class="nav-item" type="button" data-page="requests"><span class="nav-icon" aria-hidden="true">≡</span>Requests</button>
         <button class="nav-item" type="button" data-page="storage"><span class="nav-icon" aria-hidden="true">▤</span>Storage</button>
+        <button class="nav-item" type="button" data-page="users"><span class="nav-icon" aria-hidden="true">◍</span>Users</button>
       </nav>
       <div class="sidebar-bottom">
         <span class="status-dot" aria-hidden="true"></span>
@@ -37,7 +38,10 @@
           <p class="eyebrow">GYEMOIM / <span id="breadcrumb">OVERVIEW</span></p>
           <h1 id="page-title">Overview</h1>
         </div>
-        <div class="local-badge"><span class="status-dot" aria-hidden="true"></span>Local instance</div>
+        <div class="topbar-actions">
+          <button class="button quiet small" id="logout-button" type="button">Log out</button>
+          <div class="local-badge"><span class="status-dot" aria-hidden="true"></span>Local instance</div>
+        </div>
       </header>
 
       <section class="page-view" data-view="overview" aria-labelledby="overview-heading">
@@ -215,6 +219,30 @@
           <p class="form-message" id="history-delete-message" role="status" aria-live="polite"></p>
           <p class="deletion-status" id="history-delete-status" role="status" aria-live="polite">Loading deletion status…</p>
         </section>
+      </section>
+
+      <section class="page-view" data-view="users" aria-labelledby="users-heading" hidden>
+        <div class="page-intro">
+          <h2 id="users-heading">Users</h2>
+          <p class="muted">Manage who can sign in to this management interface. Every signed-in user has full management rights.</p>
+        </div>
+        <div class="section-grid">
+          <section class="panel form-panel" aria-labelledby="user-create-heading">
+            <div class="panel-heading"><div><h3 id="user-create-heading">Add a user</h3><p class="muted">The new user must change the temporary password before using the interface.</p></div></div>
+            <form id="user-create-form" class="stack-form">
+              <label for="user-create-username">Username</label>
+              <input id="user-create-username" name="username" type="text" maxlength="64" autocomplete="off" required placeholder="e.g. bob">
+              <label for="user-create-password">Temporary password (at least 12 characters)</label>
+              <input id="user-create-password" name="password" type="password" autocomplete="new-password" minlength="12" required>
+              <button class="button primary" type="submit">Add user</button>
+              <p class="form-message" id="user-create-message" aria-live="polite"></p>
+            </form>
+          </section>
+          <section class="panel list-panel" aria-labelledby="user-list-heading">
+            <div class="panel-heading"><div><h3 id="user-list-heading">Users</h3><p class="muted">Disabling or deleting a user signs them out immediately.</p></div><button class="button quiet small" type="button" data-refresh="users">Refresh</button></div>
+            <div class="card-list" id="user-list" aria-live="polite"><p class="muted">Loading users…</p></div>
+          </section>
+        </div>
       </section>
     </main>
   </div>

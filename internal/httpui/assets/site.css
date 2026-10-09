@@ -38,6 +38,7 @@ input, select { min-width: 0; }
 .status-dot { display: inline-block; width: 7px; height: 7px; flex: 0 0 7px; border-radius: 50%; background: var(--green); box-shadow: 0 0 0 3px #2b9a6d18; }
 .main-content { width: min(100% - 248px, 1320px); margin-left: 248px; padding: 31px 43px 50px; }
 .topbar { display: flex; align-items: center; justify-content: space-between; padding-bottom: 27px; border-bottom: 1px solid #e5e9ed; }
+.topbar-actions { display: flex; align-items: center; gap: 12px; }
 .eyebrow { margin: 0 0 8px; font-size: 9px; }
 .eyebrow span { color: #657181; }
 h1 { margin: 0; color: #1d2632; font-size: 23px; font-weight: 680; letter-spacing: -.55px; }

@@ -7,6 +7,8 @@
     providers: [],
     accounts: [],
     models: [],
+    users: [],
+    currentUserID: "",
     editingModel: null,
     catalogRequest: 0,
     sensitiveCleanup: new Set(),
@@ -24,6 +26,7 @@
     models: "Models",
     requests: "Requests",
     storage: "Storage",
+    users: "Users",
   };
 
   const byId = (id) => document.getElementById(id);
@@ -64,6 +67,12 @@
       try { data = JSON.parse(text); } catch { /* Use a status message below. */ }
     }
     if (!response.ok) {
+      // The forced-change gate also covers API calls issued before the redirect:
+      // the browser must finish the password change before anything else loads.
+      if (data?.error?.code === "password_change_required") {
+        window.location.assign("/change-password");
+        throw new Error("A password change is required before using the management interface.");
+      }
       const message = data?.error?.message || `Request failed (${response.status})`;
       throw new Error(message);
     }
@@ -102,6 +111,7 @@
     if (page === "models") return loadModelsAndProviders();
     if (page === "requests") return loadRequestHistory();
     if (page === "storage") return loadStorage();
+    if (page === "users") return loadUsers();
   }
 
   async function loadStorage() {
@@ -483,6 +493,86 @@
     }
   }
 
+  async function loadUsers() {
+    const list = byId("user-list");
+    list.replaceChildren(element("p", "muted", "Loading users…"));
+    try {
+      const [users, me] = await Promise.all([api("/api/users"), api("/api/auth/me")]);
+      state.users = users;
+      state.currentUserID = me.id;
+      renderUsers();
+    } catch (error) {
+      list.replaceChildren(element("p", "empty-state", `Could not load users: ${error.message}`));
+    }
+  }
+
+  function renderUsers() {
+    const list = byId("user-list");
+    list.replaceChildren();
+    for (const user of state.users) list.append(renderUser(user));
+  }
+
+  function renderUser(user) {
+    const card = element("article", "resource-card");
+    const header = element("div", "resource-header");
+    const titleBlock = element("div", "resource-title");
+    titleBlock.append(element("h4", "", user.username));
+    const badges = element("div", "badge-row");
+    const disabled = Boolean(user.disabledAt);
+    badges.append(element("span", `tag ${disabled ? "tag-muted" : "tag-success"}`, disabled ? "Disabled" : "Active"));
+    if (user.mustChangePassword) badges.append(element("span", "tag tag-muted", "Password change pending"));
+    if (user.id === state.currentUserID) badges.append(element("span", "tag", "You"));
+    titleBlock.append(badges);
+    const controls = element("div", "card-actions");
+    if (user.id !== state.currentUserID) {
+      controls.append(button(disabled ? "Enable" : "Disable", "quiet small", () => setUserEnabled(user, !disabled)));
+      controls.append(button("Reset password", "quiet small", () => resetUserPassword(user)));
+      controls.append(button("Delete", "danger quiet small", () => deleteUser(user)));
+    }
+    header.append(titleBlock, controls);
+    card.append(header);
+    card.append(element("p", "resource-copy", `Created ${formatDate(user.createdAt)}`));
+    return card;
+  }
+
+  async function setUserEnabled(user, disable) {
+    try {
+      await api(`/api/users/${encodeURIComponent(user.id)}/${disable ? "disable" : "enable"}`, {
+        method: "POST", body: JSON.stringify({}),
+      });
+      await loadUsers();
+    } catch (error) {
+      window.alert(error.message);
+    }
+  }
+
+  async function resetUserPassword(user) {
+    const newPassword = window.prompt(`Set a new password for “${user.username}” (at least 12 characters). Their sessions are signed out and the password must be changed again at the next sign-in.`);
+    if (newPassword === null) return;
+    if (newPassword.length < 12) {
+      window.alert("The new password must contain at least 12 characters.");
+      return;
+    }
+    try {
+      await api(`/api/users/${encodeURIComponent(user.id)}/password`, {
+        method: "POST", body: JSON.stringify({ newPassword }),
+      });
+      await loadUsers();
+    } catch (error) {
+      window.alert(error.message);
+    }
+  }
+
+  async function deleteUser(user) {
+    if (!window.confirm(`Delete user “${user.username}”? Their sessions are signed out immediately.`)) return;
+    try {
+      await api(`/api/users/${encodeURIComponent(user.id)}`, { method: "DELETE" });
+      await loadUsers();
+    } catch (error) {
+      window.alert(error.message);
+    }
+  }
+
   async function loadAccountDetails(account, details, panel) {
     if (details.loading || details.loaded) return;
     details.loading = true;
@@ -653,8 +743,15 @@
     const environmentName = result.apiKeyEnvironmentVariable;
     content.append(element("p", "muted", "Pi will read its API key from this environment variable. Issue a Gyemoim key above if needed, copy it when it is shown once, and set the variable in the environment used to launch pi:"));
     content.append(element("code", "pi-env-command", `export ${environmentName}='paste-the-one-time-issued-Gyemoim-key-here'`));
-    content.append(element("p", "muted", "Download or copy this fragment, then merge its provider entry into the providers object in ~/.pi/agent/models.json. Preserve existing providers and other settings. Gyemoim does not write that file automatically. Check setup again after changing grants or metadata."));
-    const fragment = `${JSON.stringify(result.configuration, null, 2)}\n`;
+    content.append(element("p", "muted", "Download or copy this fragment, then merge its provider entry into the providers object in ~/.pi/agent/models.json. Preserve existing providers and other settings. Gyemoim does not write that file automatically. The provider baseUrl is built from the browser address you are using right now, so the fragment works through reverse proxies and remote access without server-side URL guessing. Check setup again after changing grants or metadata."));
+    const withBaseURL = {
+      ...result.configuration,
+      providers: Object.fromEntries(Object.entries(result.configuration.providers).map(([id, provider]) => [
+        id,
+        { ...provider, baseUrl: `${window.location.origin}/v1` },
+      ])),
+    };
+    const fragment = `${JSON.stringify(withBaseURL, null, 2)}\n`;
     const actions = element("div", "card-actions");
     const copyMessage = element("span", "muted", "");
     actions.append(button("Copy config fragment", "quiet small", async () => {
@@ -1851,6 +1948,33 @@
   byId("model-cancel").addEventListener("click", cancelModelEdit);
   byId("model-provider").addEventListener("change", resetProviderModelCatalog);
   byId("model-catalog-load").addEventListener("click", loadProviderModelCatalog);
+
+  byId("user-create-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const submit = form.querySelector('[type="submit"]');
+    const message = byId("user-create-message");
+    submit.disabled = true;
+    showMessage(message);
+    try {
+      await api("/api/users", { method: "POST", body: JSON.stringify({ username: form.elements.username.value, password: form.elements.password.value }) });
+      form.reset();
+      showMessage(message, "User added. They must change the temporary password at first sign-in.", "success");
+      await loadUsers();
+    } catch (error) {
+      showMessage(message, error.message, "error");
+    } finally {
+      submit.disabled = false;
+    }
+  });
+
+  byId("logout-button").addEventListener("click", async () => {
+    try {
+      await api("/api/auth/logout", { method: "POST", body: JSON.stringify({}) });
+    } catch { /* Clearing the cookie matters more than the error. */ }
+    window.location.assign("/login");
+  });
+
   document.querySelectorAll("[data-page]").forEach((item) => item.addEventListener("click", () => navigate(item.dataset.page)));
   document.querySelectorAll("[data-refresh]").forEach((item) => item.addEventListener("click", () => refreshPage(item.dataset.refresh)));
 

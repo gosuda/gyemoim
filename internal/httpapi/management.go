@@ -32,14 +32,13 @@ type managementAPI struct {
 	oauth    *siwc.Manager
 	history  *history.QueryService
 	storage  *history.Recorder
-	port     int
 	backoff  loginBackoff
 }
 
 // NewManagement creates the management API handler. Paths outside the JSON API
 // routes fall through to the embedded UI, which also owns /api/status.
-func NewManagement(store *config.Store, fallback http.Handler, oauthManager *siwc.Manager, port int, recorder *history.Recorder) http.Handler {
-	return &managementAPI{store: store, gateway: gateway.New(store), fallback: fallback, oauth: oauthManager, history: history.NewQueryService(recorder), storage: recorder, port: port}
+func NewManagement(store *config.Store, fallback http.Handler, oauthManager *siwc.Manager, recorder *history.Recorder) http.Handler {
+	return &managementAPI{store: store, gateway: gateway.New(store), fallback: fallback, oauth: oauthManager, history: history.NewQueryService(recorder), storage: recorder}
 }
 
 func (api *managementAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -63,8 +62,9 @@ func (api *managementAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Forced password change: only the password change itself and logout (handled
-	// above) work until the user sets a new password.
-	if user.MustChangePassword && r.URL.Path != "/api/auth/password" {
+	// above) work until the user sets a new password. /api/auth/me stays reachable
+	// so the change-password page can show which user is signed in.
+	if user.MustChangePassword && r.URL.Path != "/api/auth/password" && r.URL.Path != "/api/auth/me" {
 		writeManagementError(w, http.StatusForbidden, "a password change is required before using the management API", "password_change_required")
 		return
 	}
@@ -111,8 +111,18 @@ func (api *managementAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		api.requestContent(w, r, parts[1])
 	case len(parts) == 1 && parts[0] == "usage":
 		api.usage(w, r)
+	case len(parts) == 2 && parts[0] == "auth" && parts[1] == "me":
+		api.me(w, r, user)
 	case len(parts) == 2 && parts[0] == "auth" && parts[1] == "password":
 		api.changePassword(w, r, session, user)
+	case len(parts) == 1 && parts[0] == "users":
+		api.users(w, r)
+	case len(parts) == 2 && parts[0] == "users":
+		api.user(w, r, parts[1], user)
+	case len(parts) == 3 && parts[0] == "users" && (parts[2] == "disable" || parts[2] == "enable"):
+		api.setUserEnabled(w, r, parts[1], user, parts[2] == "disable")
+	case len(parts) == 3 && parts[0] == "users" && parts[2] == "password":
+		api.resetUserPassword(w, r, parts[1])
 	case len(parts) == 1 && parts[0] == "storage":
 		api.storageStatus(w, r)
 	case len(parts) == 2 && parts[0] == "storage" && parts[1] == "delete":

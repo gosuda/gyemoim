@@ -2,7 +2,6 @@ package httpapi
 
 import (
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"strings"
 
@@ -27,7 +26,6 @@ type piSetupResponse struct {
 	AccountID                      string           `json:"accountId"`
 	AccountEnabled                 bool             `json:"accountEnabled"`
 	ProviderID                     string           `json:"providerId"`
-	BaseURL                        string           `json:"baseUrl"`
 	APIKeyEnvironmentVariable      string           `json:"apiKeyEnvironmentVariable"`
 	Models                         []piSetupModel   `json:"models"`
 	Configuration                  *piConfiguration `json:"configuration,omitempty"`
@@ -38,11 +36,13 @@ type piConfiguration struct {
 	Providers map[string]piProvider `json:"providers"`
 }
 
+// piProvider deliberately carries no base URL: the reachable address depends on
+// how the browser reaches this UI (decision 4), so the UI JavaScript fills
+// `baseUrl` from window.location.origin before saving the fragment.
 type piProvider struct {
-	BaseURL string    `json:"baseUrl"`
-	API     string    `json:"api"`
-	APIKey  string    `json:"apiKey"`
-	Models  []piModel `json:"models"`
+	API    string    `json:"api"`
+	APIKey string    `json:"apiKey"`
+	Models []piModel `json:"models"`
 }
 
 type piModel struct {
@@ -79,11 +79,10 @@ func (api *managementAPI) piAccountConfig(w http.ResponseWriter, r *http.Request
 
 	providerID := piProviderID(account.ID)
 	environmentName := piAPIKeyEnvironmentVariable(account.ID)
-	baseURL := fmt.Sprintf("http://127.0.0.1:%d/v1", api.port)
 	response := piSetupResponse{
 		AccountID: account.ID, AccountEnabled: account.Enabled, ProviderID: providerID,
-		BaseURL: baseURL, APIKeyEnvironmentVariable: environmentName,
-		Models: make([]piSetupModel, 0, len(models)),
+		APIKeyEnvironmentVariable: environmentName,
+		Models:                    make([]piSetupModel, 0, len(models)),
 	}
 	piModels := make([]piModel, 0, len(models))
 	for _, model := range models {
@@ -108,7 +107,7 @@ func (api *managementAPI) piAccountConfig(w http.ResponseWriter, r *http.Request
 		}
 	default:
 		response.Configuration = &piConfiguration{Providers: map[string]piProvider{providerID: {
-			BaseURL: baseURL, API: "openai-responses", APIKey: "${" + environmentName + "}", Models: piModels,
+			API: "openai-responses", APIKey: "${" + environmentName + "}", Models: piModels,
 		}}}
 	}
 	writeJSON(w, http.StatusOK, response)

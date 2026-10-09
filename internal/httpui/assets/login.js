@@ -48,6 +48,19 @@
 
   const changeForm = document.getElementById("change-password-form");
   if (changeForm) {
+    const label = document.getElementById("change-password-user");
+    // /api/auth/me stays reachable while the forced change is pending, so the
+    // page can show which user is signed in.
+    fetch("/api/auth/me", { headers: { Accept: "application/json" }, credentials: "same-origin", cache: "no-store" })
+      .then(async (response) => {
+        if (!response.ok) return;
+        const me = await response.json();
+        if (label && me?.username) {
+          label.textContent = `Signed in as ${me.username}.`;
+          label.hidden = false;
+        }
+      })
+      .catch(() => { /* The username line simply stays hidden. */ });
     const message = document.getElementById("change-password-message");
     changeForm.addEventListener("submit", async (event) => {
       event.preventDefault();
