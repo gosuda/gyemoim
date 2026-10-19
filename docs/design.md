@@ -23,7 +23,7 @@ The service has four primary goals:
 - Use Sign in with ChatGPT for OpenAI provider authentication; pi agent setup is documented in [pi.md](pi.md), and request-compatibility rules in [harness-compatibility.md](harness-compatibility.md).
 - Manage three user-facing concepts in the WebUI: Provider, ServiceAccount, and Model.
 - Issue local API keys to ServiceAccounts used by harnesses. Provider authentication remains centralized.
-- Let users assign Model names and connect each Model to one Provider and one upstream model. Only single-target selection is implemented, behind a Go strategy interface.
+- Let users assign Model names and connect each Model to one Provider and one upstream model. The harness executes single-target routes only; the gateway also provides a decision-aware fallback selector and shared runtime policy.
 - Permit only explicitly assigned Models for each ServiceAccount. Newly created Models require an explicit grant; there is no all-Models permission.
 - Record prompts, responses, tool definitions, and tool results by default, excluding authentication credentials.
 - Block new inference requests when request recording is unavailable; do not offer an unlogged bypass.
@@ -132,11 +132,11 @@ Statistics are grouped by ServiceAccount, requested Model, and actual Provider/u
 
 ### Extensible Model Selection
 
-Only a single-target strategy is implemented: each Model selects one configured Provider and upstream model, with no fallback or automatic retry. The WebUI does not expose a strategy picker or multiple targets.
+Only single-target execution is enabled: each management-configured Model selects one Provider and upstream model, with no fallback or automatic retry. The WebUI does not expose a strategy picker or multiple targets. The gateway additionally implements fallback selection and runtime observations, independently of the executor. See [routing runtime](routing-runtime.md) for its Go API and authenticated diagnostic endpoint.
 
-The configuration store keeps targets in an ordered `model_targets` table. Model reads snapshot that list together with the model revision; legacy single-target fields project its first entry. The management API remains single-only, and storing a non-single strategy internally does not make it executable. See [the storage contract](config-store.md#model-target-contract).
+The configuration store keeps targets in an ordered `model_targets` table. Model reads snapshot that list together with the model revision; legacy single-target fields project its first entry. Authorized route resolution snapshots the active key/account, explicit grant, target order, and every referenced Provider in one brief transaction, released before any I/O. The management API remains single-only, and storing a non-single strategy internally does not make it executable by the harness. See [the storage contract](config-store.md#model-target-contract).
 
-Model selection is abstracted through Go interfaces. Fallback is one possible strategy; the configuration model and execution path also accommodate other strategies, such as weighted selection or selection based on observed latency. Those strategies are extension examples rather than a requirement to implement them all.
+Model selection is abstracted through Go interfaces. Single selection retains the legacy interface below. Fallback requires the additive `DecisionSelection.NextDecision` interface, returning one attempt or skip candidate at a time so the executor can durably record every skip. Legacy `Next` on fallback returns `ErrDecisionRequired` without selecting anything. Other strategies, such as weighted selection or selection based on observed latency, are extension examples rather than requirements.
 
 A strategy creates request-local selection state, chooses an initial target, and can receive an attempt outcome when choosing a subsequent target. An illustrative interface boundary is:
 
@@ -260,7 +260,7 @@ If request recording becomes unavailable, including because the disk is full, re
 - pi agent can connect using the documented Responses configuration, and supported Responses behavior is preserved without pi-specific API semantics.
 - Unsupported request capabilities follow the classified policy in [harness-compatibility.md](harness-compatibility.md): benign fields and unsupported tools are dropped and recorded; stateful references and untranslatable requests produce clear errors; conversation state is never silently lost.
 - Statistics preserve the ServiceAccount, requested Model, and actual Provider/upstream model for every attempt.
-- Each Model has exactly one target; forwarding makes no automatic fallback or retry attempts. The strategy interface remains available for future selection implementations.
+- Management-created Models have exactly one target; forwarding makes no automatic fallback or retry attempts. The gateway's decision-aware fallback selector is not enabled in the harness executor.
 - Newly created Models remain inaccessible to a ServiceAccount until explicitly granted.
 - Restart, concurrent refresh, missing authorization scopes, and reauthentication do not mix credential sets or account registrations.
 - Tool calls, normal completion, stream errors, incomplete responses, cancellation, and disconnection are reflected consistently in client behavior and logs.

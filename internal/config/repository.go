@@ -982,48 +982,64 @@ func (s *Store) RevokeLocalKeyForAccount(ctx context.Context, accountID, keyID s
 	return requireAffected(result, "local key", keyID)
 }
 
-// ResolveGrantedRoute reads the current key/account state, explicit grant, Model,
-// and Provider in one read transaction. The returned values form an admission-time
-// snapshot for an inference request; callers should release it before upstream I/O.
+// ResolveGrantedRoute preserves the legacy first-provider projection. All targets
+// and providers are read in the same authorized snapshot, even for this caller.
 func (s *Store) ResolveGrantedRoute(ctx context.Context, accountID, keyID, modelName string) (ServiceAccount, Model, Provider, error) {
+	account, model, providers, err := s.ResolveGrantedTargets(ctx, accountID, keyID, modelName)
+	if err != nil {
+		return ServiceAccount{}, Model{}, Provider{}, err
+	}
+	return account, model, providers[model.ProviderID], nil
+}
+
+// ResolveGrantedTargets snapshots the active key/account, explicit grant, ordered
+// model targets and every referenced provider. The transaction ends before return.
+func (s *Store) ResolveGrantedTargets(ctx context.Context, accountID, keyID, modelName string) (ServiceAccount, Model, map[string]Provider, error) {
 	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
-		return ServiceAccount{}, Model{}, Provider{}, fmt.Errorf("begin route snapshot: %w", err)
+		return ServiceAccount{}, Model{}, nil, fmt.Errorf("begin route snapshot: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
 	account, err := activeAccountForKey(ctx, tx, accountID, keyID)
 	if err != nil {
-		return ServiceAccount{}, Model{}, Provider{}, err
+		return ServiceAccount{}, Model{}, nil, err
 	}
 	model, err := scanModel(tx.QueryRowContext(ctx, `SELECT `+modelColumns+` FROM models m WHERE m.name = ?`, modelName))
 	if errors.Is(err, sql.ErrNoRows) {
-		return ServiceAccount{}, Model{}, Provider{}, notFound("model", modelName)
+		return ServiceAccount{}, Model{}, nil, notFound("model", modelName)
 	}
 	if err != nil {
-		return ServiceAccount{}, Model{}, Provider{}, fmt.Errorf("read model for route: %w", err)
+		return ServiceAccount{}, Model{}, nil, fmt.Errorf("read model for route: %w", err)
 	}
 	var grant string
 	err = tx.QueryRowContext(ctx, `SELECT model_id FROM model_grants WHERE account_id = ? AND model_id = ?`, accountID, model.ID).Scan(&grant)
 	if errors.Is(err, sql.ErrNoRows) {
-		return ServiceAccount{}, Model{}, Provider{}, ErrForbidden
+		return ServiceAccount{}, Model{}, nil, ErrForbidden
 	}
 	if err != nil {
-		return ServiceAccount{}, Model{}, Provider{}, fmt.Errorf("read route grant: %w", err)
+		return ServiceAccount{}, Model{}, nil, fmt.Errorf("read route grant: %w", err)
 	}
 	if model.ProviderID == "" {
-		return ServiceAccount{}, Model{}, Provider{}, errors.New("configured model has no provider target")
+		return ServiceAccount{}, Model{}, nil, errors.New("configured model has no provider target")
 	}
-	provider, err := scanProvider(tx.QueryRowContext(ctx, `SELECT id, name, provider_type, base_url, status, created_at, updated_at FROM providers WHERE id = ?`, model.ProviderID))
-	if errors.Is(err, sql.ErrNoRows) {
-		return ServiceAccount{}, Model{}, Provider{}, errors.New("configured model provider is missing")
-	}
-	if err != nil {
-		return ServiceAccount{}, Model{}, Provider{}, fmt.Errorf("read route provider: %w", err)
+	providers := make(map[string]Provider)
+	for _, target := range model.Targets {
+		if _, found := providers[target.ProviderID]; found {
+			continue
+		}
+		provider, err := scanProvider(tx.QueryRowContext(ctx, `SELECT id, name, provider_type, base_url, status, created_at, updated_at FROM providers WHERE id = ?`, target.ProviderID))
+		if errors.Is(err, sql.ErrNoRows) {
+			return ServiceAccount{}, Model{}, nil, errors.New("configured model provider is missing")
+		}
+		if err != nil {
+			return ServiceAccount{}, Model{}, nil, fmt.Errorf("read route provider: %w", err)
+		}
+		providers[provider.ID] = provider
 	}
 	if err := tx.Commit(); err != nil {
-		return ServiceAccount{}, Model{}, Provider{}, fmt.Errorf("commit route snapshot: %w", err)
+		return ServiceAccount{}, Model{}, nil, fmt.Errorf("commit route snapshot: %w", err)
 	}
-	return account, model, provider, nil
+	return account, model, providers, nil
 }
 
 // ListGrantedModelsForKey validates the active key in the same transaction used

@@ -247,6 +247,12 @@ func (api *harnessAPI) serveInference(w http.ResponseWriter, r *http.Request, fo
 		api.writeGatewayError(w, r, err, identity, modelName)
 		return
 	}
+	// The decision-aware fallback strategy is available to the gateway, but
+	// this executor still owns only the legacy single-attempt lifecycle.
+	if route.Model.Strategy != "single" {
+		api.writeGatewayError(w, r, gateway.ErrUnsupportedStrategy, identity, modelName)
+		return
+	}
 	preparation, err := api.tokens.BeginAccessTokenPreparation(r.Context(), route.Provider.ID)
 	if err != nil {
 		if r.Context().Err() != nil {

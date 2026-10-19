@@ -131,6 +131,7 @@ func run(args []string) error {
 	// authentications; the gateway records into it on the request path and the
 	// periodic flusher below persists it to config.db off the request path.
 	keyUsage := gateway.NewKeyUsageTracker()
+	gatewayService := gateway.New(store, keyUsage)
 	uiHandler, err := httpui.New(dataDirectory, listenPort, startedAt, store, historyRecorder)
 	if err != nil {
 		return err
@@ -146,7 +147,7 @@ func run(args []string) error {
 	// /api/ and the UI pages gate themselves on a management session inside
 	// their handlers (login and logout opt out; page requests redirect to
 	// /login). /auth/callback and /v1/ need no session.
-	mux.Handle("/api/", httpapi.NewManagement(store, uiHandler, oauthManager, connectService, historyRecorder, rejectionLog))
+	mux.Handle("/api/", httpapi.NewManagement(store, uiHandler, oauthManager, connectService, historyRecorder, rejectionLog, gatewayService))
 	mux.Handle("GET /auth/callback", http.HandlerFunc(oauthManager.ServeCallback))
 	// The connect endpoints sit deliberately OUTSIDE the session gate: they
 	// serve the enrollment script running on the admin's browser machine,
@@ -159,7 +160,7 @@ func run(args []string) error {
 	// recorded at claim time. See docs/web-deployment.md decision 7.
 	mux.Handle("POST /connect/claim", http.HandlerFunc(connectService.ServeClaim))
 	mux.Handle("POST /connect/complete", http.HandlerFunc(connectService.ServeComplete))
-	mux.Handle("/v1/", httpapi.NewHarness(gateway.New(store, keyUsage), historyRecorder, oauthManager, responsesAdapter, rejectionLog))
+	mux.Handle("/v1/", httpapi.NewHarness(gatewayService, historyRecorder, oauthManager, responsesAdapter, rejectionLog))
 	mux.Handle("/", httpapi.RequireManagementSession(store, uiHandler))
 
 	// Local-key last-used flusher. The gateway records successful local-key
@@ -171,6 +172,8 @@ func run(args []string) error {
 	// history rotation checker does. Restart semantics: in-memory entries are
 	// lost at restart, so a key's stored last-used time can lag successful use
 	// by at most one flush interval; that staleness is accepted by design.
+	// The same maintenance tick prunes unreferenced routing observations from
+	// a fresh full configuration snapshot; it never contacts providers.
 	flushStop := make(chan struct{})
 	flushDone := make(chan struct{})
 	go func() {
@@ -181,6 +184,11 @@ func run(args []string) error {
 			select {
 			case <-ticker.C:
 				flushKeyUsage(store, keyUsage)
+				pruneContext, cancelPrune := context.WithTimeout(context.Background(), 10*time.Second)
+				if err := gatewayService.PruneRuntime(pruneContext); err != nil {
+					fmt.Fprintln(os.Stderr, "gyemoim: routing runtime pruning is temporarily unavailable")
+				}
+				cancelPrune()
 			case <-flushStop:
 				return
 			}

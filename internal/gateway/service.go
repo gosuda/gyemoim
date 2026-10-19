@@ -41,12 +41,18 @@ type AttemptOutcome struct {
 	Outcome           string `json:"outcome"`
 	HTTPStatus        int    `json:"httpStatus,omitempty"`
 	ResponseCommitted bool   `json:"responseCommitted"`
+	ClientCanceled    bool   `json:"clientCanceled,omitempty"`
+	RecordingFailed   bool   `json:"recordingFailed,omitempty"`
+	// Failure must be an explicit executor classification. Outcome/HTTPStatus
+	// alone never authorize another attempt. Legacy single callers need none.
+	Failure *Failure `json:"-"`
 }
 
 // RoutingRequest is an immutable configuration snapshot plus the incoming body.
 // Strategies must keep their mutable selection state in the returned Selection.
 type RoutingRequest struct {
 	Model      config.Model
+	Providers  map[string]config.Provider
 	RawRequest json.RawMessage
 }
 
@@ -58,7 +64,7 @@ type RoutingStrategy interface {
 	NewSelection(context.Context, RoutingRequest) (Selection, error)
 }
 
-// SingleTargetStrategy implements the only first-version selection strategy.
+// SingleTargetStrategy preserves single execution regardless of cooldown state.
 // The strategy object itself has no request state; each call gets its own selection.
 type SingleTargetStrategy struct{}
 
@@ -73,8 +79,10 @@ func (SingleTargetStrategy) NewSelection(_ context.Context, request RoutingReque
 }
 
 type singleSelection struct {
-	target Target
-	used   bool
+	target   Target
+	used     bool
+	runtime  *Runtime
+	provider config.Provider
 }
 
 func (s *singleSelection) Next(_ context.Context, previous *AttemptOutcome) (Target, error) {
@@ -92,6 +100,7 @@ type ResolvedRoute struct {
 	Identity  Identity
 	Model     config.Model
 	Provider  config.Provider
+	Providers map[string]config.Provider // all targets; Provider projects the first
 	Selection Selection
 }
 
@@ -102,12 +111,17 @@ type Service struct {
 	// usage records successful local-key authentications in memory for the
 	// periodic last-used flush. Optional and nil-safe; recording here is a
 	// constant-time in-memory write and never blocks or touches the database.
-	usage *KeyUsageTracker
+	usage   *KeyUsageTracker
+	runtime *Runtime
 }
 
 func New(store *config.Store, usage *KeyUsageTracker) *Service {
-	return &Service{store: store, strategy: SingleTargetStrategy{}, usage: usage}
+	runtime := NewRuntime()
+	return &Service{store: store, strategy: Strategies{Runtime: runtime}, usage: usage, runtime: runtime}
 }
+
+// Runtime is shared by management diagnostics and the future executor.
+func (s *Service) Runtime() *Runtime { return s.runtime }
 
 // AuthenticateBearer accepts exactly an Authorization value of the form
 // "Bearer gym_<base64url-encoded 32 random bytes>" and returns its identity snapshot.
@@ -150,10 +164,10 @@ func (s *Service) IssueLocalKey(ctx context.Context, accountID, label string) (s
 	return plaintext, key, nil
 }
 
-// ResolveRoute snapshots an authorized model and its current Provider, then
+// ResolveRoute snapshots an authorized model and all its current Providers, then
 // creates request-local strategy state for the caller's incoming request.
 func (s *Service) ResolveRoute(ctx context.Context, identity Identity, modelName string, rawRequest json.RawMessage) (ResolvedRoute, error) {
-	account, model, provider, err := s.store.ResolveGrantedRoute(ctx, identity.Account.ID, identity.KeyID, modelName)
+	account, model, providers, err := s.store.ResolveGrantedTargets(ctx, identity.Account.ID, identity.KeyID, modelName)
 	if err != nil {
 		if errors.Is(err, config.ErrUnauthorized) {
 			return ResolvedRoute{}, ErrUnauthenticated
@@ -162,6 +176,7 @@ func (s *Service) ResolveRoute(ctx context.Context, identity Identity, modelName
 	}
 	routingRequest := RoutingRequest{
 		Model:      model,
+		Providers:  providers,
 		RawRequest: append(json.RawMessage(nil), rawRequest...),
 	}
 	selection, err := s.strategy.NewSelection(ctx, routingRequest)
@@ -169,7 +184,7 @@ func (s *Service) ResolveRoute(ctx context.Context, identity Identity, modelName
 		return ResolvedRoute{}, err
 	}
 	identity.Account = account
-	return ResolvedRoute{Identity: identity, Model: model, Provider: provider, Selection: selection}, nil
+	return ResolvedRoute{Identity: identity, Model: model, Provider: providers[model.ProviderID], Providers: providers, Selection: selection}, nil
 }
 
 // ListModels returns the current explicit grants for the authenticated account.

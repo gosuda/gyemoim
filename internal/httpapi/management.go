@@ -43,9 +43,15 @@ type managementAPI struct {
 
 // NewManagement creates the management API handler. Paths outside the JSON API
 // routes fall through to the embedded UI, which also owns /api/status. The
-// rejection ring is the same instance the harness records into.
-func NewManagement(store *config.Store, fallback http.Handler, oauthManager *siwc.Manager, connectService *connect.Service, recorder *history.Recorder, rejections *RejectionLog) http.Handler {
-	return &managementAPI{store: store, gateway: gateway.New(store, nil), fallback: fallback, oauth: oauthManager, connect: connectService, history: history.NewQueryService(recorder), storage: recorder, rejections: rejections}
+// rejection ring is the same instance the harness records into. Production must
+// pass the harness gateway as sharedGateway so routing observations are shared;
+// omission preserves compatibility for standalone management handlers.
+func NewManagement(store *config.Store, fallback http.Handler, oauthManager *siwc.Manager, connectService *connect.Service, recorder *history.Recorder, rejections *RejectionLog, sharedGateway ...*gateway.Service) http.Handler {
+	service := gateway.New(store, nil)
+	if len(sharedGateway) > 0 && sharedGateway[0] != nil {
+		service = sharedGateway[0]
+	}
+	return &managementAPI{store: store, gateway: service, fallback: fallback, oauth: oauthManager, connect: connectService, history: history.NewQueryService(recorder), storage: recorder, rejections: rejections}
 }
 
 func (api *managementAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -80,6 +86,8 @@ func (api *managementAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch {
+	case len(parts) == 2 && parts[0] == "routing" && parts[1] == "status":
+		api.routingStatus(w, r)
 	case len(parts) == 1 && parts[0] == "providers":
 		api.providers(w, r)
 	case len(parts) == 2 && parts[0] == "providers":
@@ -145,6 +153,22 @@ func (api *managementAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeManagementError(w, http.StatusNotFound, "management endpoint not found", "not_found")
 	}
+}
+
+func (api *managementAPI) routingStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w, http.MethodGet)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+	status, err := api.gateway.RoutingStatus(ctx)
+	if err != nil {
+		writeManagementFailure(w, err)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, http.StatusOK, status)
 }
 
 func (api *managementAPI) providers(w http.ResponseWriter, r *http.Request) {
