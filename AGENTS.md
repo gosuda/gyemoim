@@ -15,7 +15,7 @@ Then exercise changes by hand: run the binary (listens on http://127.0.0.1:9092/
 
 ## Build constraints
 
-- `CGO_ENABLED=0` is required for releases. SQLite is pure-Go `modernc.org/sqlite`; never swap in a CGO driver (e.g. `mattn/go-sqlite3`) — it would break all four cross-compiled targets. Requires Go 1.25+.
+- `CGO_ENABLED=0` is required for releases. SQLite is pure-Go `modernc.org/sqlite`; never swap in a CGO driver (e.g. `mattn/go-sqlite3`) — it would break all four cross-compiled targets. Requires Go 1.26.9+ for standard-library security fixes.
 - The WebUI is embedded via `//go:embed assets/*` in `internal/httpui/ui.go`: plain HTML/CSS/JS in `internal/httpui/assets/`, no frontend toolchain. Rebuild the binary to see asset changes.
 
 ## Architecture

@@ -5,10 +5,19 @@ Gyemoim is a local OpenAI Responses API gateway with a browser interface for pro
 ## Requirements
 
 - Linux or macOS on amd64 or arm64.
-- Go 1.25 or newer to build from source.
+- Go 1.26.9 or newer to build from source (includes required standard-library security fixes).
 - OpenAI Sign in with ChatGPT access for provider inference. A connected account must grant direct inference access.
 
 The release build has CGO disabled. It does not need a C compiler or separate runtime assets.
+
+Use a security-patched Go toolchain when building. `go.mod` enforces Go 1.26.9
+as the minimum; automatic toolchain selection may download it. A build with
+`GOTOOLCHAIN=local` requires an already-installed compatible version.
+
+Dependency security can be inspected with `govulncheck ./...`. The module-wide
+OpenPGP advisory for `golang.org/x/crypto` has no patched version, but Gyemoim
+does not import or link its OpenPGP packages; package and binary scans distinguish
+that advisory from vulnerabilities affecting the application.
 
 ## Build
 

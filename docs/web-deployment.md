@@ -164,8 +164,8 @@ an explicit error instead of being downgraded.
 
 ### Build and install
 
-Requires Go 1.25+; `CGO_ENABLED=0` is mandatory (SQLite is pure-Go
-`modernc.org/sqlite`).
+Requires Go 1.26.9+ (including standard-library security fixes);
+`CGO_ENABLED=0` is mandatory (SQLite is pure-Go `modernc.org/sqlite`).
 
 ```sh
 ./scripts/build-release.sh                                  # linux/darwin × amd64/arm64 into ./dist

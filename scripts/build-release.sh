@@ -44,7 +44,7 @@ do
 done
 
 if ! command -v go >/dev/null 2>&1; then
-  printf 'Go 1.25 or newer is required to build Gyemoim.\n' >&2
+  printf 'Go 1.26.9 or newer is required to build Gyemoim.\n' >&2
   exit 1
 fi
 
@@ -91,4 +91,3 @@ do
   mv -f "$stage_dir/$artifact" "$output_dir/$artifact"
   printf 'Created %s\n' "$output_dir/$artifact"
 done
-
