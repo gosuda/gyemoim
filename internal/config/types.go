@@ -74,15 +74,25 @@ type LocalKey struct {
 	RevokedAt   *time.Time `json:"revokedAt,omitempty"`
 }
 
-// Model is a named route with one optional, referentially-integral target in the
-// initial single-target strategy. StrategyConfig and Metadata remain versioned JSON
-// payloads so later strategies can extend configuration without a general ORM.
+// ModelTarget identifies one upstream destination. Its position in Model.Targets
+// is its routing order; the same provider/model pair cannot occur twice.
+type ModelTarget struct {
+	ProviderID    string `json:"providerId"`
+	UpstreamModel string `json:"upstreamModel"`
+}
+
+// Model is a named route with ordered, referentially-integral targets. Targets is
+// internal configuration, not yet a management API field. On writes a non-nil
+// Targets list is canonical; nil accepts the legacy ProviderID/UpstreamModel pair.
+// On reads those legacy fields project the first target. Single strategy models
+// require exactly one target; other stored strategies are not executable yet.
 type Model struct {
 	ID                 string          `json:"id"`
 	Name               string          `json:"name"`
 	Strategy           string          `json:"strategy"`
 	Version            int             `json:"version"`
 	StrategyConfigJSON json.RawMessage `json:"strategyConfig"`
+	Targets            []ModelTarget   `json:"-"`
 	ProviderID         string          `json:"providerId,omitempty"`
 	UpstreamModel      string          `json:"upstreamModel,omitempty"`
 	MetadataJSON       json.RawMessage `json:"metadata,omitempty"`

@@ -134,6 +134,8 @@ Statistics are grouped by ServiceAccount, requested Model, and actual Provider/u
 
 Only a single-target strategy is implemented: each Model selects one configured Provider and upstream model, with no fallback or automatic retry. The WebUI does not expose a strategy picker or multiple targets.
 
+The configuration store keeps targets in an ordered `model_targets` table. Model reads snapshot that list together with the model revision; legacy single-target fields project its first entry. The management API remains single-only, and storing a non-single strategy internally does not make it executable. See [the storage contract](config-store.md#model-target-contract).
+
 Model selection is abstracted through Go interfaces. Fallback is one possible strategy; the configuration model and execution path also accommodate other strategies, such as weighted selection or selection based on observed latency. Those strategies are extension examples rather than a requirement to implement them all.
 
 A strategy creates request-local selection state, chooses an initial target, and can receive an attempt outcome when choosing a subsequent target. An illustrative interface boundary is:

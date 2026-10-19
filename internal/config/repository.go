@@ -603,6 +603,9 @@ func (s *Store) CreateModel(ctx context.Context, model Model) (Model, error) {
 	if strings.TrimSpace(model.Name) == "" || strings.TrimSpace(model.Strategy) == "" {
 		return Model{}, errors.New("model name and strategy are required")
 	}
+	if err := normalizeModelTargets(&model); err != nil {
+		return Model{}, err
+	}
 	if model.ID == "" {
 		id, err := newUUID()
 		if err != nil {
@@ -617,45 +620,111 @@ func (s *Store) CreateModel(ctx context.Context, model Model) (Model, error) {
 	}
 	now, timestamp := nowText()
 	model.CreatedAt, model.UpdatedAt = now, now
-	_, err = s.db.ExecContext(ctx, `INSERT INTO models(id, name, strategy, version, strategy_config_json, provider_id, upstream_model, metadata_json, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, model.ID, model.Name, model.Strategy, model.Version,
-		string(strategyConfig), nullableString(model.ProviderID), nullableString(model.UpstreamModel), nullableJSON(metadata), timestamp, timestamp)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Model{}, fmt.Errorf("begin model creation: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	_, err = tx.ExecContext(ctx, `INSERT INTO models(id, name, strategy, version, strategy_config_json, metadata_json, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, model.ID, model.Name, model.Strategy, model.Version,
+		string(strategyConfig), nullableJSON(metadata), timestamp, timestamp)
 	if err != nil {
 		if isUniqueConstraint(err) {
 			return Model{}, ErrConflict
 		}
-		if isForeignKeyConstraint(err) {
-			return Model{}, ErrNotFound
-		}
 		return Model{}, fmt.Errorf("create model: %w", err)
+	}
+	if err := replaceModelTargets(ctx, tx, model.ID, model.Targets); err != nil {
+		return Model{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return Model{}, fmt.Errorf("commit model creation: %w", err)
 	}
 	model.StrategyConfigJSON = strategyConfig
 	model.MetadataJSON = metadata
 	return model, nil
 }
 
-// UpdateModel changes a routing configuration and increments its revision atomically.
+// UpdateModel replaces a routing configuration (including target order) and
+// increments its revision once, atomically. A failed replacement changes nothing.
 func (s *Store) UpdateModel(ctx context.Context, model Model) error {
 	if strings.TrimSpace(model.Name) == "" || strings.TrimSpace(model.Strategy) == "" {
 		return errors.New("model name and strategy are required")
+	}
+	if err := normalizeModelTargets(&model); err != nil {
+		return err
 	}
 	strategyConfig, metadata, err := modelJSON(model)
 	if err != nil {
 		return err
 	}
 	_, timestamp := nowText()
-	result, err := s.db.ExecContext(ctx, `UPDATE models SET name = ?, strategy = ?, version = version + 1, strategy_config_json = ?, provider_id = ?, upstream_model = ?, metadata_json = ?, updated_at = ? WHERE id = ?`,
-		model.Name, model.Strategy, string(strategyConfig), nullableString(model.ProviderID), nullableString(model.UpstreamModel), nullableJSON(metadata), timestamp, model.ID)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin model replacement: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	result, err := tx.ExecContext(ctx, `UPDATE models SET name = ?, strategy = ?, version = version + 1, strategy_config_json = ?, metadata_json = ?, updated_at = ? WHERE id = ?`,
+		model.Name, model.Strategy, string(strategyConfig), nullableJSON(metadata), timestamp, model.ID)
 	if err != nil {
 		if isUniqueConstraint(err) {
 			return ErrConflict
 		}
-		if isForeignKeyConstraint(err) {
-			return ErrNotFound
-		}
 		return fmt.Errorf("update model: %w", err)
 	}
-	return requireAffected(result, "model", model.ID)
+	if err := requireAffected(result, "model", model.ID); err != nil {
+		return err
+	}
+	if err := replaceModelTargets(ctx, tx, model.ID, model.Targets); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit model replacement: %w", err)
+	}
+	return nil
+}
+
+func normalizeModelTargets(model *Model) error {
+	targets := model.Targets
+	if targets == nil && (model.ProviderID != "" || model.UpstreamModel != "") {
+		targets = []ModelTarget{{ProviderID: model.ProviderID, UpstreamModel: model.UpstreamModel}}
+	}
+	if len(targets) == 0 {
+		return errors.New("model must have at least one target")
+	}
+	if model.Strategy == "single" && len(targets) != 1 {
+		return errors.New("single strategy requires exactly one target")
+	}
+	seen := make(map[ModelTarget]struct{}, len(targets))
+	for _, target := range targets {
+		if strings.TrimSpace(target.ProviderID) == "" || strings.TrimSpace(target.UpstreamModel) == "" {
+			return errors.New("model target provider ID and upstream model are required")
+		}
+		if _, duplicate := seen[target]; duplicate {
+			return errors.New("duplicate model target provider and upstream model pair")
+		}
+		seen[target] = struct{}{}
+	}
+	model.Targets = append([]ModelTarget(nil), targets...)
+	model.ProviderID, model.UpstreamModel = targets[0].ProviderID, targets[0].UpstreamModel
+	return nil
+}
+
+func replaceModelTargets(ctx context.Context, tx *sql.Tx, modelID string, targets []ModelTarget) error {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM model_targets WHERE model_id = ?`, modelID); err != nil {
+		return fmt.Errorf("clear model targets: %w", err)
+	}
+	for position, target := range targets {
+		_, err := tx.ExecContext(ctx, `INSERT INTO model_targets(model_id, position, provider_id, upstream_model) VALUES (?, ?, ?, ?)`,
+			modelID, position, target.ProviderID, target.UpstreamModel)
+		if isForeignKeyConstraint(err) {
+			return notFound("provider", target.ProviderID)
+		}
+		if err != nil {
+			return fmt.Errorf("insert model target: %w", err)
+		}
+	}
+	return nil
 }
 
 // DeleteModel removes a Model. Explicit service-account grants referencing it
@@ -700,7 +769,7 @@ func (s *Store) DeleteModel(ctx context.Context, id string) error {
 
 // GetModel returns one model configuration.
 func (s *Store) GetModel(ctx context.Context, id string) (Model, error) {
-	model, err := scanModel(s.db.QueryRowContext(ctx, `SELECT id, name, strategy, version, strategy_config_json, provider_id, upstream_model, metadata_json, created_at, updated_at FROM models WHERE id = ?`, id))
+	model, err := scanModel(s.db.QueryRowContext(ctx, `SELECT `+modelColumns+` FROM models m WHERE m.id = ?`, id))
 	if errors.Is(err, sql.ErrNoRows) {
 		return Model{}, notFound("model", id)
 	}
@@ -712,7 +781,7 @@ func (s *Store) GetModel(ctx context.Context, id string) (Model, error) {
 
 // GetModelByName returns one model configuration by its unique local name.
 func (s *Store) GetModelByName(ctx context.Context, name string) (Model, error) {
-	model, err := scanModel(s.db.QueryRowContext(ctx, `SELECT id, name, strategy, version, strategy_config_json, provider_id, upstream_model, metadata_json, created_at, updated_at FROM models WHERE name = ?`, name))
+	model, err := scanModel(s.db.QueryRowContext(ctx, `SELECT `+modelColumns+` FROM models m WHERE m.name = ?`, name))
 	if errors.Is(err, sql.ErrNoRows) {
 		return Model{}, notFound("model", name)
 	}
@@ -724,7 +793,7 @@ func (s *Store) GetModelByName(ctx context.Context, name string) (Model, error) 
 
 // ListModels returns all model configurations in stable creation order.
 func (s *Store) ListModels(ctx context.Context) ([]Model, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, name, strategy, version, strategy_config_json, provider_id, upstream_model, metadata_json, created_at, updated_at FROM models ORDER BY created_at, id`)
+	rows, err := s.db.QueryContext(ctx, `SELECT `+modelColumns+` FROM models m ORDER BY m.created_at, m.id`)
 	if err != nil {
 		return nil, fmt.Errorf("list models: %w", err)
 	}
@@ -818,7 +887,7 @@ func (s *Store) ListModelGrants(ctx context.Context, accountID string) ([]ModelG
 
 // ListGrantedModels returns the configured models explicitly granted to an account.
 func (s *Store) ListGrantedModels(ctx context.Context, accountID string) ([]Model, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT m.id, m.name, m.strategy, m.version, m.strategy_config_json, m.provider_id, m.upstream_model, m.metadata_json, m.created_at, m.updated_at
+	rows, err := s.db.QueryContext(ctx, `SELECT `+modelColumns+`
 		FROM models m JOIN model_grants g ON g.model_id = m.id WHERE g.account_id = ? ORDER BY m.created_at, m.id`, accountID)
 	if err != nil {
 		return nil, fmt.Errorf("list granted models: %w", err)
@@ -866,21 +935,30 @@ func modelJSON(model Model) (json.RawMessage, json.RawMessage, error) {
 	return append(json.RawMessage(nil), strategyConfig...), append(json.RawMessage(nil), metadata...), nil
 }
 
+// Aggregate ordered targets inside the model query so every read observes one
+// SQLite snapshot, including listings. Legacy columns are never a read source.
+const modelColumns = `m.id, m.name, m.strategy, m.version, m.strategy_config_json,
+    (SELECT json_group_array(json_object('providerId', provider_id, 'upstreamModel', upstream_model))
+     FROM (SELECT provider_id, upstream_model FROM model_targets WHERE model_id = m.id ORDER BY position)),
+    m.metadata_json, m.created_at, m.updated_at`
+
 func scanModel(row scanner) (Model, error) {
 	var model Model
 	var strategyConfig []byte
-	var providerID, upstreamModel, metadata sql.NullString
+	var targetsJSON []byte
+	var metadata sql.NullString
 	var createdAt, updatedAt string
-	err := row.Scan(&model.ID, &model.Name, &model.Strategy, &model.Version, &strategyConfig, &providerID, &upstreamModel, &metadata, &createdAt, &updatedAt)
+	err := row.Scan(&model.ID, &model.Name, &model.Strategy, &model.Version, &strategyConfig, &targetsJSON, &metadata, &createdAt, &updatedAt)
 	if err != nil {
 		return Model{}, err
 	}
 	model.StrategyConfigJSON = append(json.RawMessage(nil), strategyConfig...)
-	if providerID.Valid {
-		model.ProviderID = providerID.String
+	if err := json.Unmarshal(targetsJSON, &model.Targets); err != nil {
+		return Model{}, fmt.Errorf("decode model targets: %w", err)
 	}
-	if upstreamModel.Valid {
-		model.UpstreamModel = upstreamModel.String
+	if len(model.Targets) != 0 {
+		model.ProviderID = model.Targets[0].ProviderID
+		model.UpstreamModel = model.Targets[0].UpstreamModel
 	}
 	if metadata.Valid {
 		model.MetadataJSON = json.RawMessage(metadata.String)
@@ -917,7 +995,7 @@ func (s *Store) ResolveGrantedRoute(ctx context.Context, accountID, keyID, model
 	if err != nil {
 		return ServiceAccount{}, Model{}, Provider{}, err
 	}
-	model, err := scanModel(tx.QueryRowContext(ctx, `SELECT id, name, strategy, version, strategy_config_json, provider_id, upstream_model, metadata_json, created_at, updated_at FROM models WHERE name = ?`, modelName))
+	model, err := scanModel(tx.QueryRowContext(ctx, `SELECT `+modelColumns+` FROM models m WHERE m.name = ?`, modelName))
 	if errors.Is(err, sql.ErrNoRows) {
 		return ServiceAccount{}, Model{}, Provider{}, notFound("model", modelName)
 	}
@@ -959,7 +1037,7 @@ func (s *Store) ListGrantedModelsForKey(ctx context.Context, accountID, keyID st
 	if _, err := activeAccountForKey(ctx, tx, accountID, keyID); err != nil {
 		return nil, err
 	}
-	rows, err := tx.QueryContext(ctx, `SELECT m.id, m.name, m.strategy, m.version, m.strategy_config_json, m.provider_id, m.upstream_model, m.metadata_json, m.created_at, m.updated_at
+	rows, err := tx.QueryContext(ctx, `SELECT `+modelColumns+`
 		FROM models m JOIN model_grants g ON g.model_id = m.id WHERE g.account_id = ? ORDER BY m.created_at, m.id`, accountID)
 	if err != nil {
 		return nil, fmt.Errorf("read authorized models: %w", err)

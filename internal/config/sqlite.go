@@ -14,7 +14,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const currentSchemaVersion = 4
+const currentSchemaVersion = 5
 
 // Store owns the configuration database. A single connection makes connection-local
 // SQLite settings consistent, while the DSN reapplies them if database/sql reconnects.
@@ -139,6 +139,14 @@ func (s *Store) migrate(ctx context.Context) error {
 			return fmt.Errorf("set configuration schema version: %w", err)
 		}
 	}
+	if version <= 4 {
+		if _, err := tx.ExecContext(ctx, orderedModelTargetsSchema); err != nil {
+			return fmt.Errorf("create ordered model targets schema: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, "PRAGMA user_version = 5"); err != nil {
+			return fmt.Errorf("set configuration schema version: %w", err)
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit configuration schema migration: %w", err)
 	}
@@ -252,6 +260,44 @@ ALTER TABLE users ADD COLUMN last_login_at TEXT;
 // (gateway.KeyUsageTracker), never on the request path.
 const keyLastUsedSchema = `
 ALTER TABLE local_keys ADD COLUMN last_used_at TEXT;
+`
+
+// orderedModelTargetsSchema makes model_targets canonical (schema v5). Legacy
+// columns remain a trigger-maintained first-target projection, not a second
+// writable source. A partially configured legacy target fails migration rather
+// than silently losing configuration; fully unconfigured models remain readable.
+const orderedModelTargetsSchema = `
+CREATE TABLE model_targets (
+    model_id TEXT NOT NULL REFERENCES models(id) ON DELETE CASCADE,
+    position INTEGER NOT NULL CHECK (position >= 0),
+    provider_id TEXT NOT NULL REFERENCES providers(id) ON DELETE RESTRICT CHECK (length(trim(provider_id)) > 0),
+    upstream_model TEXT NOT NULL CHECK (length(trim(upstream_model)) > 0),
+    PRIMARY KEY (model_id, position),
+    UNIQUE (model_id, provider_id, upstream_model)
+);
+CREATE INDEX model_targets_by_provider ON model_targets(provider_id);
+INSERT INTO model_targets(model_id, position, provider_id, upstream_model)
+SELECT id, 0, provider_id, upstream_model FROM models
+WHERE provider_id IS NOT NULL OR upstream_model IS NOT NULL;
+
+CREATE TRIGGER model_targets_insert_projection AFTER INSERT ON model_targets BEGIN
+    UPDATE models SET
+        provider_id = (SELECT provider_id FROM model_targets WHERE model_id = NEW.model_id ORDER BY position LIMIT 1),
+        upstream_model = (SELECT upstream_model FROM model_targets WHERE model_id = NEW.model_id ORDER BY position LIMIT 1)
+    WHERE id = NEW.model_id;
+END;
+CREATE TRIGGER model_targets_delete_projection AFTER DELETE ON model_targets BEGIN
+    UPDATE models SET
+        provider_id = (SELECT provider_id FROM model_targets WHERE model_id = OLD.model_id ORDER BY position LIMIT 1),
+        upstream_model = (SELECT upstream_model FROM model_targets WHERE model_id = OLD.model_id ORDER BY position LIMIT 1)
+    WHERE id = OLD.model_id;
+END;
+CREATE TRIGGER model_targets_update_projection AFTER UPDATE ON model_targets BEGIN
+    UPDATE models SET
+        provider_id = (SELECT provider_id FROM model_targets WHERE model_id = models.id ORDER BY position LIMIT 1),
+        upstream_model = (SELECT upstream_model FROM model_targets WHERE model_id = models.id ORDER BY position LIMIT 1)
+    WHERE id IN (OLD.model_id, NEW.model_id);
+END;
 `
 
 func nowText() (time.Time, string) {
