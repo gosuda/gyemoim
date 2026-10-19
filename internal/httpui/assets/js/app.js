@@ -3,6 +3,7 @@
 import { api } from "./api.js";
 import { byId, showMessage } from "./dom.js";
 import { navigate, renderRoute } from "./nav.js";
+import { confirmModelDocumentExit } from "./pages/models.js";
 
 // Review A6: the skip link jumps straight to <main>. The click is intercepted
 // because letting the browser follow "#main-content" would feed a non-page
@@ -16,6 +17,7 @@ byId("skip-link").addEventListener("click", (event) => {
 });
 
 byId("logout-button").addEventListener("click", async () => {
+  if (!confirmModelDocumentExit()) return;
   try {
     await api("/api/auth/logout", { method: "POST", body: JSON.stringify({}) });
   } catch { /* Clearing the cookie matters more than the error. */ }

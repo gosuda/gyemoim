@@ -58,6 +58,9 @@ const fieldMessagePatterns = [
 export function humanizeApiError(status, body, context = {}) {
   const code = body?.error?.code || "";
   const message = body?.error?.message || "";
+  if (context.kind === "model" && context.action === "edit" && status === 409) {
+    return "Changes were not saved. This Model may have changed in another editor, or its name may already be in use. Your draft is intact. Choose another name, or use Reload current Model to review the saved revision (after confirming that you want to discard this draft).";
+  }
   if (status === 409 && code === "conflict") {
     if (context.action === "delete") {
       const label = kindLabels[context.kind];

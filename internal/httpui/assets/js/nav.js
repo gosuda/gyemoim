@@ -67,6 +67,10 @@ function revertHashAfterDecline() {
 
 function applyHash(hash, page, params) {
   if (hash === renderedHash) return;
+  if (state.modelSaving) {
+    revertHashAfterDecline();
+    return;
+  }
   if (declinedSensitiveLeave(page)) {
     revertHashAfterDecline();
     return;

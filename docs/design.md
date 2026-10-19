@@ -96,7 +96,7 @@ Provider-specific authentication, request constraints, and model catalog convers
 | Providers | Upstream catalog and permissions | Show connection-specific upstream models and ChatGPT plan authorization; link to provider usage management. |
 | ServiceAccounts | Account management | Assign a name, issue or revoke local keys, and explicitly permit access to individual Models. New Models are not automatically permitted. |
 | ServiceAccounts | Connection instructions | Provide Base URL, local key, and configured Model name examples for pi agent over HTTP Responses. |
-| Models | Model management | Define user-facing names and one Provider/upstream-model target per Model. |
+| Models | Model management | Define user-facing names, Single/Fallback strategy and ordered Provider/upstream-model targets. |
 | Requests | Request browser | Filter by ServiceAccount, requested Model, actual Provider/upstream model, time, and status; display requests in progress. |
 | Requests | Request details | Inspect the incoming request, effective upstream request, response events, tool calls, errors, and usage. |
 | Requests | Timing timeline | Show authentication preparation, connection, transmission, first event, first output, stream termination, and downstream delivery. |
@@ -132,7 +132,11 @@ Statistics are grouped by ServiceAccount, requested Model, and actual Provider/u
 
 ### Extensible Model Selection
 
-Single-target execution remains the default. The management API also supports explicitly configured ordered fallback routes, executed by the common Responses/Chat executor only on eligible failures before downstream commitment. There are no same-target retries. The WebUI remains a single-target editor and does not expose a strategy picker or multiple targets. See [routing runtime](routing-runtime.md) for policy, lifecycle fences and the authenticated diagnostic endpoint.
+Single-target execution remains the default. The management API and WebUI also support explicitly configured ordered fallback routes, executed by the common Responses/Chat executor only on eligible failures before downstream commitment. There are no same-target retries. See [routing runtime](routing-runtime.md) for policy, lifecycle fences and the authenticated diagnostic endpoint.
+
+The Models editor offers Single (exactly one target) or Fallback (1–128 targets). Each target has its own provider selection, upstream model input and optional catalog loader. New targets append at the end; drag handles or keyboard/touch-friendly Up/Down buttons change numbered priorities locally, without saving. Remove extra targets before switching back to Single. Cards show every target in order and its provider's connection status. Choose Add Model or Save changes to persist the complete route; all editor mutations are blocked during that save.
+
+Card refresh and in-app navigation preserve the draft, its row catalogs and the revision originally opened for editing. Leaving the document warns about unsaved changes. Edits submit an explicit strategy, the complete ordered target list and the original expected version. A 409 keeps the draft intact and offers a confirmed reload of the saved Model; it never silently adopts a newer version or retries an overwrite. Cancelling the reload retains the draft. Alias-wide Pi metadata and unknown metadata keys are preserved; heterogeneous upstream targets require explicit compatible Pi metadata rather than borrowing the first target's catalog entry.
 
 The configuration store keeps targets in an ordered `model_targets` table. Model reads snapshot that list together with the model revision; legacy single-target fields project its first entry. Authorized route resolution snapshots the active key/account, explicit grant, target order, and every referenced Provider in one brief transaction, released before any I/O. Management route replacement supports atomic optimistic version checks. See [the storage contract](config-store.md#model-target-contract).
 

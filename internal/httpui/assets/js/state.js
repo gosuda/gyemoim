@@ -13,7 +13,7 @@ export const state = {
   // nav.js showPage, like the service-accounts key-reveal cleanup).
   userHandoffs: new Map(),
   editingModel: null,
-  catalogRequest: 0,
+  modelSaving: false,
   usersRequest: 0,
   sensitiveCleanup: new Set(),
   requestCursors: [""],
