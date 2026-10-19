@@ -42,7 +42,9 @@ function populateRequestFilterOptions() {
   setDatalist("request-model-options", state.models.map((model) => [model.id, `${model.name} · ${model.id}`]));
   setDatalist("request-provider-options", state.providers.map((provider) => [provider.id, `${provider.name} · ${provider.id}`]));
   const upstreams = new Map();
-  for (const model of state.models) if (model.upstreamModel) upstreams.set(model.upstreamModel, `${model.name} · ${model.upstreamModel}`);
+  for (const model of state.models) for (const target of model.targets || [model]) {
+    if (target.upstreamModel) upstreams.set(target.upstreamModel, `${model.name} · ${target.upstreamModel}`);
+  }
   setDatalist("request-upstream-options", [...upstreams.entries()]);
   updateIdentityHints();
 }
@@ -149,7 +151,7 @@ function updateIdentityHints() {
     ["request-account-id", state.accounts.length ? "" : "No service accounts are configured yet."],
     ["request-model-id", state.models.length ? "" : "No Models configured yet."],
     ["request-provider-id", state.providers.length ? "" : "No providers are configured yet."],
-    ["request-upstream-model", state.models.some((model) => model.upstreamModel) ? "" : "No upstream models are configured yet."],
+    ["request-upstream-model", state.models.some((model) => (model.targets || [model]).some((target) => target.upstreamModel)) ? "" : "No upstream models are configured yet."],
   ];
   for (const [inputID, text] of hints) setIdentityNote(inputID, text);
 }
@@ -170,7 +172,7 @@ const identityFields = [
     (value) => state.providers.find((provider) => provider.id === value),
     (value) => state.providers.find((provider) => provider.name.toLowerCase() === value.toLowerCase())],
   ["request-upstream-model", "upstream_model", "upstream model",
-    (value) => state.models.find((model) => model.upstreamModel === value),
+    (value) => state.models.find((model) => (model.targets || [model]).some((target) => target.upstreamModel === value)),
     null],
 ];
 
@@ -503,7 +505,7 @@ function usageValue(value) {
 
 function renderRequestUsage(summary) {
   const usage = summary.usage;
-  const section = detailSection("Provider-reported usage", "Cached input and reasoning output are subsets of input/output totals.");
+  const section = detailSection("Provider-reported usage", "Request-level usage only; candidate diagnostics below are not added to these totals. Cached input and reasoning output are subsets of input/output totals.");
   if (!usage) {
     section.append(element("p", "empty-inline", "Usage was not reported."));
     return section;
@@ -715,6 +717,43 @@ async function loadInitialEventPage(container, url, requestID) {
   }
 }
 
+function lifecycleDiagnostics(entry) {
+  const details = element("details", "candidate-diagnostics");
+  details.append(element("summary", "", "Safe diagnostics and timing"));
+  details.append(element("p", "detail-note", `HTTP status: ${entry.httpStatus || "none recorded"} · Upstream request ID: ${entry.upstreamRequestId || "none recorded"}`));
+  if (entry.safeError) details.append(element("pre", "event-raw", entry.safeError));
+  if (entry.usage) {
+    const usage = entry.usage;
+    details.append(element("p", "detail-note", `Diagnostic usage only (not additional request usage): input ${usageValue(usage.input_tokens)} · output ${usageValue(usage.output_tokens)} · cached input subset ${usageValue(usage.cached_input_tokens)} · reasoning output subset ${usageValue(usage.reasoning_output_tokens)}.`));
+  } else details.append(element("p", "detail-note", "No candidate usage reported."));
+  details.append(renderTimeline(entry.timings || {}));
+  return details;
+}
+
+function renderCandidates(detail, summary) {
+  const candidates = [...(detail.candidates || [])].sort((a, b) => a.number - b.number);
+  const section = detailSection("Ordered routing candidates", `Final request outcome: ${summary.outcome || "unknown"}. Candidates are considered targets, not extra requests. Skips and pre-send failures have no transmission; unvisited targets are not invented.`);
+  section.classList.add("candidate-section");
+  if (!candidates.length) {
+    section.append(element("p", "empty-inline", "No candidate lifecycle recorded (legacy/bare transmission records or no candidate considered). Actual transmissions, if any, remain below."));
+  }
+  const list = element("ol", "timeline-list candidate-list");
+  for (const candidate of candidates) {
+    const item = element("li", "timeline-item");
+    const outcome = candidate.outcome || "unknown";
+    const transmission = candidate.attempt > 0 ? `Actual transmission · attempt ${candidate.attempt}` : outcome === "skipped" ? "Skipped · no transmission" : "Pre-send · no transmission";
+    item.append(element("strong", "", `Candidate ${candidate.number} · ${candidate.provider?.name || "Historical provider"} · ${outcome}`));
+    item.append(element("p", "detail-note", `${candidate.provider?.id || "Provider ID unavailable"} · ${candidate.provider?.upstream_model || "Upstream model unavailable"} · ${transmission} · reason: ${candidate.reason || "none recorded"}`));
+    const offset = (value) => value === null || value === undefined ? "not recorded" : formatOffsetNS(value);
+    item.append(element("p", "detail-note", `Start ${offset(candidate.startedNs)} · Transmission fence ${offset(candidate.transmissionNs)} · End ${offset(candidate.endedNs)}`));
+    item.append(lifecycleDiagnostics(candidate));
+    list.append(item);
+  }
+  section.append(list);
+  if (detail.candidatesTruncated) section.append(element("p", "detail-note", `Candidate metadata truncated: showing ${formatNumber(candidates.length)} of ${formatNumber(detail.candidateCount)} candidates (bounded detail response).`));
+  return section;
+}
+
 function renderRequestDetails(detail, token) {
   const content = byId("request-detail-content");
   const summary = detail.request || {};
@@ -744,7 +783,7 @@ function renderRequestDetails(detail, token) {
     error.append(element("pre", "event-raw", summary.safeError));
     content.append(error);
   }
-  content.append(renderRequestUsage(summary), renderTimeline(summary.timings || {}));
+  content.append(renderRequestUsage(summary), renderTimeline(summary.timings || {}), renderCandidates(detail, summary));
 
   const incomingSection = detailSection("Incoming request body", "Recorded request bytes are shown as bounded plain text. The preview is not parsed as complete JSON.");
   const incomingViewer = element("div", "content-chunk-slot");
@@ -761,6 +800,10 @@ function renderRequestDetails(detail, token) {
     const row = element("div", "response-row");
     const info = element("div");
     info.append(element("strong", "", `Attempt ${attempt.number} · ${attempt.provider?.name || "Historical provider"}`), element("small", "", `${attempt.provider?.id || "Provider ID unavailable"} · ${attempt.provider?.upstream_model || "Upstream model unavailable"} · ${formatNumber(attempt.effectiveRequestBytes)} bytes`));
+    if (!(detail.candidates || []).some((candidate) => candidate.attempt === attempt.number)) {
+      info.append(element("small", "", `Outcome: ${attempt.outcome || "not recorded (legacy transmission)"} · reason: ${attempt.reason || "none recorded"}`));
+      if (attempt.outcome) info.append(lifecycleDiagnostics(attempt));
+    } else info.append(element("small", "", `Candidate ${attempt.candidate} · lifecycle diagnostics above (not another request).`));
     const holder = element("div");
     const viewer = element("div", "content-chunk-slot");
     viewer.dataset.requestId = summary.requestId;

@@ -7,6 +7,7 @@ import { formErrorText } from "../errors.js";
 import { announceSuccess, scrollCardIntoView } from "../feedback.js";
 import { providerStatusLabel, providerStatusTagClass } from "../format.js";
 import { pageLink } from "../nav.js";
+import { modelRuntime } from "../routing-status.js";
 
 const maxTargets = 128;
 let rows = [];
@@ -345,7 +346,7 @@ function renderModel(model) {
     item.append(target);
     targets.append(item);
   });
-  card.append(targets);
+  card.append(targets, modelRuntime(model, [...targets.children]));
   return card;
 }
 

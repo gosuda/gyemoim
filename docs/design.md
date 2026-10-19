@@ -134,7 +134,7 @@ Statistics are grouped by ServiceAccount, requested Model, and actual Provider/u
 
 Single-target execution remains the default. The management API and WebUI also support explicitly configured ordered fallback routes, executed by the common Responses/Chat executor only on eligible failures before downstream commitment. There are no same-target retries. See [routing runtime](routing-runtime.md) for policy, lifecycle fences and the authenticated diagnostic endpoint.
 
-The Models editor offers Single (exactly one target) or Fallback (1–128 targets). Each target has its own provider selection, upstream model input and optional catalog loader. New targets append at the end; drag handles or keyboard/touch-friendly Up/Down buttons change numbered priorities locally, without saving. Remove extra targets before switching back to Single. Cards show every target in order and its provider's connection status. Choose Add Model or Save changes to persist the complete route; all editor mutations are blocked during that save.
+The Models editor offers Single (exactly one target) or Fallback (1–128 targets). Each target has its own provider selection, upstream model input and optional catalog loader. New targets append at the end; drag handles or keyboard/touch-friendly Up/Down buttons change numbered priorities locally, without saving. Remove extra targets before switching back to Single. Cards show every target in order, provider connection status, per-pair cooldown/429 observations and a predicted first target (not active execution). Provider cards deduplicate upstream model observations across aliases. Visible pages poll status without changing editor drafts; expiry means retry eligible, not healthy. See [routing runtime](routing-runtime.md#webui-observations). Choose Add Model or Save changes to persist the complete route; all editor mutations are blocked during that save.
 
 Card refresh and in-app navigation preserve the draft, its row catalogs and the revision originally opened for editing. Leaving the document warns about unsaved changes. Edits submit an explicit strategy, the complete ordered target list and the original expected version. A 409 keeps the draft intact and offers a confirmed reload of the saved Model; it never silently adopts a newer version or retries an overwrite. Cancelling the reload retains the draft. Alias-wide Pi metadata and unknown metadata keys are preserved; heterogeneous upstream targets require explicit compatible Pi metadata rather than borrowing the first target's catalog entry.
 
@@ -156,11 +156,11 @@ type Selection interface {
 
 `RoutingRequest` contains the request and a snapshot of the Model configuration. `Target` identifies a Provider and its upstream model ID. `AttemptOutcome` describes a previous attempt's result. The initial selection has no previous outcome. Exhaustion is an explicit stop result. Shared strategy implementations must keep per-request attempt state isolated.
 
-Model configuration identifies the strategy and stores its strategy-specific settings. Future WebUI extensions can expose the settings supported by additional strategy implementations. The strategy chooses targets; the gateway executor owns authentication, transport, validation, recording, cancellation, and response delivery.
+Model configuration identifies the strategy and ordered targets. The strategy chooses targets; the gateway executor owns authentication, transport, validation, recording, cancellation, and response delivery.
 
 Selection does not imply compatibility between targets. Every selected target must support the request's capabilities, and strategy execution must preserve the request-compatibility policy in [harness-compatibility.md](harness-compatibility.md) rather than silently rewriting the request.
 
-Any strategy that performs another upstream attempt must explicitly define eligible failure conditions and record every attempt. The executor prevents switching targets after a response has been committed to the client and respects client cancellation. Default execution remains a single upstream attempt; automatic retries or fallback occur only when explicitly configured through a strategy.
+Any strategy that performs another upstream attempt must explicitly define eligible failure conditions and record every attempt. The executor prevents switching targets after a response has been committed to the client and respects client cancellation. Default execution remains a single upstream attempt; only explicit fallback routes can advance to another target. No strategy currently retries the same target.
 
 ## OpenAI OAuth and Request Handling
 
@@ -208,7 +208,7 @@ Request comparison, input-prefix differences, and explanations for cache misses 
 
 ### Pattern Analysis Data
 
-The gateway provides history browsing, request details, basic usage aggregation, timing, and per-request cache usage. Request comparison, exports, and automated analysis are future work. This creates a dataset for later analysis of repeated requests, growing context, large tool outputs, and usage patterns.
+The gateway provides history browsing, request details, basic usage aggregation, timing, and per-request cache usage. Request comparison, exports, and automated analysis are not implemented.
 
 ## Storage and Local Access
 
@@ -222,7 +222,7 @@ Request bodies and usage history are stored in log files rather than SQLite. In-
 
 ### NDJSON Request History
 
-Record request-start, upstream-transmission, response-event, and request-end records correlated by gateway request ID. Include schema versions and timestamps.
+Record request-start, candidate skip/start/end, upstream-transmission, upstream-response, response-event, and request-end records correlated by gateway request ID. Include schema versions and timestamps.
 
 Record all prompts, responses, tool definitions, and tool results without per-harness exclusions or automatic content masking. Exclude gateway-managed authentication fields, including authorization headers, local keys, OAuth credentials, and authentication URLs containing token hints. Arbitrary content supplied inside prompts or tool results is preserved, so credential exclusion is not a guarantee that bodies contain no user-supplied secrets.
 
@@ -230,7 +230,8 @@ Keep partial request history when a stream fails or is interrupted. A completed 
 
 History schema 3 also supports explicit ordered candidate starts, durable attempt
 outcomes (including pre-transmission authentication/preparation failures), and
-candidate skips. These are recording primitives, not routing or cooldown behavior.
+candidate skips. The common executor uses these durable recording fences for routing;
+cooldown observations themselves are process-local and are not reconstructed from history.
 Candidate order is separate from upstream transmission numbering; only a successful
 durable transmission fence authorizes a send. Request-level attribution remains the
 last transmitted target, and usage aggregates count final request usage once rather
@@ -263,7 +264,7 @@ If request recording becomes unavailable, including because the disk is full, re
 - Model listing exposes only permitted configured Model names, and requests are routed using those names.
 - pi agent can connect using the documented Responses configuration, and supported Responses behavior is preserved without pi-specific API semantics.
 - Unsupported request capabilities follow the classified policy in [harness-compatibility.md](harness-compatibility.md): benign fields and unsupported tools are dropped and recorded; stateful references and untranslatable requests produce clear errors; conversation state is never silently lost.
-- Statistics preserve the ServiceAccount, requested Model, and actual Provider/upstream model for every attempt.
+- History preserves the ServiceAccount, requested Model, and each actual Provider/upstream target. Statistics group requests by the last transmitted target and count final request usage once, not diagnostic candidate usage.
 - Management-created Models default to one single target. Explicit fallback routes consider each configured target at most once, with durable candidate/attempt/transmission fences, and never advance after downstream commitment, cancellation or recording failure.
 - Newly created Models remain inaccessible to a ServiceAccount until explicitly granted.
 - Restart, concurrent refresh, missing authorization scopes, and reauthentication do not mix credential sets or account registrations.

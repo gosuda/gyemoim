@@ -132,6 +132,14 @@ with its existing effective-body links; entries additionally carry `candidate` a
 when that candidate is retained, its outcome/reason/status/ID/error/usage/timings.
 `attemptCount` and `request.upstreamAttempts` still count transmissions only.
 
+The Requests detail UI shows ordered candidates with skips, pre-send failures,
+actual transmission numbers, offsets and the final request outcome. Expandable
+safe diagnostics show per-candidate status, request ID, safe error, timing and
+usage; this diagnostic usage is not added to request-level totals. Legacy records
+without candidates retain their actual transmission/body/event viewers without
+invented candidate outcomes. Candidate, attempt and response truncation flags are
+shown explicitly; full body and SSE-frame inspection remains chunked and separate.
+
 ## SSE events
 
 `GET /api/requests/{requestId}/events?limit=25&cursor=0` returns event metadata and

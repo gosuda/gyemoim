@@ -1,7 +1,7 @@
 # Routing selection and runtime observations
 
 The harness executes `single` routes by default and `fallback` routes only when
-explicitly configured through the management API. Both Responses and Chat
+explicitly configured through the management API or Models editor. Both Responses and Chat
 Completions, streaming and collected, use the same executor. Each request holds
 one admission slot and recorder handle across all candidates; no probes run.
 
@@ -167,8 +167,8 @@ background provider checks, probes, retries, or credential I/O are performed.
 password change as other management endpoints. Harness bearer credentials do not
 authorize it. Other methods return 405. Responses are `Cache-Control: no-store`.
 
-The response has `observedAt` and a `models` list. Each model contains `id`,
-`name`, `strategy`, `executionEnabled` (single and fallback), priority-ordered
+The response has `observedAt` (server snapshot time) and a `models` list. Each model contains `id`,
+`name`, `version` (saved configuration revision), `strategy`, `executionEnabled` (single and fallback), priority-ordered
 `targets`, and an optional `predictedTarget`. Targets expose:
 
 - `providerId`, `upstreamModel`, and `status`: `disconnected`, `cooling`, or
@@ -190,3 +190,29 @@ Configuration is read in one transaction, then runtime state under one brief
 lock. No transaction or runtime lock spans provider I/O. Predictions reserve
 nothing and may change before selection; provider connection status is derived
 from config, never duplicated as mutable runtime truth.
+
+## WebUI observations
+
+Models shows per-target observations in priority order and an explicitly labeled
+predicted first target, never an active/running target claim. Provider cards show
+configured upstream model pairs, deduplicated across aliases; a 429 observation
+is not treated as an account-wide rate limit. Connection/authentication state,
+generic cooldowns and 429 diagnostics remain distinct. Both pages show the last
+429 time, its retry time and source (`Retry-After` seconds/date or default 60 s),
+alongside any effective cooldown's reason/source. Expiry says **Retry eligible**,
+not healthy. Single's observations are diagnostic: it never skips its connected
+target due to cooldown, and never falls back. Disconnected targets are not predicted.
+
+Only visible Models/Providers pages poll, approximately every eight seconds after
+the preceding request finishes. A ten-second fetch deadline bounds stalled polls.
+Leaving the page, hiding the document, or logging out cancels polling and in-flight
+requests; generation checks reject late results. One-second local countdowns use
+`observedAt` plus monotonic elapsed client time, clamp at zero, and are approximate
+(network transit is not measured). Countdown expiry can change the local prediction
+without a reload; concurrent runtime/connection changes still require the next poll.
+Loading, unavailable and stale observations are explicit, not health claims.
+
+Updates edit status text, not resource cards or editor controls. A model's saved
+revision and exact provider/upstream pair must match before status is attached.
+External configuration changes prompt a card Refresh; the editor draft, its original
+expected version, target order and focus are never replaced by runtime polling.

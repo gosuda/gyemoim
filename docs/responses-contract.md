@@ -144,7 +144,7 @@ kind of safe SSE error and end as `failed`. A downstream write failure ends as `
 even if its event cannot be delivered.
 
 HTTP error bodies and successful non-SSE response bodies are retained as exact bounded
-bytes in schema 2 `upstream_response` records. These body reads have a 30-second budget
+bytes in `upstream_response` records (schemas 2 and 3). These body reads have a 30-second budget
 after headers arrive; a timeout cancels the upstream request and preserves received
 bytes with read-failure metadata. Their bodies are not echoed in gateway
 HTTP errors. Upstream 429 remains 429 with a validated `Retry-After` when available. Provider

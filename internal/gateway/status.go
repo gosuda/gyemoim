@@ -15,6 +15,7 @@ type RoutingStatus struct {
 type ModelRoutingStatus struct {
 	ID                string         `json:"id"`
 	Name              string         `json:"name"`
+	Version           int            `json:"version"`
 	Strategy          string         `json:"strategy"`
 	ExecutionEnabled  bool           `json:"executionEnabled"`
 	Targets           []TargetStatus `json:"targets"` // priority order
@@ -48,7 +49,7 @@ func (r *Runtime) Snapshot(snapshot config.RoutingSnapshot, now time.Time) Routi
 	defer r.mu.Unlock()
 	result := RoutingStatus{ObservedAt: now.UTC(), Models: make([]ModelRoutingStatus, 0, len(snapshot.Models))}
 	for _, model := range snapshot.Models {
-		status := ModelRoutingStatus{ID: model.ID, Name: model.Name, Strategy: model.Strategy,
+		status := ModelRoutingStatus{ID: model.ID, Name: model.Name, Version: model.Version, Strategy: model.Strategy,
 			ExecutionEnabled: model.Strategy == "single" || model.Strategy == "fallback", Targets: make([]TargetStatus, 0, len(model.Targets))}
 		var earliest time.Time
 		for _, configured := range model.Targets {

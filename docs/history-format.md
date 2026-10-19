@@ -150,7 +150,7 @@ The request handle retains only the current candidate and counters, not an
 ever-growing attempt list. Each candidate adds a bounded amount of metadata on disk;
 stream content and request bodies retain their existing limits.
 
-### `upstream_response` (schema 2)
+### `upstream_response` (schemas 2 and 3)
 
 - `attempt`: attempt whose HTTP response was received.
 - `http_status`: actual upstream HTTP status.
@@ -190,7 +190,7 @@ per frame, not per stream. Event records are synced by the next durable fence or
 - `usage`: `null` when unavailable, or an object with `input_tokens`, `output_tokens`,
   `cached_input_tokens`, and `reasoning_output_tokens`.
 - `service_account`, `model`, and `provider`: small admission and actual-target snapshots
-  written by schema 2 so attribution scans can read end records without joining request
+  written by schemas 2 and 3 so attribution scans can read end records without joining request
   starts or transmissions. `provider` is absent only when no attempt was transmitted.
 - `upstream_request_id`: safe provider request ID, separate from the gateway `request_id`.
 - `dropped_fields`: optional list of the known-unsupported request fields and tool
@@ -206,7 +206,7 @@ per frame, not per stream. Event records are synced by the next durable fence or
   `connection_established_ns`, `request_transmission_ns`, `first_event_ns`,
   `first_output_ns`, `stream_completion_ns`, `downstream_delivery_ns`, and the optional
   `connection_reused` boolean. `connection_requested_ns` and `connection_reused` are
-  written by schema 2. `downstream_delivery_ns` is the last successfully flushed frame.
+  written by schemas 2 and 3. `downstream_delivery_ns` is the last successfully flushed frame.
 
 A missing usage count or timing is JSON `null`; a reported count of zero is `0`.
 Cached input and reasoning output are subsets of their respective totals. `End` writes
@@ -218,8 +218,9 @@ A repeated `End` is harmless. Closing the recorder ends remaining handles as
 
 `Begin`, `StartAttempt`, `SkipCandidate`, `EndAttempt`, `Transmit`, and `End` each
 sync the active file before returning. Any write or
-sync failure permanently degrades this process's recorder. Existing requests continue
-upstream; their later history writes fail and increment the safe loss counter. Future
+sync failure permanently degrades this process's recorder. Already-transmitted streams
+may continue; failed required lifecycle/transmission fences forbid another target or
+send. Later history writes fail and increment the safe loss counter. Subsequent
 `Begin` calls return `ErrRecordingUnavailable`, allowing the gateway to reject new
 requests before provider invocation. `Status` exposes only state, potentially-lost-record count, recovered-tail byte
 count, active-request count, and bytes in the current active file.

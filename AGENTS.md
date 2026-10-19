@@ -8,7 +8,7 @@ Do not add or run `*_test.go` files. The accepted verification method is source 
 go vet ./...
 CGO_ENABLED=0 go build -trimpath -o gyemoim ./cmd/gyemoim   # current platform
 ./scripts/build-release.sh                                   # all four targets: linux/darwin × amd64/arm64
-node --check internal/httpui/assets/site.js                  # when UI JS changed
+find internal/httpui/assets -name '*.js' -exec node --check {} \; # all UI modules
 ```
 
 Then exercise changes by hand: run the binary (listens on http://127.0.0.1:9092/ by default, data directory auto-created) and call the API with curl. `--listen HOST:PORT` sets the bind address and `--port` remains a port-only alias (`--listen` wins when both are given); a second process on the same data directory fails on the process lock.

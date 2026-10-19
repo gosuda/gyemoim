@@ -91,7 +91,9 @@ curl http://127.0.0.1:9092/v1/responses \
 
 For a streaming response, set stream to true and use curl's -N option to display events as they arrive. Keep the bearer value in an environment variable instead of putting a real key in command history.
 
-The API exposes GET /v1/models and POST /v1/responses. Each model alias routes to one configured provider and upstream model. The first version has no automatic retries or fallback. OpenAI requests always go upstream with stream=true and store=false; non-streaming client requests are collected and returned as JSON. Unsupported request capabilities produce errors instead of being silently removed. See [the Responses contract](docs/responses-contract.md).
+The API exposes `GET /v1/models`, `POST /v1/responses`, and `POST /v1/chat/completions` (translated to Responses upstream). Model aliases default to Single, with exactly one provider/upstream model. Explicit Fallback routes consider ordered targets at most once on eligible failures before downstream commitment; there are no same-target retries. Models and Providers show per-target cooldown/429 observations and routing predictions, not health checks or active executions. See [routing runtime](docs/routing-runtime.md).
+
+OpenAI requests always go upstream with `stream=true` and `store=false`; non-streaming client requests are collected and returned as JSON. Known benign unsupported fields/tool types are dropped and recorded; stateful references and untranslatable requests produce explicit errors. See [the Responses contract](docs/responses-contract.md) and [harness compatibility](docs/harness-compatibility.md).
 
 ## Networking
 
@@ -131,4 +133,3 @@ Request history is useful for investigating usage and repeated inputs, but Gyemo
 ## Current verification limits
 
 The four release targets are cross-built on Linux. No native macOS runtime check is available. Live authenticated OpenAI sign-in, refresh, model catalog, inference, and a complete pi-to-Gyemoim session have not been verified with an account. See [OAuth verification notes](docs/oauth.md).
-

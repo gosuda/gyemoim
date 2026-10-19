@@ -410,3 +410,12 @@ button.outcome-row:hover { border-color: #d6dce4; background: #f6f8fb; }
 }
 .link-button { padding: 0; border: 0; color: var(--accent); background: none; font: inherit; font-size: 11px; font-weight: 650; text-decoration: underline; }
 .link-button:hover { color: #2d58c3; }
+.routing-runtime { border-top: 1px solid var(--line); margin-top: 1rem; padding-top: .75rem; overflow-wrap: anywhere; }
+.runtime-target { font-size: .875rem; line-height: 1.6; margin: .65rem 0; overflow-wrap: anywhere; }
+.runtime-prediction { font-weight: 600; }
+.routing-runtime .detail-note, .candidate-section .detail-note, .candidate-diagnostics .detail-note, .candidate-section .empty-inline, .candidate-diagnostics .empty-inline { color: #526071; font-size: 12px; line-height: 1.6; }
+.candidate-list { grid-template-columns: minmax(0, 1fr); }
+.candidate-section { overflow-wrap: anywhere; }
+.candidate-section .timeline-item strong, .candidate-diagnostics .timeline-item strong { font-size: 12px; }
+.candidate-section .timeline-item span, .candidate-diagnostics .timeline-item span { color: #526071; font-size: 12px; }
+.candidate-diagnostics > summary { min-height: 44px; padding: 12px 0; color: #465466; font-size: 12px; font-weight: 650; cursor: pointer; }

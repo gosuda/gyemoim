@@ -13,7 +13,7 @@ The database contains configuration only:
 - `models`: unique local names, strategy and revision, strategy configuration JSON, and optional metadata JSON. Legacy `provider_id` and `upstream_model` columns mirror the first target; target-table triggers maintain this projection.
 - `model_targets`: canonical ordered destinations in typed columns, not strategy JSON. Each row contains `model_id`, zero-based `position`, `provider_id`, and `upstream_model`. The primary key is `(model_id, position)`; `(model_id, provider_id, upstream_model)` is unique. Provider foreign keys restrict deletion of every referenced provider, not just the first; deleting an ungranted Model cascades its targets.
 - `model_grants`: explicit ServiceAccount-to-Model permissions with foreign keys.
-- `settings_metadata`: stable host ID and future application settings.
+- `settings_metadata`: stable host ID and application settings metadata.
 
 Request bodies, provider usage, and request history do not belong in this database; they are stored in NDJSON files.
 

@@ -18,6 +18,7 @@ import { loadModelsAndProviders } from "./pages/models.js";
 import { loadRequestHistory } from "./pages/requests.js";
 import { loadStorage } from "./pages/storage.js";
 import { loadUsers } from "./pages/users.js";
+import { syncRoutingStatus } from "./routing-status.js";
 
 const titles = {
   overview: "Overview",
@@ -105,6 +106,7 @@ function showPage(page, params = new URLSearchParams()) {
     byId("request-detail-panel").hidden = true;
   }
   state.page = page;
+  syncRoutingStatus();
   document.querySelectorAll("[data-page]").forEach((item) => {
     const selected = item.dataset.page === page;
     item.classList.toggle("active", selected);
