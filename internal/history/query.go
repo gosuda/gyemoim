@@ -90,6 +90,9 @@ func summaryFromEnd(record Record) RequestSummary {
 	if record.ProviderID != "" {
 		summary.Provider = &ProviderSnapshot{ID: record.ProviderID, Name: record.ProviderName, UpstreamModel: record.UpstreamModel}
 	}
+	if record.SchemaVersion >= 3 {
+		summary.Attempts = record.TransmissionCount
+	}
 	return summary
 }
 
@@ -441,25 +444,54 @@ func resolveStartBatch(ctx context.Context, snapshot *QuerySnapshot, pending map
 // RequestDetail holds bounded metadata. Request/effective/HTTP/event bytes are
 // retrieved through Content in chunks so large inputs never inflate this response.
 type RequestDetail struct {
-	Request            RequestSummary   `json:"request"`
-	IncomingBytes      int64            `json:"incomingRequestBytes,omitempty"`
-	IncomingURL        string           `json:"incomingRequestUrl,omitempty"`
-	Attempts           []AttemptDetail  `json:"attempts"`
-	AttemptCount       int              `json:"attemptCount"`
-	AttemptsTruncated  bool             `json:"attemptsTruncated"`
-	Responses          []ResponseDetail `json:"upstreamResponses"`
-	ResponseCount      int              `json:"upstreamResponseCount"`
-	ResponsesTruncated bool             `json:"responsesTruncated"`
-	EventCount         uint64           `json:"eventCount"`
-	EventBytes         uint64           `json:"eventBytes"`
-	EventsURL          string           `json:"eventsUrl"`
+	Request             RequestSummary    `json:"request"`
+	IncomingBytes       int64             `json:"incomingRequestBytes,omitempty"`
+	IncomingURL         string            `json:"incomingRequestUrl,omitempty"`
+	Attempts            []AttemptDetail   `json:"attempts"`
+	AttemptCount        int               `json:"attemptCount"`
+	AttemptsTruncated   bool              `json:"attemptsTruncated"`
+	Candidates          []CandidateDetail `json:"candidates"`
+	CandidateCount      int               `json:"candidateCount"`
+	CandidatesTruncated bool              `json:"candidatesTruncated"`
+	Responses           []ResponseDetail  `json:"upstreamResponses"`
+	ResponseCount       int               `json:"upstreamResponseCount"`
+	ResponsesTruncated  bool              `json:"responsesTruncated"`
+	EventCount          uint64            `json:"eventCount"`
+	EventBytes          uint64            `json:"eventBytes"`
+	EventsURL           string            `json:"eventsUrl"`
 }
 
 type AttemptDetail struct {
-	Number         int              `json:"number"`
-	Provider       ProviderSnapshot `json:"provider"`
-	EffectiveBytes int64            `json:"effectiveRequestBytes"`
-	EffectiveURL   string           `json:"effectiveRequestUrl"`
+	Number            int              `json:"number"`
+	Provider          ProviderSnapshot `json:"provider"`
+	EffectiveBytes    int64            `json:"effectiveRequestBytes"`
+	EffectiveURL      string           `json:"effectiveRequestUrl"`
+	Candidate         int              `json:"candidate,omitempty"`
+	Outcome           string           `json:"outcome,omitempty"`
+	Reason            string           `json:"reason,omitempty"`
+	HTTPStatus        int              `json:"httpStatus"`
+	UpstreamRequestID string           `json:"upstreamRequestId,omitempty"`
+	SafeError         string           `json:"safeError,omitempty"`
+	Usage             *Usage           `json:"usage"`
+	Timings           Timings          `json:"timings"`
+}
+
+// CandidateDetail includes pre-send failures and skips without inventing upstream
+// transmissions. A missing end means active or interrupted, not successful.
+type CandidateDetail struct {
+	Number            int              `json:"number"`
+	Provider          ProviderSnapshot `json:"provider"`
+	Attempt           int              `json:"attempt"`
+	StartedNS         *int64           `json:"startedNs"`
+	TransmissionNS    *int64           `json:"transmissionNs"`
+	EndedNS           *int64           `json:"endedNs"`
+	Outcome           string           `json:"outcome"`
+	Reason            string           `json:"reason,omitempty"`
+	HTTPStatus        int              `json:"httpStatus"`
+	UpstreamRequestID string           `json:"upstreamRequestId,omitempty"`
+	SafeError         string           `json:"safeError,omitempty"`
+	Usage             *Usage           `json:"usage"`
+	Timings           Timings          `json:"timings"`
 }
 
 type ResponseDetail struct {
@@ -484,7 +516,7 @@ func (q *QueryService) Detail(ctx context.Context, requestID string) (RequestDet
 		return RequestDetail{}, err
 	}
 	defer snapshot.Close()
-	detail := RequestDetail{Attempts: make([]AttemptDetail, 0, 8), Responses: make([]ResponseDetail, 0, 4), EventsURL: "/api/requests/" + requestID + "/events"}
+	detail := RequestDetail{Attempts: make([]AttemptDetail, 0, 8), Candidates: make([]CandidateDetail, 0, 8), Responses: make([]ResponseDetail, 0, 4), EventsURL: "/api/requests/" + requestID + "/events"}
 	found := false
 	var start *RequestSummary
 	var final *RequestSummary
@@ -495,6 +527,7 @@ func (q *QueryService) Detail(ctx context.Context, requestID string) (RequestDet
 	var lastProviderElapsed int64
 	var lastObservedElapsed int64
 	attempts := make(map[int]AttemptDetail, 8)
+	candidates := make(map[int]*CandidateDetail, 8)
 	err = snapshot.scan(ctx, func(record Record) error {
 		if record.RequestID != requestID {
 			return nil
@@ -510,14 +543,17 @@ func (q *QueryService) Detail(ctx context.Context, requestID string) (RequestDet
 			}
 		case "upstream_transmission":
 			detail.AttemptCount++
-			if _, exists := attempts[record.Attempt]; !exists && len(attempts) < MaxDetailAttempts {
+			if _, exists := attempts[record.Attempt]; exists {
+				return errors.New("history transmission key is duplicated")
+			}
+			if retainDetailNumber(attempts, record.Attempt, MaxDetailAttempts) {
 				attempts[record.Attempt] = AttemptDetail{Number: record.Attempt,
+					Candidate:      record.Candidate,
 					Provider:       ProviderSnapshot{ID: record.ProviderID, Name: record.ProviderName, UpstreamModel: record.UpstreamModel},
 					EffectiveBytes: int64(len(record.EffectiveRequest)),
 					EffectiveURL:   fmt.Sprintf("/api/requests/%s/body?kind=effective&attempt=%d", requestID, record.Attempt)}
-			} else if len(attempts) >= MaxDetailAttempts {
-				detail.AttemptsTruncated = true
 			}
+			detail.AttemptsTruncated = detail.AttemptCount > MaxDetailAttempts
 			if record.Attempt > lastProviderAttempt || record.Attempt == lastProviderAttempt && record.ElapsedNS >= lastProviderElapsed {
 				lastProviderAttempt, lastProviderElapsed = record.Attempt, record.ElapsedNS
 				lastProvider = &ProviderSnapshot{ID: record.ProviderID, Name: record.ProviderName, UpstreamModel: record.UpstreamModel}
@@ -541,6 +577,22 @@ func (q *QueryService) Detail(ctx context.Context, requestID string) (RequestDet
 				end := summaryFromEnd(record)
 				final = &end
 				finalSchema, finalElapsed = record.SchemaVersion, record.ElapsedNS
+			}
+		}
+		if record.Type == "attempt_start" || record.Type == "attempt_end" || record.Type == "candidate_skip" || record.Type == "upstream_transmission" && record.Candidate > 0 {
+			if record.Type == "attempt_start" || record.Type == "candidate_skip" {
+				detail.CandidateCount++
+				detail.CandidatesTruncated = detail.CandidateCount > MaxDetailAttempts
+			}
+			if retainDetailNumber(candidates, record.Candidate, MaxDetailAttempts) {
+				c := candidates[record.Candidate]
+				if c == nil {
+					c = &CandidateDetail{Number: record.Candidate, Provider: ProviderSnapshot{ID: record.ProviderID, Name: record.ProviderName, UpstreamModel: record.UpstreamModel}}
+					candidates[record.Candidate] = c
+				}
+				if err := foldCandidateDetail(c, record); err != nil {
+					return err
+				}
 			}
 		}
 		if record.ElapsedNS > lastObservedElapsed {
@@ -574,12 +626,82 @@ func (q *QueryService) Detail(ctx context.Context, requestID string) (RequestDet
 	if lastObservedElapsed > detail.Request.DurationNS {
 		detail.Request.DurationNS = lastObservedElapsed
 	}
+	for _, c := range candidates {
+		if c.Outcome != "skipped" && c.StartedNS == nil || c.StartedNS != nil && c.EndedNS != nil && *c.EndedNS < *c.StartedNS ||
+			c.Attempt > 0 && c.TransmissionNS == nil || c.TransmissionNS != nil && (c.StartedNS == nil || *c.TransmissionNS < *c.StartedNS || c.EndedNS != nil && *c.TransmissionNS > *c.EndedNS) {
+			return RequestDetail{}, errors.New("invalid history candidate lifecycle")
+		}
+		if c.Outcome == "" {
+			c.Outcome = "interrupted"
+			if detail.Request.Active {
+				c.Outcome = "active"
+			}
+		}
+		detail.Candidates = append(detail.Candidates, *c)
+	}
 	for _, attempt := range attempts {
+		if c := candidates[attempt.Candidate]; c != nil {
+			attempt.Outcome, attempt.Reason = c.Outcome, c.Reason
+			attempt.HTTPStatus, attempt.UpstreamRequestID, attempt.SafeError = c.HTTPStatus, c.UpstreamRequestID, c.SafeError
+			attempt.Usage, attempt.Timings = c.Usage, c.Timings
+		}
 		detail.Attempts = append(detail.Attempts, attempt)
 	}
 	sort.Slice(detail.Attempts, func(i, j int) bool { return detail.Attempts[i].Number < detail.Attempts[j].Number })
+	sort.Slice(detail.Candidates, func(i, j int) bool { return detail.Candidates[i].Number < detail.Candidates[j].Number })
 	sort.Slice(detail.Responses, func(i, j int) bool { return detail.Responses[i].Attempt < detail.Responses[j].Attempt })
 	return detail, nil
+}
+
+// Keep the lowest numbered metadata independent of segment traversal order.
+func retainDetailNumber[T any](items map[int]T, number, limit int) bool {
+	if _, ok := items[number]; ok || len(items) < limit {
+		return true
+	}
+	max := number
+	for n := range items {
+		if n > max {
+			max = n
+		}
+	}
+	if max == number {
+		return false
+	}
+	delete(items, max)
+	return true
+}
+
+func foldCandidateDetail(c *CandidateDetail, r Record) error {
+	if c.Provider != (ProviderSnapshot{ID: r.ProviderID, Name: r.ProviderName, UpstreamModel: r.UpstreamModel}) {
+		return errors.New("history candidate target is inconsistent")
+	}
+	elapsed := r.ElapsedNS
+	switch r.Type {
+	case "attempt_start":
+		if c.StartedNS != nil || c.Outcome == "skipped" {
+			return errors.New("history candidate start is duplicated")
+		}
+		c.StartedNS = &elapsed
+	case "upstream_transmission":
+		if c.TransmissionNS != nil || c.Attempt != 0 && c.Attempt != r.Attempt || c.Outcome == "skipped" || c.EndedNS != nil && c.Attempt == 0 {
+			return errors.New("history candidate transmission is inconsistent")
+		}
+		c.Attempt = r.Attempt
+		c.TransmissionNS = &elapsed
+	case "attempt_end":
+		if c.EndedNS != nil || c.Attempt != 0 && c.Attempt != r.Attempt {
+			return errors.New("history candidate end is inconsistent")
+		}
+		c.EndedNS, c.Attempt, c.Outcome, c.Reason = &elapsed, r.Attempt, r.Outcome, r.Reason
+		c.HTTPStatus, c.UpstreamRequestID, c.SafeError = r.HTTPStatus, r.UpstreamRequestID, r.SafeError
+		c.Usage, c.Timings = r.Usage, r.Timings
+	case "candidate_skip":
+		if c.StartedNS != nil || c.EndedNS != nil || c.Attempt != 0 {
+			return errors.New("history candidate skip is inconsistent")
+		}
+		c.EndedNS, c.Outcome, c.Reason = &elapsed, "skipped", r.Reason
+	}
+	return nil
 }
 
 // EventPage is count and raw-byte bounded. Oversized or byte-budget-omitted frames

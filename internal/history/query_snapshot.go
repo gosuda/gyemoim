@@ -229,7 +229,7 @@ func (r *Recorder) querySnapshot(ctx context.Context) (*QuerySnapshot, error) {
 		}
 		summary := RequestSummary{
 			RequestID: id, StartedAt: request.startedAt, DurationNS: request.elapsedNS(capturedAt), Outcome: "active", Active: true,
-			ServiceAccount: request.serviceAccount, Model: request.model, Attempts: request.lastAttempt,
+			ServiceAccount: request.serviceAccount, Model: request.model, Attempts: request.transmissions,
 		}
 		if request.lastProvider != nil {
 			provider := *request.lastProvider

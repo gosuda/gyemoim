@@ -71,9 +71,9 @@ include `hasMore` and, when another page exists, `nextCursor`. The API does not 
 the full archive to compute a total count. The UTC time range is half-open
 `[from,to)` and filters use request start time.
 
-Schema 2 end records supply their own account, Model, Provider, outcome, usage, and
+Schema 2 and 3 end records supply their own account, Model, Provider, outcome, usage, and
 timing attribution. During the end-record scan, unfiltered and interrupted queries
-build an exact index of schema 2 end IDs. This prevents completed schema 2 starts
+build an exact index of schema 2/3 end IDs. This prevents completed schema 2/3 starts
 from entering the interrupted-start resolver. Schema 1 ends are joined to their
 start and transmission records in batches of at most 128 IDs. Starts without an end
 are included as `outcome: "interrupted"`; active in-process requests are included as
@@ -81,6 +81,11 @@ are included as `outcome: "interrupted"`; active in-process requests are include
 resolution and actual unmatched-start rescans remain batched; if those scans or index
 I/O exceed the 30 second query budget, the API returns a timeout error and no partial
 page.
+
+Schema 3 uses its explicit `transmission_count` rather than the last transmission
+number. Request-level Provider attribution remains the last transmitted target
+(absent if none), not the last selected or skipped candidate. Provider filters and
+grouping use that attribution, not “any candidate considered.”
 
 ## Request details and full content
 
@@ -109,6 +114,24 @@ Attempt and upstream-response metadata is capped at 128 entries per detail respo
 `attemptsTruncated` and `responsesTruncated` say when those metadata arrays exceed
 the cap; content remains addressable by attempt number.
 
+Schema-3 explicit lifecycle requests additionally expose `candidates`, ordered by
+candidate `number`. Each entry includes `provider`, `attempt` (zero for no send),
+`startedNs`, `transmissionNs` (the durable send fence), `endedNs`, `outcome`,
+`reason`, `httpStatus`, `upstreamRequestId`, `safeError`, `usage`, and `timings`.
+Offsets are monotonic nanoseconds since request admission. Skips have outcome
+`skipped`, null start/transmission offsets, an end offset, and their reason. Started
+candidates without an end are `active` while the request is in-process, otherwise
+`interrupted`; no successful result is inferred. Pre-send failures have a start/end
+but no transmission or effective body. Old/bare-Transmit requests have an empty
+candidate list; no synthetic lifecycle or attempt outcome is invented.
+
+`candidateCount` counts starts plus skips; `candidatesTruncated` marks the 128-entry
+cap. Candidate and transmission metadata retain the lowest numbered entries
+regardless of segment traversal order. `attempts` remains a list of transmissions
+with its existing effective-body links; entries additionally carry `candidate` and,
+when that candidate is retained, its outcome/reason/status/ID/error/usage/timings.
+`attemptCount` and `request.upstreamAttempts` still count transmissions only.
+
 ## SSE events
 
 `GET /api/requests/{requestId}/events?limit=25&cursor=0` returns event metadata and
@@ -135,6 +158,12 @@ retained; exceeding the cap returns an explicit error instead of dropping groups
 transmissions. Each token field has a `total` of known values plus `knownRequests`
 and `unknownRequests`. An explicitly reported zero is known; an absent count remains
 unknown. Cached input and reasoning output are subsets, not additional totals.
+Only `request_end.usage` contributes to these request-level aggregates; diagnostic
+`attempt_end.usage` is never summed again. The executor supplies final request usage
+as before (not an automatic sum of attempts). A failed A followed by successful B
+counts one client request, two transmissions, and final request usage once, grouped
+under B. Earlier attempt usage remains inspectable in detail, not a separate
+provider-billing aggregate.
 `cacheRatio` is `null` when any request in the group lacks either input or cached
 counts, when total input is zero, or when cached input exceeds input.
 `cacheRatioUnavailableReason` identifies which condition applied. Otherwise the
@@ -148,7 +177,7 @@ fixed file snapshot and release the recorder mutex before scanning. Closed files
 are opened one at a time, and the active file is read only through its captured
 length. Recording and rotation continue during a scan.
 
-The exact schema 2 end-ID index uses fixed 128-byte NUL-padded IDs. Up to 8 MiB of
+The exact schema 2/3 end-ID index uses fixed 128-byte NUL-padded IDs. Up to 8 MiB of
 IDs are sorted and deduplicated in memory. Larger indexes spill sorted runs to a
 unique owner-only temporary directory, merge at most 31 input runs at a time, then
 binary-search a single sorted file before an interrupted-start batch is queued. The

@@ -20,7 +20,7 @@ const (
 	recordReadBufferSize = 64 << 10
 )
 
-// Record is the decoded union of supported schema-version-1 and version-2 history lines.
+// Record is the decoded union of supported schema-version-1 through version-3 history lines.
 // Fields that do not apply to Type remain at their zero value. Raw request bodies
 // and response frames belong only to this callback and should not be retained by
 // readers that process an entire history.
@@ -35,6 +35,9 @@ type Record struct {
 	Model                          *ModelSnapshot
 	IncomingRequest                json.RawMessage
 	Attempt                        int
+	Candidate                      int
+	TransmissionCount              int
+	Reason                         string
 	ProviderID                     string
 	ProviderName                   string
 	UpstreamModel                  string
@@ -55,7 +58,7 @@ type Record struct {
 	Timings                        Timings
 }
 
-// ReadRecords visits complete, supported schema-version-1 or version-2 lines in an NDJSON
+// ReadRecords visits complete, supported schema-version-1 through version-3 lines in an NDJSON
 // stream. It retains at most one record line (capped at 512 MiB) at a time and
 // stops immediately if the context or callback reports an error. A non-newline
 // terminated tail is an error; startup recovery handles that only for active.ndjson.
@@ -211,6 +214,10 @@ func decodeRecord(line []byte) (Record, error) {
 			return Record{}, errors.New("invalid upstream_transmission fields")
 		}
 		record.Attempt = lineValue.Attempt
+		if lineValue.Candidate < 0 || envelope.SchemaVersion < 3 && lineValue.Candidate != 0 {
+			return Record{}, errors.New("invalid transmission candidate")
+		}
+		record.Candidate = lineValue.Candidate
 		record.ProviderID = lineValue.ProviderID
 		record.ProviderName = lineValue.ProviderName
 		record.UpstreamModel = lineValue.UpstreamModel
@@ -246,6 +253,45 @@ func decodeRecord(line []byte) (Record, error) {
 		record.EventName = lineValue.EventName
 		record.Sequence = lineValue.Sequence
 		record.WireText = lineValue.WireText
+	case "attempt_start", "candidate_skip", "attempt_end":
+		if envelope.SchemaVersion < 3 {
+			return Record{}, errors.New("candidate lifecycle requires schema version 3")
+		}
+		var c candidateLine
+		switch envelope.Type {
+		case "attempt_start":
+			if err := decodeStrict(line, &c); err != nil {
+				return Record{}, err
+			}
+		case "candidate_skip":
+			var v candidateSkipLine
+			if err := decodeStrict(line, &v); err != nil {
+				return Record{}, err
+			}
+			c, record.Reason = v.candidateLine, v.Reason
+			if !validReason(v.Reason) {
+				return Record{}, errors.New("invalid candidate skip reason")
+			}
+		case "attempt_end":
+			var v attemptEndLine
+			if err := decodeStrict(line, &v); err != nil {
+				return Record{}, err
+			}
+			result := AttemptResult{Outcome: v.Outcome, Reason: v.Reason, HTTPStatus: v.HTTPStatus, UpstreamRequestID: v.UpstreamRequestID,
+				SafeError: v.SafeError, Usage: v.Usage, Timings: v.Timings}
+			if v.Attempt < 0 || !validAttemptResult(result, v.Attempt) {
+				return Record{}, errors.New("invalid attempt_end fields")
+			}
+			c = v.candidateLine
+			record.Attempt, record.Outcome, record.Reason = v.Attempt, v.Outcome, v.Reason
+			record.HTTPStatus, record.UpstreamRequestID, record.SafeError = v.HTTPStatus, v.UpstreamRequestID, v.SafeError
+			record.Usage, record.Timings = v.Usage, v.Timings
+		}
+		if !validCandidate(Candidate{Number: c.Candidate, Provider: c.Provider}) {
+			return Record{}, errors.New("invalid candidate fields")
+		}
+		record.Candidate = c.Candidate
+		record.ProviderID, record.ProviderName, record.UpstreamModel = c.Provider.ID, c.Provider.Name, c.Provider.UpstreamModel
 	case "request_end":
 		var lineValue endLine
 		if err := decodeStrict(line, &lineValue); err != nil {
@@ -262,6 +308,15 @@ func decodeRecord(line []byte) (Record, error) {
 			return Record{}, errors.New("invalid request_end attribution")
 		}
 		record.Attempt = lineValue.Attempt
+		if envelope.SchemaVersion >= 3 {
+			if lineValue.TransmissionCount == nil || *lineValue.TransmissionCount < 0 || *lineValue.TransmissionCount > lineValue.Attempt ||
+				(*lineValue.TransmissionCount == 0) != (lineValue.Attempt == 0) {
+				return Record{}, errors.New("invalid transmission_count")
+			}
+			record.TransmissionCount = *lineValue.TransmissionCount
+		} else if lineValue.TransmissionCount != nil {
+			return Record{}, errors.New("transmission_count requires schema version 3")
+		}
 		record.Outcome = lineValue.Outcome
 		record.HTTPStatus = lineValue.HTTPStatus
 		record.SafeError = lineValue.SafeError

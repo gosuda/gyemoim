@@ -19,7 +19,7 @@ import (
 )
 
 const (
-	schemaVersion         = 2
+	schemaVersion         = 3
 	minimumSchemaVersion  = 1
 	maxEventBytes         = 64 << 20
 	maxRequestID          = 128
@@ -77,7 +77,9 @@ type ProviderSnapshot struct {
 
 // Attempt is the target and effective request body for one upstream transmission.
 type Attempt struct {
-	Number           int
+	Number int
+	// Candidate is required in explicit lifecycle mode; zero preserves the legacy API.
+	Candidate        int
 	Provider         ProviderSnapshot
 	EffectiveRequest json.RawMessage
 }
@@ -182,6 +184,10 @@ type Request struct {
 	ended          bool
 	lastAttempt    int
 	eventSequence  uint64
+	transmissions  int
+	lifecycle      bool
+	lastCandidate  int
+	openCandidate  *candidateState
 }
 
 // Open prepares dataDir/history/active.ndjson. On filesystem or recovery failure it
@@ -765,6 +771,13 @@ func (h *Request) Transmit(attempt Attempt) error {
 	if attempt.Number <= h.lastAttempt {
 		return fmt.Errorf("%w: attempt number must increase", ErrInvalidRecord)
 	}
+	if h.lifecycle {
+		if h.openCandidate == nil || h.openCandidate.transmission != 0 || attempt.Candidate != h.openCandidate.Number || attempt.Provider != h.openCandidate.Provider {
+			return fmt.Errorf("%w: transmission must match the open candidate", ErrInvalidRecord)
+		}
+	} else if attempt.Candidate != 0 {
+		return fmt.Errorf("%w: candidate has not been started", ErrInvalidRecord)
+	}
 	now := time.Now()
 	line := transmitLine{
 		baseLine: baseLine{
@@ -776,6 +789,7 @@ func (h *Request) Transmit(attempt Attempt) error {
 			ElapsedNS:     h.elapsedNS(now),
 		},
 		Attempt:          attempt.Number,
+		Candidate:        attempt.Candidate,
 		ProviderID:       attempt.Provider.ID,
 		ProviderName:     attempt.Provider.Name,
 		UpstreamModel:    attempt.Provider.UpstreamModel,
@@ -784,6 +798,10 @@ func (h *Request) Transmit(attempt Attempt) error {
 	err := r.writeLocked(line, true)
 	if err == nil {
 		h.lastAttempt = attempt.Number
+		h.transmissions++
+		if h.openCandidate != nil {
+			h.openCandidate.transmission = attempt.Number
+		}
 		provider := attempt.Provider
 		h.lastProvider = &provider
 	}
@@ -794,6 +812,19 @@ func (h *Request) Transmit(attempt Attempt) error {
 // assigned by the handle, beginning at one; an event is limited individually, so
 // the total stream may exceed 64 MiB.
 func (h *Request) Event(frame []byte, eventName string) error {
+	return h.event(0, frame, eventName)
+}
+
+// EventForAttempt records an explicitly identified transmission. Use this in
+// lifecycle mode so a late callback cannot be attributed to a later candidate.
+func (h *Request) EventForAttempt(attempt int, frame []byte, eventName string) error {
+	if attempt < 1 {
+		return fmt.Errorf("%w: invalid event attempt", ErrInvalidRecord)
+	}
+	return h.event(attempt, frame, eventName)
+}
+
+func (h *Request) event(expectedAttempt int, frame []byte, eventName string) error {
 	if len(frame) > maxEventBytes {
 		return ErrEventTooLarge
 	}
@@ -812,8 +843,11 @@ func (h *Request) Event(frame []byte, eventName string) error {
 	if r.active[h.id] != h {
 		return ErrRecordingUnavailable
 	}
-	if h.lastAttempt == 0 {
+	if h.lastAttempt == 0 || h.lifecycle && (h.openCandidate == nil || h.openCandidate.transmission == 0) {
 		return fmt.Errorf("%w: response event has no recorded transmission", ErrInvalidRecord)
+	}
+	if expectedAttempt != 0 && expectedAttempt != h.lastAttempt || h.lifecycle && expectedAttempt == 0 {
+		return fmt.Errorf("%w: response event attempt does not match", ErrInvalidRecord)
 	}
 	h.eventSequence++
 	now := time.Now()
@@ -931,6 +965,12 @@ func (r *Recorder) writeEndLocked(h *Request, outcome string, httpStatus int, sa
 	if r.active[h.id] != h {
 		return ErrRecordingUnavailable
 	}
+	// A shutdown or early return must not leave an apparently live candidate behind.
+	if h.openCandidate != nil {
+		if err := h.endAttemptLocked(h.openCandidate.Number, AttemptResult{Outcome: "incomplete", Reason: "request_ended"}); err != nil {
+			return err
+		}
+	}
 	now := time.Now()
 	line := endLine{
 		baseLine: baseLine{
@@ -942,6 +982,7 @@ func (r *Recorder) writeEndLocked(h *Request, outcome string, httpStatus int, sa
 			ElapsedNS:     h.elapsedNS(now),
 		},
 		Attempt:           h.lastAttempt,
+		TransmissionCount: &h.transmissions,
 		Outcome:           outcome,
 		HTTPStatus:        httpStatus,
 		SafeError:         safeError,
@@ -958,9 +999,21 @@ func (r *Recorder) writeEndLocked(h *Request, outcome string, httpStatus int, sa
 
 // HTTPResponse stores a bounded upstream HTTP error/non-SSE body as exact bytes.
 // contentType is the sanitized upstream Content-Type header value, empty when the
-// upstream sent none. It is a non-durable record; the following End is the
-// durability fence.
+// upstream sent none. It is non-durable; EndAttempt (explicit lifecycle) or End
+// supplies the durability fence.
 func (h *Request) HTTPResponse(status int, contentType, upstreamRequestID string, body []byte, truncated, readFailed bool) error {
+	return h.httpResponse(0, status, contentType, upstreamRequestID, body, truncated, readFailed)
+}
+
+// HTTPResponseForAttempt is the explicit-transmission form required in lifecycle mode.
+func (h *Request) HTTPResponseForAttempt(attempt, status int, contentType, upstreamRequestID string, body []byte, truncated, readFailed bool) error {
+	if attempt < 1 {
+		return fmt.Errorf("%w: invalid response attempt", ErrInvalidRecord)
+	}
+	return h.httpResponse(attempt, status, contentType, upstreamRequestID, body, truncated, readFailed)
+}
+
+func (h *Request) httpResponse(expectedAttempt, status int, contentType, upstreamRequestID string, body []byte, truncated, readFailed bool) error {
 	if h == nil || h.recorder == nil {
 		return ErrRecordingUnavailable
 	}
@@ -976,8 +1029,11 @@ func (h *Request) HTTPResponse(status int, contentType, upstreamRequestID string
 	if r.active[h.id] != h {
 		return ErrRecordingUnavailable
 	}
-	if h.lastAttempt == 0 {
+	if h.lastAttempt == 0 || h.lifecycle && (h.openCandidate == nil || h.openCandidate.transmission == 0) {
 		return fmt.Errorf("%w: upstream response has no recorded transmission", ErrInvalidRecord)
+	}
+	if expectedAttempt != 0 && expectedAttempt != h.lastAttempt || h.lifecycle && expectedAttempt == 0 {
+		return fmt.Errorf("%w: upstream response attempt does not match", ErrInvalidRecord)
 	}
 	now := time.Now()
 	line := upstreamResponseLine{
@@ -1178,6 +1234,7 @@ type startLine struct {
 type transmitLine struct {
 	baseLine
 	Attempt          int             `json:"attempt"`
+	Candidate        int             `json:"candidate,omitempty"`
 	ProviderID       string          `json:"provider_id"`
 	ProviderName     string          `json:"provider_name"`
 	UpstreamModel    string          `json:"upstream_model"`
@@ -1206,6 +1263,7 @@ type upstreamResponseLine struct {
 type endLine struct {
 	baseLine
 	Attempt           int                    `json:"attempt"`
+	TransmissionCount *int                   `json:"transmission_count,omitempty"`
 	Outcome           string                 `json:"outcome"`
 	HTTPStatus        int                    `json:"http_status"`
 	SafeError         string                 `json:"safe_error"`

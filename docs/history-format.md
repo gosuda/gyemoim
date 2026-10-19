@@ -1,4 +1,4 @@
-# Request History Format (writer schema version 2)
+# Request History Format (writer schema version 3)
 
 Gyemoim stores request history outside SQLite as newline-delimited JSON in
 `<data-directory>/history/active.ndjson`. Each line is one compact JSON object
@@ -63,8 +63,8 @@ infer. No synthetic end records are written at startup.
 
 | Field | Type | Meaning |
 | --- | --- | --- |
-| `schema_version` | integer | New records use `2`. The reader accepts legacy schema `1` and schema `2`. Schema-2 `request_end` records may carry the optional `dropped_fields` field, which binaries predating it cannot parse (their strict decoder fails on those lines); a rollback to such a binary degrades history queries for segments containing dropped-field records until they are removed. |
-| `type` | string | `request_start`, `upstream_transmission`, `upstream_response`, `response_event`, or `request_end`. |
+| `schema_version` | integer | New records use `3`. The reader accepts schemas `1`, `2`, and `3` together. Older binaries reject schema 3: rollback with these segments present degrades recording and history queries, even if no fallback was used. Preserve/archive the history before rollback; do not relabel records as schema 2. Schema-2 `dropped_fields` also requires a reader that supports that optional field. |
+| `type` | string | `request_start`, `attempt_start`, `candidate_skip`, `attempt_end`, `upstream_transmission`, `upstream_response`, `response_event`, or `request_end`. |
 | `request_id` | string | Gateway request ID correlating all records for one request. |
 | `started_at` | UTC timestamp | Wall-clock timestamp captured at recorder admission and repeated unchanged on every line. |
 | `timestamp_utc` | UTC timestamp | Wall-clock time when this record was written. |
@@ -89,10 +89,65 @@ successful handle.
 ### `upstream_transmission`
 
 - `attempt`: positive, increasing attempt number.
+- `candidate`: positive candidate number in explicit lifecycle mode; absent for the
+  compatible bare-`Transmit` API. Candidate order and transmission numbering are
+  independent: skipped targets and pre-send failures do not consume transmissions.
 - `provider_id`, `provider_name`, `upstream_model`: actual target for this attempt.
 - `effective_request`: the complete effective upstream request JSON body.
 
 `Transmit` writes and syncs this record before the caller sends the upstream request.
+This is a send-authorization fence, not proof that bytes reached the provider.
+
+### Candidate lifecycle (schema 3)
+
+The recorder supports ordered candidate bookkeeping independently of the current
+single-target executor. It does not select routes, retry, or manage cooldowns.
+
+- `attempt_start`: `candidate` (positive increasing number) and `provider`
+  (`id`, `name`, `upstream_model`). `StartAttempt(Candidate)` writes and syncs this
+  before authentication or request preparation. Only one candidate may be open.
+- `candidate_skip`: the same target snapshot plus `reason`, a non-secret machine
+  code. `SkipCandidate(Candidate, reason)` records a considered but unattempted
+  target. It does not open an attempt or authorize transmission.
+- `attempt_end`: the same candidate and target, `attempt` (the transmission number,
+  or zero for a pre-send failure), `outcome` (`completed`, `failed`, `cancelled`,
+  `incomplete`), `reason`, `http_status`, optional `upstream_request_id`,
+  `safe_error`, `usage`, and `timings`. `EndAttempt(candidate, AttemptResult)`
+  syncs this record before candidate advancement. Timings are offsets from request
+  admission, not from candidate selection. Unknown usage/timings remain null.
+
+Reasons are 1–128 lowercase ASCII letters, digits, `_`, `-`, or `.`; callers choose
+codes such as `authentication_failed`, `http_429`, `completed`, or `cooldown`.
+Provider snapshot strings are nonempty valid UTF-8, at most 1024 bytes each.
+Safe errors, request IDs, timings, and usage use the existing bounded validators.
+A pre-send result cannot be `completed` or claim an HTTP response, upstream ID,
+usage, or any transport/stream/delivery timing. Authentication/preparation
+failure therefore needs no fabricated `upstream_transmission`.
+
+The caller uses `Transmit(Attempt{Number: transmission, Candidate: candidate,
+Provider: target, EffectiveRequest: body})` only after `StartAttempt` succeeds.
+Target and candidate must match the open attempt; only one transmission is allowed
+per candidate. In explicit lifecycle mode, events and HTTP bodies must use
+`EventForAttempt(transmission, frame, name)` and
+`HTTPResponseForAttempt(transmission, status, contentType, requestID, body,
+truncated, readFailed)`. A stale transmission ID or a write after `EndAttempt` is
+rejected instead of being attached to a later target. The executor must finish or
+join a candidate's callbacks before ending it. Bare `Event`/`HTTPResponse` and bare
+`Transmit` remain compatible for the existing non-lifecycle harness; the two modes
+cannot be mixed within one request.
+
+Every start, skip, and attempt end is durable. Any error from a required lifecycle
+or transmission fence must stop further provider work/advancement. Storage failures
+permanently degrade the recorder; already-transmitted streams may continue, but no
+new send is authorized without a successful `Transmit`. Closing or ending a request
+with an open candidate durably closes that candidate as `incomplete` with reason
+`request_ended`. A crash can leave starts without ends; startup does not reconstruct
+lifecycles or synthesize results. Readers validate individual records at startup,
+and detail queries fold bounded lifecycle metadata independently of segment order.
+
+The request handle retains only the current candidate and counters, not an
+ever-growing attempt list. Each candidate adds a bounded amount of metadata on disk;
+stream content and request bodies retain their existing limits.
 
 ### `upstream_response` (schema 2)
 
@@ -110,7 +165,7 @@ successful handle.
 This record preserves non-2xx bodies and successful responses with an unexpected
 content type. It contains no managed authorization token and no upstream response
 headers other than the sanitized `content_type` and request-ID values above.
-The following `request_end` record provides the durability fence.
+The following `attempt_end` or `request_end` record provides the durability fence.
 
 ### `response_event`
 
@@ -125,6 +180,9 @@ per frame, not per stream. Event records are synced by the next durable fence or
 ### `request_end`
 
 - `attempt`: last upstream attempt, or `0` if none was transmitted.
+- `transmission_count` (schema 3): actual number of successful transmission fences,
+  including non-contiguous attempt numbering. Required even when zero; candidate
+  starts, pre-send failures, and skips never increment it.
 - `outcome`: `completed`, `failed`, `cancelled`, or `incomplete`.
 - `http_status`: response status, or `0` if none was available.
 - `safe_error`: a short pre-sanitized explanation, empty when none applies.
@@ -157,7 +215,8 @@ A repeated `End` is harmless. Closing the recorder ends remaining handles as
 
 ## Durability, errors, and sensitive fields
 
-`Begin`, `Transmit`, and `End` each sync the active file before returning. Any write or
+`Begin`, `StartAttempt`, `SkipCandidate`, `EndAttempt`, `Transmit`, and `End` each
+sync the active file before returning. Any write or
 sync failure permanently degrades this process's recorder. Existing requests continue
 upstream; their later history writes fail and increment the safe loss counter. Future
 `Begin` calls return `ErrRecordingUnavailable`, allowing the gateway to reject new
@@ -165,8 +224,8 @@ requests before provider invocation. `Status` exposes only state, potentially-lo
 count, active-request count, and bytes in the current active file.
 
 The schema has no HTTP authorization header, local API key, OAuth credential object,
-authentication URL, or generic URL field. New records use schema 2; readers continue to
-accept schema 1 without requiring schema 2 attribution fields. Callers pass JSON request bodies only;
+authentication URL, or generic URL field. New records use schema 3; readers continue to
+accept schemas 1 and 2 without requiring newer fields. Callers pass JSON request bodies only;
 arbitrary user-provided body content is preserved. Callers must keep gateway-managed
 credentials out of body payloads and must sanitize `safe_error` before recording it.
 

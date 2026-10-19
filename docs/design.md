@@ -224,6 +224,15 @@ Record all prompts, responses, tool definitions, and tool results without per-ha
 
 Keep partial request history when a stream fails or is interrupted. A completed HTTP connection alone does not establish successful inference.
 
+History schema 3 also supports explicit ordered candidate starts, durable attempt
+outcomes (including pre-transmission authentication/preparation failures), and
+candidate skips. These are recording primitives, not routing or cooldown behavior.
+Candidate order is separate from upstream transmission numbering; only a successful
+durable transmission fence authorizes a send. Request-level attribution remains the
+last transmitted target, and usage aggregates count final request usage once rather
+than summing diagnostic attempt usage. See [history-format.md](history-format.md)
+and [history-query.md](history-query.md) for lifecycle APIs and rollback constraints.
+
 If request recording becomes unavailable, including because the disk is full, reject new inference requests with an explicit `503` recording-unavailable error before calling the provider. There is no mode that bypasses recording. Keep the WebUI available to inspect and resolve the storage problem. Requests already in progress are not explicitly interrupted by this admission policy; any recording loss affecting them must be reported.
 
 ### Rotation and Compression
