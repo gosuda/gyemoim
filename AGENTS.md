@@ -23,7 +23,7 @@ Then exercise changes by hand: run the binary (listens on http://127.0.0.1:9092/
 One Go module, one executable (`cmd/gyemoim/main.go`); all code lives under `internal/`:
 
 - `httpapi` — routes: `/api/` management, `/v1/` harness-facing Responses API, `/auth/callback` OAuth
-- `gateway` — service-account authentication and single-target model routing
+- `gateway` — service-account authentication, ordered routing and shared runtime cooldowns
 - `provider` — OpenAI Responses adapter; `siwc` — Sign in with ChatGPT OAuth
 - `config` — SQLite `config.db` holds providers, OAuth credentials, key hashes, model routes, grants — the only SQLite data
 - `history` — request history as NDJSON under `history/` (not SQLite): recorder, rotation, external zstd compression, date deletion, queries
@@ -31,15 +31,15 @@ One Go module, one executable (`cmd/gyemoim/main.go`); all code lives under `int
 
 ## Behavioral invariants — do not weaken these
 
-- Model aliases route to exactly one provider + upstream model; service accounts need explicit grants (never auto-grant); no automatic retries or fallback.
+- Model aliases default to `single` (exactly one provider + upstream model). Only explicitly configured `fallback` routes may advance through ordered targets, each at most once, on classified eligible failures before any downstream commitment. No same-target retries or implicit fallback. Service accounts need explicit grants (never auto-grant). See `docs/routing-runtime.md` for policy and durable lifecycle fences.
 - Upstream OpenAI requests always go out with `stream=true, store=false`; non-streaming client requests are collected. Unsupported request capabilities are classified: benign fields and unsupported tool types are dropped and recorded in history (`request_end.dropped_fields`); `role:"system"` items are rewritten to `developer`; `previous_response_id` and `conversation` produce explicit 400 errors (never silent context loss; no gateway-side state store). Untranslatable requests produce explicit errors. See `docs/harness-compatibility.md`.
 - `/v1/chat/completions` is served by translating to the Responses upstream (never forwarded natively); chat-path history stores the chat JSON as `incoming_request` and the translated Responses JSON as `effective_request`, with no schema change.
-- If request recording fails, new inference is blocked (no unlogged bypass); already-admitted requests continue. Admission (with the bounded 8-inference semaphore) happens before body reads.
+- If request recording fails, new inference is blocked (no unlogged bypass); already-transmitted streams may continue, but any failed required lifecycle/transmission fence forbids another target/send. Admission (with the bounded 8-inference semaphore held across all candidates) happens before body reads.
 - Limits: 8 concurrent inferences, 64 MiB incoming body and per-SSE-frame, 30 s body-read/downstream-write deadlines, no total SSE timeout. History queries use a 30 s deadline and return an explicit timeout, not partial results.
 
 ## History domain gotchas
 
-- Segment filenames are **not** chronological event order; fold records by elapsed offset/sequence. Both schema 1 and schema 2 records exist — never silently exclude legacy records or interrupted starts (starts without ends).
+- Segment filenames are **not** chronological event order; fold records by elapsed offset/sequence. Schemas 1, 2 and 3 coexist — never silently exclude legacy records or interrupted starts (starts without ends).
 - Date-range deletion: UTC half-open interval; **409 conflict with no changes** if any in-progress request overlaps the range. Deletion is crash-safe via a roll-forward journal; queries return 503 while recovery/maintenance is pending.
 - Compression shells out to the external `zstd` CLI from `PATH` — no zstd library.
 - Concurrency: take a fixed file snapshot with a *brief* recorder lock; never hold the writer mutex while acquiring a file lease (or vice versa).
@@ -53,4 +53,3 @@ Docs and UI text are in English.
 ## Live-upstream quirks (verified 2026-10-04)
 
 - `api.openai.com/v1/responses` currently sends **no `Content-Type` header at all** — on SSE streams and JSON error responses alike. Provider code must not require the header; `Send` sniffs the body when it is absent. The request ID arrives as `x-oai-request-id` (canonical `X-Oai-Request-Id`), not `X-Request-Id`.
-

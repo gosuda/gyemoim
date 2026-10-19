@@ -11,6 +11,15 @@ Gyemoim generates a `models.json` fragment for pi agent 1.0.0. This first integr
 
 The resulting fragment contains a `providers` object keyed by a stable identifier derived from the ServiceAccount ID. The server sends the fragment without a base URL; the UI JavaScript fills in `baseUrl` from the browser address (`window.location.origin + "/v1"`), so the saved provider points at whichever address the browser used to reach Gyemoim — loopback, LAN, or the https reverse proxy. The provider also uses `api: "openai-responses"` and the local Models' names as ids, which are the aliases pi sends back to Gyemoim. The fragment contains only Models explicitly granted to that ServiceAccount. It has no provider OAuth data, no stored local key, and no invented pricing.
 
+The Pi setup API exposes each alias's `strategy` and ordered `targets`, retaining
+the first-target `providerId`/`upstreamModel` projections. When every target uses
+the same upstream model, missing metadata may use that model's known catalog
+entry. When upstream models differ, all five metadata fields must be explicitly
+provided for the alias: `contextWindow`, `maxTokens`, `input`, `reasoning`, and
+`supportedReasoningEfforts`. These values are the operator's compatibility
+contract across every destination. The exporter never guesses capabilities from
+the first target or merges incompatible catalog specifications.
+
 ## Set the local key and merge the fragment
 
 Pi reads the configured `apiKey` from an environment variable. The UI displays a variable name such as `GYEMOIM_SERVICE_ACCOUNT_01234567_89AB_CDEF_0123_456789ABCDEF_API_KEY` and a shell command template. In the shell environment used to launch pi, replace the placeholder with the one-time Gyemoim key you copied:

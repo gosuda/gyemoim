@@ -100,8 +100,9 @@ This is a send-authorization fence, not proof that bytes reached the provider.
 
 ### Candidate lifecycle (schema 3)
 
-The recorder supports ordered candidate bookkeeping independently of the current
-single-target executor. It does not select routes, retry, or manage cooldowns.
+The recorder supports ordered candidate bookkeeping used by the common inference
+executor for single and explicitly configured fallback routes. The recorder
+itself does not select routes, retry, or manage cooldowns.
 
 - `attempt_start`: `candidate` (positive increasing number) and `provider`
   (`id`, `name`, `upstream_model`). `StartAttempt(Candidate)` writes and syncs this
@@ -133,7 +134,7 @@ per candidate. In explicit lifecycle mode, events and HTTP bodies must use
 truncated, readFailed)`. A stale transmission ID or a write after `EndAttempt` is
 rejected instead of being attached to a later target. The executor must finish or
 join a candidate's callbacks before ending it. Bare `Event`/`HTTPResponse` and bare
-`Transmit` remain compatible for the existing non-lifecycle harness; the two modes
+`Transmit` remain compatible for legacy Go callers; the two modes
 cannot be mixed within one request.
 
 Every start, skip, and attempt end is durable. Any error from a required lifecycle

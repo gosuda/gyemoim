@@ -1,9 +1,54 @@
 # Routing selection and runtime observations
 
-The harness currently executes **single** routes only. Management model writes
-remain single-only. The gateway's `fallback` strategy and observation policy are
-available as Go APIs, not activated inference behavior. Runtime snapshots may
-therefore be unobserved until an executor reports observations; no probes run.
+The harness executes `single` routes by default and `fallback` routes only when
+explicitly configured through the management API. Both Responses and Chat
+Completions, streaming and collected, use the same executor. Each request holds
+one admission slot and recorder handle across all candidates; no probes run.
+
+## Execution and commitment
+
+The executor reads the incoming body once (64 MiB maximum), snapshots the route,
+and replays the same request through `Prepare` with each selected upstream model.
+Chat translation is performed once; history retains the original chat request and
+each effective Responses request. Dropped fields are deduplicated per request.
+Upstream requests always use `stream=true` and `store=false`.
+
+Single retains its pre-admission local provider-readiness lease, with no token
+refresh before durable admission. Fallback acquires each candidate's lease after
+durable `StartAttempt`. Both release the lease before `Transmit` and upstream I/O.
+The lease rechecks connection changes after the route snapshot.
+
+Each skip, start, attempt end and transmission is a durable fence. Event and HTTP
+body records are bound to the current transmission. A failed fence or recording
+callback prohibits advancement, though already-transmitted streams may continue.
+Each upstream is closed before its attempt ends and before another decision.
+Candidate numbers are configured position plus one; transmission numbers count
+successful send fences, so pre-send auth failures and skips consume none.
+
+Streaming reads and validates events incrementally, delaying HTTP headers/flush
+until the first deliverable frame (or chat chunk). An eligible failure before
+that point may advance. Any attempted downstream header/body commitment forbids
+fallback, even if delivery then fails. Unknown initial model errors remain
+terminal; Responses streaming may deliver the original terminal frame.
+Non-streaming requests may advance before their final JSON/error is committed.
+Valid incomplete results, including token-limit results, do not cause fallback.
+Cancellation or request-context expiry stops without a target cooldown. No total
+SSE timeout is imposed.
+
+Delayed commitment also applies to `single`: a stream read/format failure before
+the first deliverable event now returns a JSON error with its safe HTTP status,
+rather than committing HTTP 200 and then emitting an SSE error. After commitment,
+errors remain SSE-framed and never switch targets. Non-streaming read errors retain
+their established codes: `upstream_frame_too_large` (502),
+`upstream_protocol_error` for invalid UTF-8/EOF (502), `upstream_timeout` (503),
+and `upstream_read_error` (502). These client envelopes are independent of the
+explicit failure classification used for fallback eligibility and cooldowns.
+
+One gateway request ID spans every attempt. Only the final/delivered attempt's
+upstream request ID and validated `Retry-After` are exposed to the client. After
+attempt exhaustion its last safe error is preserved. An all-skipped cooling route
+returns 503 with the minimum connected eligibility delay in `Retry-After`; an
+all-disconnected route returns 503 without that header.
 
 ## Authorized snapshot and selection
 
@@ -123,7 +168,7 @@ password change as other management endpoints. Harness bearer credentials do not
 authorize it. Other methods return 405. Responses are `Cache-Control: no-store`.
 
 The response has `observedAt` and a `models` list. Each model contains `id`,
-`name`, `strategy`, `executionEnabled` (currently only single), priority-ordered
+`name`, `strategy`, `executionEnabled` (single and fallback), priority-ordered
 `targets`, and an optional `predictedTarget`. Targets expose:
 
 - `providerId`, `upstreamModel`, and `status`: `disconnected`, `cooling`, or
@@ -140,7 +185,7 @@ Prediction follows the configured strategy: fallback's first eligible candidate;
 single's connected target **even if cooling**. An unavailable model exposes
 `unavailableReason` (`all_cooling`, `all_disconnected`, or
 `unsupported_strategy`) and, for all-cooling, minimum `retryAfterSeconds`.
-A fallback prediction is only a selector preview, not enabled harness execution.
+A prediction is only a selector preview, not an execution reservation.
 Configuration is read in one transaction, then runtime state under one brief
 lock. No transaction or runtime lock spans provider I/O. Predictions reserve
 nothing and may change before selection; provider connection status is derived

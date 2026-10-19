@@ -120,7 +120,7 @@ func New(store *config.Store, usage *KeyUsageTracker) *Service {
 	return &Service{store: store, strategy: Strategies{Runtime: runtime}, usage: usage, runtime: runtime}
 }
 
-// Runtime is shared by management diagnostics and the future executor.
+// Runtime is shared by management diagnostics and inference execution.
 func (s *Service) Runtime() *Runtime { return s.runtime }
 
 // AuthenticateBearer accepts exactly an Authorization value of the form

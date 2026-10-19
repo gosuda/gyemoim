@@ -14,12 +14,14 @@ var acceptedReasoningEfforts = map[string]bool{
 }
 
 type piSetupModel struct {
-	ModelID       string   `json:"modelId"`
-	Name          string   `json:"name"`
-	ProviderID    string   `json:"providerId"`
-	UpstreamModel string   `json:"upstreamModel"`
-	Ready         bool     `json:"ready"`
-	Reasons       []string `json:"reasons"`
+	ModelID       string               `json:"modelId"`
+	Name          string               `json:"name"`
+	ProviderID    string               `json:"providerId"`
+	UpstreamModel string               `json:"upstreamModel"`
+	Strategy      string               `json:"strategy"`
+	Targets       []config.ModelTarget `json:"targets"`
+	Ready         bool                 `json:"ready"`
+	Reasons       []string             `json:"reasons"`
 	// MetadataSource is set only for ready Models: "custom" when every
 	// exported field was entered by the user, "known-catalog" when every
 	// field came from the built-in verified spec catalog, "mixed" otherwise.
@@ -95,6 +97,7 @@ func (api *managementAPI) piAccountConfig(w http.ResponseWriter, r *http.Request
 			ModelID: model.ID, Name: model.Name, ProviderID: model.ProviderID,
 			UpstreamModel: model.UpstreamModel, Ready: len(reasons) == 0, Reasons: reasons,
 			MetadataSource: source,
+			Strategy:       model.Strategy, Targets: model.Targets,
 		})
 		if len(reasons) == 0 {
 			piModels = append(piModels, piModel)
@@ -132,6 +135,14 @@ func piModelForConfig(model config.Model) (piModel, []string, string) {
 		}
 	}
 	known, knownOK := lookupKnownModelSpec(model.UpstreamModel)
+	// A heterogeneous alias has its own capability contract. Never borrow the
+	// first destination's specs (or guess an intersection of catalog entries).
+	for _, target := range model.Targets {
+		if target.UpstreamModel != model.UpstreamModel {
+			knownOK = false
+			break
+		}
+	}
 
 	var reasons []string
 	userFields, catalogFields := 0, 0

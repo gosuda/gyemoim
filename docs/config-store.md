@@ -27,7 +27,17 @@ Create and full replacement (including reorder) are transactional. New or update
 
 All model reads include the ordered targets in the same SQLite statement as the model fields. Authorized route reads additionally snapshot the active key/account, grant, and all referenced Providers in one transaction, released before upstream I/O. `ResolveGrantedTargets` returns the provider map; `ResolveGrantedRoute` preserves the legacy first-Provider projection of the same full snapshot. The canonical target table is the read source; legacy model columns are compatibility projections, never an independent routing source. Direct SQL configuration writes are unsupported.
 
-Ordered storage is an internal contract only. Management requests still accept only `name`, `providerId`, `upstreamModel`, and `metadata`, and always save the `single` strategy. Responses retain the single-target JSON fields without exposing `Targets`. Internal `fallback` models have a gateway selector, but the harness still rejects non-single execution: no fallback requests or retries are enabled. Runtime cooldown observations are in memory, never configuration rows; see [routing runtime](routing-runtime.md).
+Management `POST /api/models` and `PUT /api/models/{id}` accept `name`, `strategy`, ordered `targets: [{providerId, upstreamModel}]`, and `metadata`. Omitted strategy defaults to `single` for legacy clients; omitted targets accept the legacy `providerId`/`upstreamModel` pair. A supplied target list is authoritative. Responses expose ordered `targets` and retain the first-target projections. Only `single` and explicitly opted-in `fallback` are accepted; single requires exactly one target, fallback 1–128. Duplicate pairs are rejected. Target strings are trimmed, nonempty UTF-8 and at most 1024 bytes each; provider names have the same byte bound, while model names retain their 128-Unicode-character bound. Unknown strategies and invalid target lists return 400; missing provider references return 404. Every target protects its provider from deletion.
+
+PUT accepts optional positive `expectedVersion` (or its alias `version`; both must agree when supplied). The comparison and complete route replacement occur atomically in the write transaction. A stale version returns 409 without changing targets, metadata, name or revision. Missing versions retain legacy unconditional replacement. Creation starts at version 1; successful replacements increment it once. Writes never create model grants automatically. The embedded WebUI remains a legacy single-target editor; ordered-route editing is API-only. Runtime cooldown observations are in memory, never configuration rows; see [routing runtime](routing-runtime.md).
+
+A PUT that omits `strategy` is accepted only when the stored route is still
+`single`. An atomic strategy predicate in the same replacement transaction rejects
+ambiguous legacy edits of fallback routes with 409 (`strategy_required`), leaving
+the full route and revision unchanged. This prevents the single-target WebUI from
+silently losing ordered targets, including when another client changes strategy
+concurrently. To intentionally replace a fallback route, clients must explicitly
+specify `strategy` (including an intentional downgrade to `single`).
 
 ## Read-only manual inspection
 

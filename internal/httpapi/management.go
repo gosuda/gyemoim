@@ -189,8 +189,8 @@ func (api *managementAPI) providers(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		name := strings.TrimSpace(input.Name)
-		if name == "" {
-			writeManagementError(w, http.StatusBadRequest, "name is required", "invalid_request")
+		if name == "" || len(name) > 1024 || !utf8.ValidString(name) {
+			writeManagementError(w, http.StatusBadRequest, "provider name must contain 1 to 1024 UTF-8 bytes", "invalid_request")
 			return
 		}
 		providerType := "openai"
@@ -385,8 +385,8 @@ func (api *managementAPI) provider(w http.ResponseWriter, r *http.Request, id st
 			return
 		}
 		name := strings.TrimSpace(input.Name)
-		if name == "" {
-			writeManagementError(w, http.StatusBadRequest, "name is required", "invalid_request")
+		if name == "" || len(name) > 1024 || !utf8.ValidString(name) {
+			writeManagementError(w, http.StatusBadRequest, "provider name must contain 1 to 1024 UTF-8 bytes", "invalid_request")
 			return
 		}
 		if err := api.store.RenameProvider(r.Context(), id, name); err != nil {
@@ -662,7 +662,12 @@ func (api *managementAPI) model(w http.ResponseWriter, r *http.Request, id strin
 			return
 		}
 		model.ID = id
-		if err := api.store.UpdateModel(r.Context(), model); err != nil {
+		if input.strategyExplicit {
+			err = api.store.UpdateModelExpected(r.Context(), model, input.ExpectedVersion)
+		} else {
+			err = api.store.UpdateModelLegacyExpected(r.Context(), model, input.ExpectedVersion)
+		}
+		if err != nil {
 			writeManagementFailure(w, err)
 			return
 		}
@@ -684,10 +689,15 @@ func (api *managementAPI) model(w http.ResponseWriter, r *http.Request, id strin
 }
 
 type modelInput struct {
-	Name          string          `json:"name"`
-	ProviderID    string          `json:"providerId"`
-	UpstreamModel string          `json:"upstreamModel"`
-	Metadata      json.RawMessage `json:"metadata"`
+	Name             string               `json:"name"`
+	ProviderID       string               `json:"providerId"`
+	UpstreamModel    string               `json:"upstreamModel"`
+	Metadata         json.RawMessage      `json:"metadata"`
+	Strategy         *string              `json:"strategy"`
+	Targets          []config.ModelTarget `json:"targets"`
+	Version          *int                 `json:"version"`
+	ExpectedVersion  *int                 `json:"expectedVersion"`
+	strategyExplicit bool
 }
 
 func decodeModelInput(w http.ResponseWriter, r *http.Request) (modelInput, bool) {
@@ -702,8 +712,42 @@ func decodeModelInput(w http.ResponseWriter, r *http.Request) (modelInput, bool)
 		writeManagementError(w, http.StatusBadRequest, "model name must contain 1 to 128 Unicode characters", "invalid_request")
 		return modelInput{}, false
 	}
-	if input.ProviderID == "" || input.UpstreamModel == "" {
-		writeManagementError(w, http.StatusBadRequest, "providerId and upstreamModel are required", "invalid_request")
+	strategy := "single"
+	input.strategyExplicit = input.Strategy != nil
+	if input.Strategy != nil {
+		strategy = strings.TrimSpace(*input.Strategy)
+	}
+	if strategy != "single" && strategy != "fallback" {
+		writeManagementError(w, http.StatusBadRequest, "strategy must be single or fallback", "invalid_request")
+		return modelInput{}, false
+	}
+	input.Strategy = &strategy
+	if input.Targets == nil {
+		input.Targets = []config.ModelTarget{{ProviderID: input.ProviderID, UpstreamModel: input.UpstreamModel}}
+	}
+	if len(input.Targets) == 0 || len(input.Targets) > config.MaxModelTargets || strategy == "single" && len(input.Targets) != 1 {
+		writeManagementError(w, http.StatusBadRequest, "single requires exactly one target; fallback requires 1 to 128 targets", "invalid_request")
+		return modelInput{}, false
+	}
+	seen := map[config.ModelTarget]bool{}
+	for i := range input.Targets {
+		target := &input.Targets[i]
+		target.ProviderID, target.UpstreamModel = strings.TrimSpace(target.ProviderID), strings.TrimSpace(target.UpstreamModel)
+		if target.ProviderID == "" || target.UpstreamModel == "" || len(target.ProviderID) > 1024 || len(target.UpstreamModel) > 1024 || !utf8.ValidString(target.ProviderID) || !utf8.ValidString(target.UpstreamModel) || seen[*target] {
+			writeManagementError(w, http.StatusBadRequest, "targets must contain unique complete pairs with strings of at most 1024 UTF-8 bytes", "invalid_request")
+			return modelInput{}, false
+		}
+		seen[*target] = true
+	}
+	if input.Version != nil {
+		if input.ExpectedVersion != nil && *input.Version != *input.ExpectedVersion {
+			writeManagementError(w, http.StatusBadRequest, "version and expectedVersion must match", "invalid_request")
+			return modelInput{}, false
+		}
+		input.ExpectedVersion = input.Version
+	}
+	if input.ExpectedVersion != nil && *input.ExpectedVersion < 1 {
+		writeManagementError(w, http.StatusBadRequest, "expectedVersion must be positive", "invalid_request")
 		return modelInput{}, false
 	}
 	if message := validatePiMetadata(input.Metadata); message != "" {
@@ -714,11 +758,13 @@ func decodeModelInput(w http.ResponseWriter, r *http.Request) (modelInput, bool)
 }
 
 func (api *managementAPI) makeModel(ctx context.Context, input modelInput) (config.Model, error) {
-	if _, err := api.store.GetProvider(ctx, input.ProviderID); err != nil {
-		return config.Model{}, err
+	for _, target := range input.Targets {
+		if _, err := api.store.GetProvider(ctx, target.ProviderID); err != nil {
+			return config.Model{}, err
+		}
 	}
 	return config.Model{
-		Name: input.Name, Strategy: "single", StrategyConfigJSON: json.RawMessage(`{}`),
+		Name: input.Name, Strategy: *input.Strategy, StrategyConfigJSON: json.RawMessage(`{}`), Targets: input.Targets,
 		ProviderID: input.ProviderID, UpstreamModel: input.UpstreamModel,
 		MetadataJSON: append(json.RawMessage(nil), input.Metadata...),
 	}, nil
@@ -805,6 +851,10 @@ func (api *managementAPI) listRejections(w http.ResponseWriter, r *http.Request)
 
 func writeManagementFailure(w http.ResponseWriter, err error) {
 	switch {
+	case errors.Is(err, config.ErrStrategyRequired):
+		writeManagementError(w, http.StatusConflict, "Specify strategy explicitly to replace a fallback route; legacy single-target edits are not allowed.", "strategy_required")
+	case errors.Is(err, config.ErrInvalidModel):
+		writeManagementError(w, http.StatusBadRequest, "invalid model configuration", "invalid_request")
 	case errors.Is(err, config.ErrNotFound):
 		writeManagementError(w, http.StatusNotFound, "resource not found", "not_found")
 	case errors.Is(err, config.ErrForbidden):

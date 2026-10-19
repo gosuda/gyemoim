@@ -87,7 +87,10 @@ including comments, unknown events, and original line framing. CR-only line endi
 are not recognized as delimiters. Parsed event data joins multiple `data:` lines with a
 newline. Invalid UTF-8 is an error; it is never replaced. The final unterminated
 frame is returned with `Complete:false` for history/debugging, then the reader
-returns EOF. A partial frame can never establish completion.
+returns EOF. A partial frame can never establish completion. Complete data frames
+that are not JSON objects carry `MalformedData`; their bytes remain available for
+history but the executor treats them as protocol failures, eligible for explicit
+fallback only before downstream commitment.
 
 Only a complete `response.completed` event with a response object reports
 `Outcome:"completed"`. `response.failed` and an explicit `error` event report
@@ -116,9 +119,13 @@ timing fields and adds authentication preparation and downstream delivery timing
 
 `POST /v1/responses` authenticates the local bearer key, admits at most eight inferences,
 then reads a request body capped at 64 MiB (with a 30-second body-read deadline). It
-resolves one authorized immutable Model target and durably begins history before adapter
-capability checks or SIWC access-token preparation. It durably records the effective
-upstream request before `Send`. There are no retries or fallback attempts.
+resolves an authorized immutable Model/ordered-provider snapshot and durably begins
+history before adapter capability checks or SIWC access-token refresh. Single's
+local readiness lease remains pre-admission. Each selected candidate starts durably
+before authentication work, and the effective upstream request is recorded durably
+before `Send`. Single never retries; explicit fallback may advance before downstream
+commitment under the [routing policy](routing-runtime.md). Each target is used at
+most once. Streaming headers are delayed until the first deliverable valid frame.
 
 The gateway synchronously reads, records, and forwards each complete SSE frame so a slow
 downstream applies backpressure to upstream reading. Raw upstream frame bytes are
@@ -128,8 +135,9 @@ flush has a 30-second deadline; an active SSE stream has no overall deadline. Th
 provider request ID is recorded separately and returned as `X-Upstream-Request-ID`.
 
 A terminal event is accepted only when its event type and nested response status agree
-(for example, `response.completed` with `response.status: completed`). Complete raw events are
-forwarded unchanged. A final unterminated frame is retained in history and withheld from
+(for example, `response.completed` with `response.status: completed`). Valid complete
+events selected for delivery are forwarded unchanged; discarded precommit failures
+remain in attempt history only. A final unterminated frame is retained in history and withheld from
 the client so it cannot corrupt SSE framing. Clean EOF without a terminal event sends a
 safe SSE error event and ends as `incomplete`; provider stream read errors send the same
 kind of safe SSE error and end as `failed`. A downstream write failure ends as `cancelled`. Terminal usage is kept

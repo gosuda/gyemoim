@@ -49,7 +49,7 @@ func (r *Runtime) Snapshot(snapshot config.RoutingSnapshot, now time.Time) Routi
 	result := RoutingStatus{ObservedAt: now.UTC(), Models: make([]ModelRoutingStatus, 0, len(snapshot.Models))}
 	for _, model := range snapshot.Models {
 		status := ModelRoutingStatus{ID: model.ID, Name: model.Name, Strategy: model.Strategy,
-			ExecutionEnabled: model.Strategy == "single", Targets: make([]TargetStatus, 0, len(model.Targets))}
+			ExecutionEnabled: model.Strategy == "single" || model.Strategy == "fallback", Targets: make([]TargetStatus, 0, len(model.Targets))}
 		var earliest time.Time
 		for _, configured := range model.Targets {
 			target := Target{ProviderID: configured.ProviderID, UpstreamModel: configured.UpstreamModel}

@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 type scanner interface {
@@ -648,6 +649,23 @@ func (s *Store) CreateModel(ctx context.Context, model Model) (Model, error) {
 // UpdateModel replaces a routing configuration (including target order) and
 // increments its revision once, atomically. A failed replacement changes nothing.
 func (s *Store) UpdateModel(ctx context.Context, model Model) error {
+	return s.UpdateModelExpected(ctx, model, nil)
+}
+
+// UpdateModelExpected atomically compares the optional revision and replaces the
+// complete route. A nil revision preserves legacy unconditional replacement.
+func (s *Store) UpdateModelExpected(ctx context.Context, model Model, expected *int) error {
+	return s.updateModelExpected(ctx, model, expected, false)
+}
+
+// UpdateModelLegacyExpected preserves legacy single-route replacement without
+// allowing strategy-omitting clients to collapse an ordered route. The current
+// strategy guard and optional revision check share the atomic UPDATE predicate.
+func (s *Store) UpdateModelLegacyExpected(ctx context.Context, model Model, expected *int) error {
+	return s.updateModelExpected(ctx, model, expected, true)
+}
+
+func (s *Store) updateModelExpected(ctx context.Context, model Model, expected *int, legacySingle bool) error {
 	if strings.TrimSpace(model.Name) == "" || strings.TrimSpace(model.Strategy) == "" {
 		return errors.New("model name and strategy are required")
 	}
@@ -664,13 +682,35 @@ func (s *Store) UpdateModel(ctx context.Context, model Model) error {
 		return fmt.Errorf("begin model replacement: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	result, err := tx.ExecContext(ctx, `UPDATE models SET name = ?, strategy = ?, version = version + 1, strategy_config_json = ?, metadata_json = ?, updated_at = ? WHERE id = ?`,
-		model.Name, model.Strategy, string(strategyConfig), nullableJSON(metadata), timestamp, model.ID)
+	query := `UPDATE models SET name = ?, strategy = ?, version = version + 1, strategy_config_json = ?, metadata_json = ?, updated_at = ? WHERE id = ?`
+	args := []any{model.Name, model.Strategy, string(strategyConfig), nullableJSON(metadata), timestamp, model.ID}
+	if expected != nil {
+		query += ` AND version = ?`
+		args = append(args, *expected)
+	}
+	if legacySingle {
+		query += ` AND strategy = 'single'`
+	}
+	result, err := tx.ExecContext(ctx, query, args...)
 	if err != nil {
 		if isUniqueConstraint(err) {
 			return ErrConflict
 		}
 		return fmt.Errorf("update model: %w", err)
+	}
+	if n, err := result.RowsAffected(); err != nil {
+		return err
+	} else if n == 0 {
+		var strategy string
+		if err := tx.QueryRowContext(ctx, `SELECT strategy FROM models WHERE id = ?`, model.ID).Scan(&strategy); errors.Is(err, sql.ErrNoRows) {
+			return notFound("model", model.ID)
+		} else if err != nil {
+			return err
+		}
+		if legacySingle && strategy != "single" {
+			return ErrStrategyRequired
+		}
+		return ErrConflict
 	}
 	if err := requireAffected(result, "model", model.ID); err != nil {
 		return err
@@ -685,23 +725,32 @@ func (s *Store) UpdateModel(ctx context.Context, model Model) error {
 }
 
 func normalizeModelTargets(model *Model) error {
+	model.Name = strings.TrimSpace(model.Name)
+	model.Strategy = strings.TrimSpace(model.Strategy)
+	if model.Strategy != "single" && model.Strategy != "fallback" {
+		return fmt.Errorf("%w: unsupported strategy", ErrInvalidModel)
+	}
 	targets := model.Targets
 	if targets == nil && (model.ProviderID != "" || model.UpstreamModel != "") {
 		targets = []ModelTarget{{ProviderID: model.ProviderID, UpstreamModel: model.UpstreamModel}}
 	}
-	if len(targets) == 0 {
-		return errors.New("model must have at least one target")
+	if len(targets) == 0 || len(targets) > MaxModelTargets {
+		return fmt.Errorf("%w: model requires 1 to 128 targets", ErrInvalidModel)
 	}
 	if model.Strategy == "single" && len(targets) != 1 {
-		return errors.New("single strategy requires exactly one target")
+		return fmt.Errorf("%w: single strategy requires exactly one target", ErrInvalidModel)
 	}
+	targets = append([]ModelTarget(nil), targets...)
 	seen := make(map[ModelTarget]struct{}, len(targets))
-	for _, target := range targets {
-		if strings.TrimSpace(target.ProviderID) == "" || strings.TrimSpace(target.UpstreamModel) == "" {
-			return errors.New("model target provider ID and upstream model are required")
+	for i := range targets {
+		targets[i].ProviderID = strings.TrimSpace(targets[i].ProviderID)
+		targets[i].UpstreamModel = strings.TrimSpace(targets[i].UpstreamModel)
+		target := targets[i]
+		if target.ProviderID == "" || target.UpstreamModel == "" || len(target.ProviderID) > 1024 || len(target.UpstreamModel) > 1024 || !utf8.ValidString(target.ProviderID) || !utf8.ValidString(target.UpstreamModel) {
+			return fmt.Errorf("%w: target strings require 1 to 1024 bytes", ErrInvalidModel)
 		}
 		if _, duplicate := seen[target]; duplicate {
-			return errors.New("duplicate model target provider and upstream model pair")
+			return fmt.Errorf("%w: duplicate target", ErrInvalidModel)
 		}
 		seen[target] = struct{}{}
 	}

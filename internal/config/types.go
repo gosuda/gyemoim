@@ -13,6 +13,10 @@ var ErrUnauthorized = errors.New("configuration identity is no longer active")
 var ErrForbidden = errors.New("configuration permission denied")
 var ErrConflict = errors.New("configuration conflict")
 var ErrReferenced = errors.New("configuration record is still referenced")
+var ErrInvalidModel = errors.New("invalid model configuration")
+var ErrStrategyRequired = errors.New("explicit strategy is required to replace this route")
+
+const MaxModelTargets = 128
 
 // Provider is the non-secret, UI-safe part of an upstream connection.
 type Provider struct {
@@ -82,17 +86,17 @@ type ModelTarget struct {
 }
 
 // Model is a named route with ordered, referentially-integral targets. Targets is
-// internal configuration, not yet a management API field. On writes a non-nil
+// exposed in management responses. On writes a non-nil
 // Targets list is canonical; nil accepts the legacy ProviderID/UpstreamModel pair.
 // On reads those legacy fields project the first target. Single strategy models
-// require exactly one target; other stored strategies are not executable yet.
+// require exactly one target; fallback executes its targets in order.
 type Model struct {
 	ID                 string          `json:"id"`
 	Name               string          `json:"name"`
 	Strategy           string          `json:"strategy"`
 	Version            int             `json:"version"`
 	StrategyConfigJSON json.RawMessage `json:"strategyConfig"`
-	Targets            []ModelTarget   `json:"-"`
+	Targets            []ModelTarget   `json:"targets"`
 	ProviderID         string          `json:"providerId,omitempty"`
 	UpstreamModel      string          `json:"upstreamModel,omitempty"`
 	MetadataJSON       json.RawMessage `json:"metadata,omitempty"`

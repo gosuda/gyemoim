@@ -1017,6 +1017,9 @@ type SSEEvent struct {
 	Terminal         bool
 	Outcome          string
 	JSONTypeMismatch bool
+	// MalformedData identifies complete data frames that are not JSON objects.
+	// Keep their raw bytes for history; the executor decides precommit fallback.
+	MalformedData bool
 }
 
 // Usage mirrors the provider-reported totals and subset counts. Nil pointers mean
@@ -1185,6 +1188,7 @@ func parseEvent(frame []byte, complete bool) SSEEvent {
 	if hasData && json.Valid(data) {
 		event.DataJSON = json.RawMessage(data)
 	}
+	event.MalformedData = complete && hasData && !jsonObject(event.DataJSON)
 	if len(event.DataJSON) > 0 {
 		var envelope struct {
 			Type     string          `json:"type"`

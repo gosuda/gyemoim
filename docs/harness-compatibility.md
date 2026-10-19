@@ -2,7 +2,7 @@
 
 This document specifies how Gyemoim accepts requests from harnesses beyond the
 Responses-native pi agent. All other invariants are unchanged:
-recording-before-inference, single-target routing, no retries or fallback,
+recording-before-inference, single by default with explicit ordered fallback only,
 `stream=true` / `store=false` upstream, bounded sizes and deadlines.
 
 ## Rationale
@@ -92,7 +92,7 @@ replay complexity is not justified. Therefore:
 
 `POST /v1/chat/completions` is served by translating to the Responses
 upstream. `/v1/models` is unchanged and shared by both formats. Upstream
-remains the single Responses + SIWC path: single-target routing, explicit
+remains the shared Responses + SIWC path: the same single/fallback routing, explicit
 grants, the admission semaphore, body/frame limits, deadlines, and
 recording-before-inference all apply unchanged. The translation layer lives in
 the provider layer (`internal/provider`).
